@@ -4,8 +4,12 @@
  */
 
 import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Animated } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Animated, Image } from 'react-native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2Shadows, BCH2BorderRadius } from './BCH2Theme';
+
+// Coin logos
+const BCH2_LOGO = require('../img/bch2-logo-small.png');
+const BC2_LOGO = require('../img/bc2-logo-small.png');
 
 interface BCH2WalletCardProps {
   balance: number;
@@ -47,12 +51,19 @@ export const BCH2WalletCard: React.FC<BCH2WalletCardProps> = ({
     >
       {/* Header */}
       <View style={styles.header}>
-        <View style={[styles.coinBadge, { backgroundColor: primaryColor }]}>
-          <Text style={styles.coinBadgeText}>{coinSymbol}</Text>
+        <Image
+          source={isBC2 ? BC2_LOGO : BCH2_LOGO}
+          style={styles.coinLogo}
+          resizeMode="contain"
+        />
+        <View style={styles.headerText}>
+          <Text style={styles.label}>
+            {isBC2 ? 'Bitcoin Core 2' : 'Bitcoin Cash II'}
+          </Text>
+          <View style={[styles.coinBadge, { backgroundColor: primaryColor }]}>
+            <Text style={styles.coinBadgeText}>{coinSymbol}</Text>
+          </View>
         </View>
-        <Text style={styles.label}>
-          {isBC2 ? 'Bitcoin Core 2' : 'Bitcoin Cash II'}
-        </Text>
       </View>
 
       {/* Balance */}
@@ -115,11 +126,21 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: BCH2Spacing.md,
   },
+  coinLogo: {
+    width: 48,
+    height: 48,
+    marginRight: BCH2Spacing.md,
+  },
+  headerText: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
   coinBadge: {
     paddingHorizontal: BCH2Spacing.sm,
     paddingVertical: BCH2Spacing.xs,
     borderRadius: BCH2BorderRadius.sm,
-    marginRight: BCH2Spacing.sm,
   },
   coinBadgeText: {
     color: BCH2Colors.textPrimary,
@@ -128,7 +149,8 @@ const styles = StyleSheet.create({
   },
   label: {
     color: BCH2Colors.textSecondary,
-    fontSize: BCH2Typography.fontSize.sm,
+    fontSize: BCH2Typography.fontSize.base,
+    fontWeight: BCH2Typography.fontWeight.medium,
   },
   balanceContainer: {
     flexDirection: 'row',

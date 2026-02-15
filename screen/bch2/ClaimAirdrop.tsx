@@ -13,7 +13,12 @@ import {
   ScrollView,
   ActivityIndicator,
   Alert,
+  Image,
 } from 'react-native';
+
+// Coin logos
+const BC2_LOGO = require('../../img/bc2-logo-small.png');
+const BCH2_LOGO = require('../../img/bch2-logo-small.png');
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2Shadows, BCH2BorderRadius } from '../../components/BCH2Theme';
 import { claimFromWIF, claimFromMnemonic, AirdropClaimResult } from '../../class/bch2-airdrop';
 
@@ -83,6 +88,19 @@ export const ClaimAirdropScreen: React.FC = () => {
           BCH2 forked from BC2 at block 53,200. If you held BC2 at that time,
           you have the same balance on BCH2!
         </Text>
+      </View>
+
+      {/* Coin Conversion Visual */}
+      <View style={styles.conversionCard}>
+        <View style={styles.conversionCoin}>
+          <Image source={BC2_LOGO} style={styles.coinLogo} resizeMode="contain" />
+          <Text style={styles.coinLabel}>BC2</Text>
+        </View>
+        <Text style={styles.conversionArrow}>→</Text>
+        <View style={styles.conversionCoin}>
+          <Image source={BCH2_LOGO} style={styles.coinLogo} resizeMode="contain" />
+          <Text style={styles.coinLabelAccent}>BCH2</Text>
+        </View>
       </View>
 
       {/* Info Card */}
@@ -230,6 +248,38 @@ const styles = StyleSheet.create({
     fontSize: BCH2Typography.fontSize.base,
     color: BCH2Colors.textSecondary,
     lineHeight: 22,
+  },
+  conversionCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: BCH2Colors.backgroundCard,
+    borderRadius: BCH2BorderRadius.lg,
+    padding: BCH2Spacing.lg,
+    marginBottom: BCH2Spacing.lg,
+  },
+  conversionCoin: {
+    alignItems: 'center',
+  },
+  coinLogo: {
+    width: 56,
+    height: 56,
+    marginBottom: BCH2Spacing.sm,
+  },
+  coinLabel: {
+    fontSize: BCH2Typography.fontSize.lg,
+    fontWeight: BCH2Typography.fontWeight.bold,
+    color: BCH2Colors.bc2Primary,
+  },
+  coinLabelAccent: {
+    fontSize: BCH2Typography.fontSize.lg,
+    fontWeight: BCH2Typography.fontWeight.bold,
+    color: BCH2Colors.primary,
+  },
+  conversionArrow: {
+    fontSize: 32,
+    color: BCH2Colors.textMuted,
+    marginHorizontal: BCH2Spacing.xl,
   },
   infoCard: {
     backgroundColor: BCH2Colors.backgroundCard,
