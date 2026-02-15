@@ -11,6 +11,7 @@ import {
   ScrollView,
   TouchableOpacity,
   RefreshControl,
+  Image,
 } from 'react-native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2BorderRadius, BCH2Shadows } from '../../components/BCH2Theme';
 import BCH2WalletCard from '../../components/BCH2WalletCard';
@@ -50,9 +51,16 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
       {/* Header */}
       <View style={styles.header}>
         <View style={styles.logoContainer}>
-          <Text style={styles.logoText}>BCH2</Text>
+          <Image
+            source={require('../../img/bch2-logo-small.png')}
+            style={styles.logoImage}
+            resizeMode="contain"
+          />
           <Text style={styles.logoSubtext}>Wallet</Text>
         </View>
+        <TouchableOpacity onPress={() => navigation.navigate('BCH2Settings')}>
+          <Text style={styles.settingsIcon}>⚙️</Text>
+        </TouchableOpacity>
       </View>
 
       <ScrollView
@@ -167,20 +175,26 @@ const styles = StyleSheet.create({
     backgroundColor: BCH2Colors.backgroundSecondary,
     borderBottomWidth: 1,
     borderBottomColor: BCH2Colors.border,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
   },
   logoContainer: {
     flexDirection: 'row',
-    alignItems: 'baseline',
+    alignItems: 'center',
   },
-  logoText: {
-    fontSize: BCH2Typography.fontSize.xxl,
-    fontWeight: BCH2Typography.fontWeight.bold,
-    color: BCH2Colors.primary,
+  logoImage: {
+    width: 40,
+    height: 40,
+    marginRight: BCH2Spacing.sm,
   },
   logoSubtext: {
-    fontSize: BCH2Typography.fontSize.lg,
-    color: BCH2Colors.textSecondary,
-    marginLeft: BCH2Spacing.sm,
+    fontSize: BCH2Typography.fontSize.xl,
+    fontWeight: BCH2Typography.fontWeight.bold,
+    color: BCH2Colors.textPrimary,
+  },
+  settingsIcon: {
+    fontSize: 24,
   },
   scrollView: {
     flex: 1,

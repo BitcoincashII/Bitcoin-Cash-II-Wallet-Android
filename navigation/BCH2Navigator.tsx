@@ -15,6 +15,7 @@ import BCH2Receive from '../screen/bch2/BCH2Receive';
 import BCH2Send from '../screen/bch2/BCH2Send';
 import BCH2Settings from '../screen/bch2/BCH2Settings';
 import BCH2WalletDetail from '../screen/bch2/BCH2WalletDetail';
+import AddWallet from '../screen/bch2/AddWallet';
 
 const Stack = createNativeStackNavigator<BCH2RootStackParamList>();
 
@@ -90,6 +91,15 @@ export const BCH2Navigator: React.FC = () => {
         component={BCH2WalletDetailWrapper}
         options={{
           title: 'Wallet',
+          headerBackTitle: 'Back',
+        }}
+      />
+
+      <Stack.Screen
+        name="AddWallet"
+        component={AddWallet}
+        options={{
+          title: 'Add Wallet',
           headerBackTitle: 'Back',
         }}
       />
