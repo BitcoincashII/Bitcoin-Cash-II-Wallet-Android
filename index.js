@@ -6,8 +6,7 @@ import './shim.js';
 import React, { useEffect } from 'react';
 import { AppRegistry, LogBox } from 'react-native';
 
-import App from './App';
-import { restoreSavedPreferredFiatCurrencyAndExchangeFromStorage } from './blue_modules/currency';
+import BCH2App from './BCH2App';
 
 if (!Error.captureStackTrace) {
   // captureStackTrace is only available when debugging
@@ -21,12 +20,4 @@ LogBox.ignoreLogs([
   'Non-serializable values were found in the navigation state',
 ]);
 
-const BlueAppComponent = () => {
-  useEffect(() => {
-    restoreSavedPreferredFiatCurrencyAndExchangeFromStorage();
-  }, []);
-
-  return <App />;
-};
-
-AppRegistry.registerComponent('BlueWallet', () => BlueAppComponent);
+AppRegistry.registerComponent('BlueWallet', () => BCH2App);
