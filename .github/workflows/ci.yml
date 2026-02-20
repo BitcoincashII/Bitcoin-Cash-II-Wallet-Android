@@ -1,0 +1,95 @@
+name: Tests
+
+# https://dev.to/edvinasbartkus/running-react-native-detox-tests-for-ios-and-android-on-github-actions-2ekn
+# https://medium.com/@reime005/the-best-ci-cd-for-react-native-with-e2e-support-4860b4aaab29
+
+env:
+  HD_MNEMONIC: ${{ secrets.HD_MNEMONIC }}
+  HD_MNEMONIC_BIP84: ${{ secrets.HD_MNEMONIC_BIP84 }}
+
+on: [pull_request]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout project
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    - name: Specify node version
+      uses: actions/setup-node@v6
+      with:
+        node-version: 24
+        cache: 'npm'
+        cache-dependency-path: package-lock.json
+
+    - name: Install node_modules
+      run: npm ci || npm ci
+
+    - name: Run tests
+      run: npm run lint
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout project
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    - name: Specify node version
+      uses: actions/setup-node@v6
+      with:
+        node-version: 24
+        cache: 'npm'
+        cache-dependency-path: package-lock.json
+
+    - name: Install node_modules
+      run: npm ci || npm ci
+
+    - name: Run tests
+      run: npm run unit
+      env:
+        BIP47_HD_MNEMONIC: ${{ secrets.BIP47_HD_MNEMONIC}}
+        HD_MNEMONIC: ${{ secrets.HD_MNEMONIC }}
+        HD_MNEMONIC_BIP49: ${{ secrets.HD_MNEMONIC_BIP49 }}
+        HD_MNEMONIC_BIP49_MANY_TX: ${{ secrets.HD_MNEMONIC_BIP49_MANY_TX }}
+        HD_MNEMONIC_BIP84: ${{ secrets.HD_MNEMONIC_BIP84 }}
+        HD_MNEMONIC_BREAD: ${{ secrets.HD_MNEMONIC_BREAD }}
+        FAULTY_ZPUB: ${{ secrets.FAULTY_ZPUB }}
+        MNEMONICS_COBO: ${{ secrets.MNEMONICS_COBO }}
+        MNEMONICS_COLDCARD: ${{ secrets.MNEMONICS_COLDCARD }}
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout project
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    - name: Specify node version
+      uses: actions/setup-node@v6
+      with:
+        node-version: 24
+        cache: 'npm'
+        cache-dependency-path: package-lock.json
+
+    - name: Install node_modules
+      run: npm ci || npm ci
+
+    - name: Run tests
+      run: npm run integration || npm run integration || npm run integration || npm run integration
+      env:
+        BIP47_HD_MNEMONIC: ${{ secrets.BIP47_HD_MNEMONIC}}
+        HD_MNEMONIC: ${{ secrets.HD_MNEMONIC }}
+        HD_MNEMONIC_BIP49: ${{ secrets.HD_MNEMONIC_BIP49 }}
+        HD_MNEMONIC_BIP49_MANY_TX: ${{ secrets.HD_MNEMONIC_BIP49_MANY_TX }}
+        HD_MNEMONIC_BIP84: ${{ secrets.HD_MNEMONIC_BIP84 }}
+        HD_MNEMONIC_BREAD: ${{ secrets.HD_MNEMONIC_BREAD }}
+        FAULTY_ZPUB: ${{ secrets.FAULTY_ZPUB }}
+        MNEMONICS_COBO: ${{ secrets.MNEMONICS_COBO }}
+        MNEMONICS_COLDCARD: ${{ secrets.MNEMONICS_COLDCARD }}
+        RETRY: 1

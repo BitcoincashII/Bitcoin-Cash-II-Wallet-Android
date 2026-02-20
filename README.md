@@ -1,49 +1,69 @@
-# Bitcoin Cash II Wallet for Android
+# Bitcoin Cash II Wallet
 
-Official Android wallet for Bitcoin Cash II (BCH2) and BitcoinII (BC2).
-
-## Download
-
-Download the latest APK: [Bitcoin-Cash-II-Wallet.apk](./Bitcoin-Cash-II-Wallet.apk)
+The official mobile wallet for Bitcoin Cash II (BCH2) and BitcoinII (BC2).
 
 ## Features
 
-- Create and import BCH2 wallets
-- Create and import BC2 wallets
-- Send and receive BCH2
-- Send and receive BC2
-- Claim BCH2 airdrop from BC2 wallets
-- View transaction history
-- QR code support
+- **BCH2 & BC2 Support** - Full wallet support for both chains
+- **Create & Import Wallets** - Generate new wallets or restore from seed phrase
+- **BCH2 Airdrop Claiming** - Claim BCH2 from BC2 holdings at fork height 53,200
+- **Non-Custodial** - Your keys, your coins
+- **CashAddr Format** - BCH2 uses `bitcoincashii:` address prefix
+- **Legacy Format** - BC2 uses standard legacy addresses
+- **Electrum Connection** - Fast sync via Electrum servers
+- **QR Code Support** - Scan and generate QR codes
 
-## Supported Coins
+## Download
 
-| Coin | Address Format | Network |
-|------|---------------|---------|
-| BCH2 | CashAddr (bitcoincashii:) | Bitcoin Cash II |
-| BC2 | Legacy (1xxx) | BitcoinII |
+Download the latest APK from [Releases](https://github.com/BitcoincashII/Bitcoin-Cash-II-Wallet-Android/releases).
 
-## Installation
+## Electrum Servers
 
-1. Download the APK file
-2. Enable "Install from unknown sources" in Android settings
-3. Open the APK file to install
+**BCH2:**
+- electrum.bch2.org:50002 (SSL)
+- electrum2.bch2.org:50002 (SSL)
 
-## Security
+**BC2:**
+- infra1.bitcoin-ii.org:50009 (SSL)
+- explorer.bitcoin-ii.org:50009 (SSL)
 
-- Private keys are stored locally on your device
-- Keys never leave your device
-- Always backup your recovery phrase
+## Block Explorers
 
-## Verification
+- **BCH2:** https://explorer.bch2.org
+- **BC2:** https://explorer.bitcoin-ii.org
 
-**APK MD5:** `506a0fa43b2a0f94facccfceb25457a0`
+## Network Information
 
-## Links
+| Parameter | BCH2 | BC2 |
+|-----------|------|-----|
+| Address Format | CashAddr (`bitcoincashii:`) | Legacy (`1...`) |
+| Fork Height | Block 53,200 | - |
+| Derivation Path | m/44'/145'/0' | m/44'/145'/0' |
 
-- Website: https://bch2.org
-- BC2 Explorer: https://explorer.bitcoin-ii.org
-- BCH2 Explorer: https://explorer.bch2.org
+## Building from Source
+
+### Requirements
+
+- Node.js 20+
+- Java 17+
+- Android SDK 35
+- Yarn
+
+### Build
+
+```bash
+yarn install
+cd android
+./gradlew assembleRelease
+```
+
+APK output: `android/app/build/outputs/apk/release/app-release-unsigned.apk`
+
+## Support
+
+- **Report Bugs:** dev@bitcoincashii.org
+- **Website:** https://bch2.org
+- **BC2 Website:** https://bitcoin-ii.org
 
 ## License
 
