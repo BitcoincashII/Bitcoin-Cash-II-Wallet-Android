@@ -174,25 +174,35 @@ export class BCH2Wallet extends AbstractWallet {
    */
   static isValidAddress(address: string): boolean {
     try {
-      // Remove prefix
       let addr = address.toLowerCase();
-      const prefixes = ['bitcoincashii:', 'bitcoincash:', 'bchtest:'];
-      for (const prefix of prefixes) {
-        if (addr.startsWith(prefix)) {
-          addr = addr.slice(prefix.length);
+      let prefix = 'bitcoincashii';
+      const knownPrefixes = ['bitcoincashii:', 'bitcoincash:', 'bchtest:'];
+      for (const p of knownPrefixes) {
+        if (addr.startsWith(p)) {
+          prefix = p.slice(0, -1); // Remove trailing ':'
+          addr = addr.slice(p.length);
           break;
         }
       }
 
-      // Decode and verify checksum
-      let data: number[] = [];
+      // Decode payload
+      const data: number[] = [];
       for (const char of addr) {
         const idx = CHARSET.indexOf(char);
         if (idx === -1) return false;
         data.push(idx);
       }
 
-      return data.length >= 34 && data.length <= 42;
+      if (data.length < 34 || data.length > 42) return false;
+
+      // Verify polymod checksum
+      const prefixData: number[] = [];
+      for (const char of prefix) {
+        prefixData.push(char.charCodeAt(0) & 0x1f);
+      }
+      prefixData.push(0);
+
+      return cashAddrPolymod([...prefixData, ...data]) === 1;
     } catch {
       return false;
     }
@@ -220,10 +230,15 @@ function hash160(data: Buffer): Buffer {
  * Encode pubkey hash to CashAddr format
  */
 function encodeCashAddr(prefix: string, type: number, hash: Buffer): string {
-  // Convert hash to 5-bit groups
-  const payload = [type];
-  let acc = 0;
-  let bits = 0;
+  // Determine size code from hash length
+  const sizeMap: Record<number, number> = { 20: 0, 24: 1, 28: 2, 32: 3, 40: 4, 48: 5, 56: 6, 64: 7 };
+  const sizeCode = sizeMap[hash.length] ?? 0;
+
+  // Pack version byte (type << 3 | sizeCode) as 8 bits with hash into 5-bit groups
+  const versionByte = (type << 3) | sizeCode;
+  const payload: number[] = [];
+  let acc = versionByte;
+  let bits = 8;
 
   for (const byte of hash) {
     acc = (acc << 8) | byte;
