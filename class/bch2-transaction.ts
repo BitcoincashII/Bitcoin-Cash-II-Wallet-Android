@@ -549,45 +549,71 @@ function decodeLegacyAddress(address: string): Buffer {
 function decodeCashAddr(address: string): Buffer {
   const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 
-  // Remove prefix
+  // Determine prefix
   let addr = address.toLowerCase();
+  let prefix: string;
   if (addr.startsWith('bitcoincashii:')) {
+    prefix = 'bitcoincashii';
     addr = addr.slice(14);
   } else if (addr.startsWith('bitcoincash:')) {
+    prefix = 'bitcoincash';
     addr = addr.slice(12);
+  } else {
+    // No prefix — assume bitcoincashii
+    prefix = 'bitcoincashii';
   }
 
   // Decode base32
-  const data: number[] = [];
+  const values: number[] = [];
   for (const char of addr) {
     const idx = CHARSET.indexOf(char);
     if (idx === -1) throw new Error('Invalid character in address');
-    data.push(idx);
+    values.push(idx);
   }
 
-  if (data.length < 8) throw new Error('Address too short');
+  if (values.length < 8) throw new Error('Address too short');
 
-  // Remove checksum (8 chars)
-  const payload = data.slice(0, -8);
+  // Validate checksum: polymod must equal 1 (encode XORs with 1)
+  const prefixData: number[] = [];
+  for (const char of prefix) {
+    prefixData.push(char.charCodeAt(0) & 0x1f);
+  }
+  prefixData.push(0);
+  if (cashAddrPolymod([...prefixData, ...values]) !== 1) {
+    throw new Error('Invalid CashAddr checksum');
+  }
 
-  // Convert from 5-bit to 8-bit
+  // Remove checksum (last 8 values)
+  const data = values.slice(0, -8);
+
+  // Unpack: convert 5-bit groups back to 8-bit version byte + hash
   let acc = 0;
   let bits = 0;
-  const result: number[] = [];
+  let versionByte = 0;
+  let versionExtracted = false;
+  const hashBytes: number[] = [];
 
-  for (const value of payload) {
-    acc = (acc << 5) | value;
+  for (let i = 0; i < data.length; i++) {
+    acc = (acc << 5) | data[i];
     bits += 5;
-    while (bits >= 8) {
+
+    if (!versionExtracted && bits >= 8) {
       bits -= 8;
-      result.push((acc >> bits) & 0xff);
+      versionByte = (acc >> bits) & 0xff;
+      versionExtracted = true;
+    }
+
+    while (versionExtracted && bits >= 8) {
+      bits -= 8;
+      hashBytes.push((acc >> bits) & 0xff);
     }
   }
 
-  if (result.length < 21) throw new Error('Invalid address');
+  const encodedSize = versionByte & 0x07;
+  const expectedSizes = [20, 24, 28, 32, 40, 48, 56, 64];
+  const expectedSize = expectedSizes[encodedSize] || 20;
 
-  // Skip version byte, return 20-byte hash
-  return Buffer.from(result.slice(1, 21));
+  return Buffer.from(hashBytes.slice(0, expectedSize));
 }
 
 /**
@@ -606,12 +632,12 @@ function getCashAddr(pubkeyHash: Buffer): string {
   const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
   const prefix = 'bitcoincashii';
 
-  // Type byte 0 for P2PKH
-  const payload = [0];
-
-  // Convert to 5-bit groups
-  let acc = 0;
-  let bits = 0;
+  // Pack version byte (type << 3 | size_code) with hash into 5-bit groups
+  // Type 0 = P2PKH, size_code 0 = 20-byte hash
+  const versionByte = (0 << 3) | 0; // type=0, size=0
+  const payload: number[] = [];
+  let acc = versionByte;
+  let bits = 8;
 
   for (const byte of pubkeyHash) {
     acc = (acc << 8) | byte;

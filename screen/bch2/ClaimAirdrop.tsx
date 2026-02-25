@@ -64,22 +64,23 @@ export const ClaimAirdropScreen: React.FC = () => {
         .reduce((sum, r) => sum + r.balance, 0);
       setTotalClaimable(total);
 
-      // Check if any funds are NOT from the airdrop (received post-fork)
+      // Anti-gaming: airdrop portion = min(bch2, bc2) per address
       const airdropTotal = claimResults
-        .filter(r => r.success && r.isFromAirdrop)
-        .reduce((sum, r) => sum + r.balance, 0);
+        .filter(r => r.success)
+        .reduce((sum, r) => {
+          const bc2 = r.bc2Balance ?? 0;
+          return sum + Math.min(r.balance, bc2);
+        }, 0);
       const postForkTotal = total - airdropTotal;
 
       if (total > 0) {
         let message = `You have ${(total / 100000000).toFixed(8)} BCH2 available.`;
 
         if (postForkTotal > 0 && airdropTotal === 0) {
-          // All funds are post-fork (not from airdrop)
-          message += `\n\n⚠️ Note: This balance was received AFTER the fork and is not from the airdrop. These are your existing BCH2 funds.`;
+          message += `\n\n⚠️ Warning: No matching BC2 balance found. This BCH2 may have been received after the fork and is not from the airdrop.`;
         } else if (postForkTotal > 0) {
-          // Mix of airdrop and post-fork funds
           message += `\n\n${(airdropTotal / 100000000).toFixed(8)} BCH2 from airdrop`;
-          message += `\n${(postForkTotal / 100000000).toFixed(8)} BCH2 received post-fork`;
+          message += `\n${(postForkTotal / 100000000).toFixed(8)} BCH2 exceeds BC2 balance (may be post-fork)`;
         }
 
         Alert.alert('BCH2 Found!', message);
@@ -306,33 +307,42 @@ export const ClaimAirdropScreen: React.FC = () => {
             </View>
           )}
 
-          {results.filter(r => r.success && r.balance > 0).map((result, index) => (
-            <View key={index} style={styles.resultCard}>
-              {!result.isFromAirdrop && (
-                <View style={styles.warningBadge}>
-                  <Text style={styles.warningBadgeText}>⚠️ Post-fork funds (not from airdrop)</Text>
-                </View>
-              )}
-              <View style={styles.resultRow}>
-                <Text style={styles.resultLabel}>{result.address.startsWith('bc1') ? 'SegWit Address' : 'BC2 Address'}</Text>
-                <Text style={styles.resultValue}>{result.address}</Text>
-              </View>
-              <View style={styles.resultRow}>
-                <Text style={styles.resultLabel}>BCH2 Address</Text>
-                <Text style={styles.resultValueAccent}>{result.bch2Address}</Text>
-              </View>
-              <View style={styles.resultRow}>
-                <Text style={styles.resultLabel}>Balance</Text>
-                <Text style={styles.resultBalance}>{formatBalance(result.balance)} BCH2</Text>
-              </View>
-              {result.isFromAirdrop && result.bc2Balance !== undefined && (
+          {results.filter(r => r.success && r.balance > 0).map((result, index) => {
+            const bc2 = result.bc2Balance ?? 0;
+            const excess = result.balance - Math.min(result.balance, bc2);
+            return (
+              <View key={index} style={styles.resultCard}>
+                {excess > 0 && bc2 === 0 && (
+                  <View style={styles.warningBadge}>
+                    <Text style={styles.warningBadgeText}>⚠️ No matching BC2 balance</Text>
+                  </View>
+                )}
+                {excess > 0 && bc2 > 0 && (
+                  <View style={styles.warningBadge}>
+                    <Text style={styles.warningBadgeText}>⚠️ {formatBalance(excess)} BCH2 exceeds BC2 balance</Text>
+                  </View>
+                )}
                 <View style={styles.resultRow}>
-                  <Text style={styles.resultLabel}>BC2 Balance</Text>
-                  <Text style={styles.resultValue}>{formatBalance(result.bc2Balance)} BC2</Text>
+                  <Text style={styles.resultLabel}>{result.address.startsWith('bc1') ? 'SegWit Address' : 'BC2 Address'}</Text>
+                  <Text style={styles.resultValue}>{result.address}</Text>
                 </View>
-              )}
-            </View>
-          ))}
+                <View style={styles.resultRow}>
+                  <Text style={styles.resultLabel}>BCH2 Address</Text>
+                  <Text style={styles.resultValueAccent}>{result.bch2Address}</Text>
+                </View>
+                <View style={styles.resultRow}>
+                  <Text style={styles.resultLabel}>Balance</Text>
+                  <Text style={styles.resultBalance}>{formatBalance(result.balance)} BCH2</Text>
+                </View>
+                {bc2 > 0 && (
+                  <View style={styles.resultRow}>
+                    <Text style={styles.resultLabel}>BC2 Balance</Text>
+                    <Text style={styles.resultValue}>{formatBalance(bc2)} BC2</Text>
+                  </View>
+                )}
+              </View>
+            );
+          })}
 
           {totalClaimable > 0 && (
             <TouchableOpacity

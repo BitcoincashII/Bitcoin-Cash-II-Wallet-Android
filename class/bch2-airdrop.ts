@@ -32,9 +32,7 @@ export interface AirdropClaimResult {
   address: string;
   bch2Address: string;
   balance: number;
-  bc2Balance?: number; // Current BC2 balance (may differ from BCH2 if spent post-fork)
-  isFromAirdrop: boolean; // True if this balance existed at fork, false if received post-fork
-  bc2CheckFailed?: boolean; // True if BC2 balance check failed (anti-gaming inconclusive)
+  bc2Balance?: number; // Current BC2 balance (for anti-gaming comparison)
   error?: string;
 }
 
@@ -80,9 +78,8 @@ export async function claimFromWIF(wif: string, checkBC2Balance: boolean = false
       console.log('SegWit balance check failed:', e);
     }
 
-    // Check BC2 balance to verify this is from the airdrop (not post-fork received funds)
+    // Check BC2 balance for anti-gaming comparison
     let bc2TotalBalance = 0;
-    let bc2CheckFailed = false;
     try {
       const bc2BalanceResult = await BCH2Electrum.getBC2Balance(bc2Address);
       bc2TotalBalance = bc2BalanceResult.confirmed + bc2BalanceResult.unconfirmed;
@@ -93,36 +90,26 @@ export async function claimFromWIF(wif: string, checkBC2Balance: boolean = false
           const bc2SegwitBalance = await BCH2Electrum.getBC2BalanceByScripthash(segwitScripthash);
           bc2TotalBalance += bc2SegwitBalance.confirmed + bc2SegwitBalance.unconfirmed;
         } catch (e) {
-          // BC2 SegWit balance check failed - mark as inconclusive
-          bc2CheckFailed = true;
+          // BC2 SegWit balance check failed
         }
       }
     } catch (e) {
       console.log('BC2 balance check failed:', e);
-      bc2CheckFailed = true;
     }
 
-    // If BC2 check failed, we cannot verify airdrop status - be conservative
-    const isFromAirdrop = bc2CheckFailed ? false : bc2TotalBalance > 0;
-
-    const result: AirdropClaimResult = {
+    return {
       success: true,
       address: segwitBalance > 0 ? bc1Address : bc2Address,
       bch2Address: bch2Address,
       balance: totalBalance,
-      bc2Balance: bc2CheckFailed ? undefined : bc2TotalBalance,
-      isFromAirdrop: isFromAirdrop,
-      bc2CheckFailed,
+      bc2Balance: bc2TotalBalance,
     };
-
-    return result;
   } catch (err: any) {
     return {
       success: false,
       address: '',
       bch2Address: '',
       balance: 0,
-      isFromAirdrop: false,
       error: err.message || 'Invalid private key',
     };
   }
@@ -142,7 +129,6 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
         address: '',
         bch2Address: '',
         balance: 0,
-        isFromAirdrop: false,
         error: 'Invalid mnemonic phrase',
       }];
     }
@@ -174,15 +160,12 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
           const total = balance.confirmed + balance.unconfirmed;
 
           if (total > 0) {
-            // Check BC2 balance to verify this is from the airdrop
             let bc2Balance = 0;
-            let bc2CheckFailed = false;
             try {
               const bc2Result = await BCH2Electrum.getBC2Balance(bc2Address);
               bc2Balance = bc2Result.confirmed + bc2Result.unconfirmed;
             } catch (e) {
-              // BC2 check failed - cannot verify airdrop status
-              bc2CheckFailed = true;
+              // BC2 check failed
             }
 
             results.push({
@@ -190,9 +173,7 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
               address: bc2Address,
               bch2Address: bch2Address,
               balance: total,
-              bc2Balance: bc2CheckFailed ? undefined : bc2Balance,
-              isFromAirdrop: bc2CheckFailed ? false : bc2Balance > 0,
-              bc2CheckFailed,
+              bc2Balance,
             });
           }
         } catch (err) {
@@ -223,24 +204,20 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
           const total = balance.confirmed + balance.unconfirmed;
 
           if (total > 0) {
-            // Check BC2 balance
             let bc2Balance = 0;
-            let bc2CheckFailed = false;
             try {
               const bc2Result = await BCH2Electrum.getBC2BalanceByScripthash(scripthash);
               bc2Balance = bc2Result.confirmed + bc2Result.unconfirmed;
             } catch (e) {
-              bc2CheckFailed = true;
+              // BC2 check failed
             }
 
             results.push({
               success: true,
-              address: p2shAddress,  // Show 3xxx address
+              address: p2shAddress,
               bch2Address: bch2Address,
               balance: total,
-              bc2Balance: bc2CheckFailed ? undefined : bc2Balance,
-              isFromAirdrop: bc2CheckFailed ? false : bc2Balance > 0,
-              bc2CheckFailed,
+              bc2Balance,
             });
           }
         } catch (err) {
@@ -270,25 +247,20 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
           const total = balance.confirmed + balance.unconfirmed;
 
           if (total > 0) {
-            // Check BC2 balance to verify this is from the airdrop
             let bc2Balance = 0;
-            let bc2CheckFailed = false;
             try {
               const bc2Result = await BCH2Electrum.getBC2BalanceByScripthash(scripthash);
               bc2Balance = bc2Result.confirmed + bc2Result.unconfirmed;
             } catch (e) {
-              // BC2 check failed - cannot verify airdrop status
-              bc2CheckFailed = true;
+              // BC2 check failed
             }
 
             results.push({
               success: true,
-              address: bc1Address,  // Show bc1 address
+              address: bc1Address,
               bch2Address: bch2Address,
               balance: total,
-              bc2Balance: bc2CheckFailed ? undefined : bc2Balance,
-              isFromAirdrop: bc2CheckFailed ? false : bc2Balance > 0,
-              bc2CheckFailed,
+              bc2Balance,
             });
           }
         } catch (err) {
@@ -304,7 +276,6 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
         address: '',
         bch2Address: '',
         balance: 0,
-        isFromAirdrop: false,
         error: 'No BCH2 balance found for this seed',
       }];
     }
@@ -316,7 +287,6 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
       address: '',
       bch2Address: '',
       balance: 0,
-      isFromAirdrop: false,
       error: err.message || 'Failed to process mnemonic',
     }];
   }
@@ -415,9 +385,15 @@ function base58Encode(data: Buffer): string {
 }
 
 function encodeCashAddr(prefix: string, type: number, hash: Buffer): string {
-  const payload = [type];
-  let acc = 0;
-  let bits = 0;
+  // Determine size code from hash length
+  const sizeMap: Record<number, number> = { 20: 0, 24: 1, 28: 2, 32: 3, 40: 4, 48: 5, 56: 6, 64: 7 };
+  const sizeCode = sizeMap[hash.length] ?? 0;
+
+  // Pack version byte (type << 3 | size_code) with hash into 5-bit groups
+  const versionByte = (type << 3) | sizeCode;
+  const payload: number[] = [];
+  let acc = versionByte;
+  let bits = 8;
 
   for (const byte of hash) {
     acc = (acc << 8) | byte;
