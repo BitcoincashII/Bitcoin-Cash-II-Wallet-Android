@@ -3,7 +3,7 @@
  * Create new or import existing BCH2 or BC2 wallet
  */
 
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   View,
   Text,
@@ -18,6 +18,7 @@ import {
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2BorderRadius, BCH2Shadows } from '../../components/BCH2Theme';
 import * as bip39 from 'bip39';
 import { saveWallet } from '../../class/bch2-wallet-storage';
+import { PasswordInput, PasswordInputHandle } from '../../components/PasswordInput';
 
 // Coin logos
 const BCH2_LOGO = require('../../img/bch2-logo-small.png');
@@ -28,17 +29,24 @@ interface AddWalletProps {
 }
 
 type WalletType = 'bch2' | 'bc2' | 'bc1';
-type Mode = 'select' | 'create-bch2' | 'create-bc2' | 'import-bch2' | 'import-bc2';
+type Mode = 'select' | 'create-bch2' | 'create-bc2' | 'import-bch2' | 'import-bc2' | 'set-password';
 
 export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
   const [mode, setMode] = useState<Mode>('select');
+  const [previousMode, setPreviousMode] = useState<Mode>('select');
   const [loading, setLoading] = useState(false);
   const [mnemonic, setMnemonic] = useState('');
   const [importMnemonic, setImportMnemonic] = useState('');
   const [walletLabel, setWalletLabel] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [passwordError, setPasswordError] = useState('');
+  const passwordInputRef = useRef<PasswordInputHandle>(null);
+  const confirmPasswordInputRef = useRef<PasswordInputHandle>(null);
 
   const getCurrentWalletType = (): WalletType => {
-    if (mode === 'create-bc2' || mode === 'import-bc2') return 'bc2';
+    const effectiveMode = mode === 'set-password' ? previousMode : mode;
+    if (effectiveMode === 'create-bc2' || effectiveMode === 'import-bc2') return 'bc2';
     return 'bch2';
   };
 
@@ -63,22 +71,50 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
       return;
     }
 
+    // Go to password step
+    setPreviousMode(mode);
+    setPassword('');
+    setConfirmPassword('');
+    setPasswordError('');
+    setMode('set-password');
+  };
+
+  const handleSetPassword = async () => {
+    setPasswordError('');
+
+    if (password.length < 8) {
+      setPasswordError('Password must be at least 8 characters');
+      passwordInputRef.current?.showError();
+      setPassword('');
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      setPasswordError('Passwords do not match');
+      confirmPasswordInputRef.current?.showError();
+      setConfirmPassword('');
+      return;
+    }
+
     const walletType = getCurrentWalletType();
     const coinName = walletType === 'bc2' ? 'BC2' : 'BCH2';
+    const isImport = previousMode.startsWith('import');
+    const mnemonicToSave = isImport ? importMnemonic.trim() : mnemonic;
 
     setLoading(true);
     try {
-      // Save wallet to storage
-      const wallet = await saveWallet(walletLabel, mnemonic, walletType);
-      console.log('Wallet created:', wallet.id, wallet.address);
+      const wallet = await saveWallet(walletLabel, mnemonicToSave, walletType, password);
+      console.log('Wallet saved:', wallet.id, wallet.address);
 
       Alert.alert(
-        'Wallet Created',
-        `Your ${coinName} wallet has been created. Make sure to backup your recovery phrase!`,
+        isImport ? 'Wallet Imported' : 'Wallet Created',
+        isImport
+          ? `Your ${coinName} wallet has been imported successfully!`
+          : `Your ${coinName} wallet has been created. Make sure to backup your recovery phrase!`,
         [{ text: 'OK', onPress: () => navigation.goBack() }]
       );
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to create wallet');
+      Alert.alert('Error', error.message || 'Failed to save wallet');
     } finally {
       setLoading(false);
     }
@@ -106,25 +142,12 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
       return;
     }
 
-    const walletType = getCurrentWalletType();
-    const coinName = walletType === 'bc2' ? 'BC2' : 'BCH2';
-
-    setLoading(true);
-    try {
-      // Save imported wallet to storage
-      const wallet = await saveWallet(walletLabel, importMnemonic.trim(), walletType);
-      console.log('Wallet imported:', wallet.id, wallet.address);
-
-      Alert.alert(
-        'Wallet Imported',
-        `Your ${coinName} wallet has been imported successfully!`,
-        [{ text: 'OK', onPress: () => navigation.goBack() }]
-      );
-    } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to import wallet');
-    } finally {
-      setLoading(false);
-    }
+    // Go to password step
+    setPreviousMode(mode);
+    setPassword('');
+    setConfirmPassword('');
+    setPasswordError('');
+    setMode('set-password');
   };
 
   const goToImport = (walletType: WalletType) => {
@@ -261,6 +284,65 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
         </TouchableOpacity>
 
         <TouchableOpacity style={styles.secondaryButton} onPress={() => setMode('select')}>
+          <Text style={styles.secondaryButtonText}>Back</Text>
+        </TouchableOpacity>
+      </ScrollView>
+    );
+  }
+
+  // Set password screen
+  if (mode === 'set-password') {
+    const walletType = getCurrentWalletType();
+    const primaryColor = walletType === 'bc2' ? BCH2Colors.bc2Primary : BCH2Colors.primary;
+    const logo = walletType === 'bc2' ? BC2_LOGO : BCH2_LOGO;
+
+    return (
+      <ScrollView style={styles.container} contentContainerStyle={styles.scrollContent}>
+        <View style={styles.createHeader}>
+          <Image source={logo} style={styles.createLogo} resizeMode="contain" />
+          <Text style={styles.title}>Set Wallet Password</Text>
+        </View>
+        <Text style={styles.subtitle}>
+          This password encrypts your recovery phrase. You'll need it to send transactions and view your backup.
+        </Text>
+
+        <View style={styles.inputGroup}>
+          <Text style={styles.inputLabel}>Password (min. 8 characters)</Text>
+          <PasswordInput
+            ref={passwordInputRef}
+            onSubmit={() => confirmPasswordInputRef.current?.focus()}
+            placeholder="Enter password"
+            onChangeText={setPassword}
+          />
+        </View>
+
+        <View style={styles.inputGroup}>
+          <Text style={styles.inputLabel}>Confirm Password</Text>
+          <PasswordInput
+            ref={confirmPasswordInputRef}
+            onSubmit={handleSetPassword}
+            placeholder="Confirm password"
+            onChangeText={setConfirmPassword}
+          />
+        </View>
+
+        {passwordError ? (
+          <Text style={styles.errorText}>{passwordError}</Text>
+        ) : null}
+
+        <TouchableOpacity
+          style={[styles.primaryButton, { backgroundColor: primaryColor }]}
+          onPress={handleSetPassword}
+          disabled={loading}
+        >
+          {loading ? (
+            <ActivityIndicator color={BCH2Colors.textPrimary} />
+          ) : (
+            <Text style={styles.primaryButtonText}>Set Password</Text>
+          )}
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.secondaryButton} onPress={() => setMode(previousMode)}>
           <Text style={styles.secondaryButtonText}>Back</Text>
         </TouchableOpacity>
       </ScrollView>
@@ -466,6 +548,12 @@ const styles = StyleSheet.create({
   secondaryButtonText: {
     color: BCH2Colors.textSecondary,
     fontSize: BCH2Typography.fontSize.base,
+  },
+  errorText: {
+    color: BCH2Colors.error,
+    fontSize: BCH2Typography.fontSize.sm,
+    textAlign: 'center',
+    marginBottom: BCH2Spacing.md,
   },
 });
 

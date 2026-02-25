@@ -3,7 +3,7 @@
  * Allows users to claim their BCH2 from BC2 wallets
  */
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -24,6 +24,7 @@ import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2Shadows, BCH2BorderRadius 
 import { claimFromWIF, claimFromMnemonic, AirdropClaimResult } from '../../class/bch2-airdrop';
 import { saveWallet } from '../../class/bch2-wallet-storage';
 import { useNavigation } from '@react-navigation/native';
+import { PasswordInput, PasswordInputHandle } from '../../components/PasswordInput';
 
 type ImportMode = 'mnemonic' | 'wif';
 
@@ -37,6 +38,12 @@ export const ClaimAirdropScreen: React.FC = () => {
   const [results, setResults] = useState<AirdropClaimResult[]>([]);
   const [totalClaimable, setTotalClaimable] = useState(0);
   const [showBitcoinCoreHelp, setShowBitcoinCoreHelp] = useState(false);
+  const [showPasswordStep, setShowPasswordStep] = useState(false);
+  const [walletPassword, setWalletPassword] = useState('');
+  const [walletConfirmPassword, setWalletConfirmPassword] = useState('');
+  const [passwordError, setPasswordError] = useState('');
+  const claimPasswordRef = useRef<PasswordInputHandle>(null);
+  const claimConfirmPasswordRef = useRef<PasswordInputHandle>(null);
 
   const handleClaim = useCallback(async () => {
     if (!input.trim()) {
@@ -106,31 +113,54 @@ export const ClaimAirdropScreen: React.FC = () => {
       return;
     }
 
+    if (mode === 'mnemonic') {
+      // Show password step
+      setWalletPassword('');
+      setWalletConfirmPassword('');
+      setPasswordError('');
+      setShowPasswordStep(true);
+    } else {
+      // WIF import - for now show message that they need to use full import
+      Alert.alert(
+        'WIF Import',
+        'To import a WIF private key, please use the "Add Wallet" screen and select "Import BCH2 Wallet".',
+        [{ text: 'OK' }]
+      );
+    }
+  }, [input, mode, totalClaimable]);
+
+  const handleClaimWithPassword = useCallback(async () => {
+    setPasswordError('');
+
+    if (walletPassword.length < 8) {
+      setPasswordError('Password must be at least 8 characters');
+      claimPasswordRef.current?.showError();
+      setWalletPassword('');
+      return;
+    }
+
+    if (walletPassword !== walletConfirmPassword) {
+      setPasswordError('Passwords do not match');
+      claimConfirmPasswordRef.current?.showError();
+      setWalletConfirmPassword('');
+      return;
+    }
+
     setImporting(true);
     try {
-      // For mnemonic, save as BCH2 wallet
-      // For WIF, we need to convert to mnemonic or handle differently
-      if (mode === 'mnemonic') {
-        const wallet = await saveWallet('Claimed BCH2 Wallet', input.trim(), 'bch2');
-        Alert.alert(
-          'Wallet Imported!',
-          `Your BCH2 wallet has been imported with ${formatBalance(totalClaimable)} BCH2`,
-          [{ text: 'OK', onPress: () => navigation.goBack() }]
-        );
-      } else {
-        // WIF import - for now show message that they need to use full import
-        Alert.alert(
-          'WIF Import',
-          'To import a WIF private key, please use the "Add Wallet" screen and select "Import BCH2 Wallet".',
-          [{ text: 'OK' }]
-        );
-      }
+      const wallet = await saveWallet('Claimed BCH2 Wallet', input.trim(), 'bch2', walletPassword);
+      setShowPasswordStep(false);
+      Alert.alert(
+        'Wallet Imported!',
+        `Your BCH2 wallet has been imported with ${formatBalance(totalClaimable)} BCH2`,
+        [{ text: 'OK', onPress: () => navigation.goBack() }]
+      );
     } catch (error: any) {
       Alert.alert('Import Failed', error.message || 'Failed to import wallet');
     } finally {
       setImporting(false);
     }
-  }, [input, mode, totalClaimable, navigation]);
+  }, [input, walletPassword, walletConfirmPassword, totalClaimable, navigation]);
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
@@ -344,7 +374,7 @@ export const ClaimAirdropScreen: React.FC = () => {
             );
           })}
 
-          {totalClaimable > 0 && (
+          {totalClaimable > 0 && !showPasswordStep && (
             <TouchableOpacity
               style={[styles.importButton, importing && styles.claimButtonDisabled]}
               onPress={handleImportWallet}
@@ -356,6 +386,58 @@ export const ClaimAirdropScreen: React.FC = () => {
                 <Text style={styles.importButtonText}>Import Wallet</Text>
               )}
             </TouchableOpacity>
+          )}
+
+          {showPasswordStep && (
+            <View style={styles.passwordStepCard}>
+              <Text style={styles.passwordStepTitle}>Set Wallet Password</Text>
+              <Text style={styles.passwordStepSubtitle}>
+                This password encrypts your recovery phrase.
+              </Text>
+
+              <View style={styles.passwordInputGroup}>
+                <Text style={styles.inputLabel}>Password (min. 8 characters)</Text>
+                <PasswordInput
+                  ref={claimPasswordRef}
+                  onSubmit={() => claimConfirmPasswordRef.current?.focus()}
+                  placeholder="Enter password"
+                  onChangeText={setWalletPassword}
+                />
+              </View>
+
+              <View style={styles.passwordInputGroup}>
+                <Text style={styles.inputLabel}>Confirm Password</Text>
+                <PasswordInput
+                  ref={claimConfirmPasswordRef}
+                  onSubmit={handleClaimWithPassword}
+                  placeholder="Confirm password"
+                  onChangeText={setWalletConfirmPassword}
+                />
+              </View>
+
+              {passwordError ? (
+                <Text style={styles.passwordError}>{passwordError}</Text>
+              ) : null}
+
+              <TouchableOpacity
+                style={[styles.importButton, importing && styles.claimButtonDisabled]}
+                onPress={handleClaimWithPassword}
+                disabled={importing}
+              >
+                {importing ? (
+                  <ActivityIndicator color={BCH2Colors.textPrimary} />
+                ) : (
+                  <Text style={styles.importButtonText}>Set Password & Import</Text>
+                )}
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.cancelPasswordButton}
+                onPress={() => setShowPasswordStep(false)}
+              >
+                <Text style={styles.cancelPasswordText}>Back</Text>
+              </TouchableOpacity>
+            </View>
           )}
         </View>
       )}
@@ -590,6 +672,44 @@ const styles = StyleSheet.create({
     color: BCH2Colors.textPrimary,
     fontSize: BCH2Typography.fontSize.lg,
     fontWeight: BCH2Typography.fontWeight.bold,
+  },
+  passwordStepCard: {
+    backgroundColor: BCH2Colors.backgroundCard,
+    borderRadius: BCH2BorderRadius.lg,
+    padding: BCH2Spacing.lg,
+    marginTop: BCH2Spacing.md,
+    borderWidth: 1,
+    borderColor: BCH2Colors.primary,
+  },
+  passwordStepTitle: {
+    fontSize: BCH2Typography.fontSize.lg,
+    fontWeight: BCH2Typography.fontWeight.bold,
+    color: BCH2Colors.textPrimary,
+    textAlign: 'center',
+    marginBottom: BCH2Spacing.xs,
+  },
+  passwordStepSubtitle: {
+    fontSize: BCH2Typography.fontSize.sm,
+    color: BCH2Colors.textSecondary,
+    textAlign: 'center',
+    marginBottom: BCH2Spacing.lg,
+  },
+  passwordInputGroup: {
+    marginBottom: BCH2Spacing.md,
+  },
+  passwordError: {
+    color: '#fc8181',
+    fontSize: BCH2Typography.fontSize.sm,
+    textAlign: 'center',
+    marginBottom: BCH2Spacing.md,
+  },
+  cancelPasswordButton: {
+    paddingVertical: BCH2Spacing.md,
+    alignItems: 'center',
+  },
+  cancelPasswordText: {
+    color: BCH2Colors.textSecondary,
+    fontSize: BCH2Typography.fontSize.base,
   },
   helpToggle: {
     paddingVertical: BCH2Spacing.md,

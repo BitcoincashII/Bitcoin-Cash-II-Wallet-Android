@@ -3,10 +3,11 @@
  * Main navigation for BCH2 wallet screens
  */
 
-import React from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { BCH2Colors, BCH2Typography } from '../components/BCH2Theme';
 import { BCH2RootStackParamList } from './BCH2NavigationTypes';
+import { PasswordModalWithRef, PasswordModalHandle } from '../components/PasswordModal';
 
 // Import screens
 import BCH2WalletList from '../screen/bch2/BCH2WalletList';
@@ -16,7 +17,7 @@ import BCH2Send from '../screen/bch2/BCH2Send';
 import BCH2Settings from '../screen/bch2/BCH2Settings';
 import BCH2WalletDetail from '../screen/bch2/BCH2WalletDetail';
 import AddWallet from '../screen/bch2/AddWallet';
-import { getWallet, getWalletMnemonic, StoredWallet } from '../class/bch2-wallet-storage';
+import { getWallet, getWalletMnemonic, isWalletEncrypted, verifyWalletPassword, StoredWallet } from '../class/bch2-wallet-storage';
 import { getTransactionsByAddress, getBC2Transactions, getBalanceByAddress, getBC2Balance, getBalanceByScripthash, getTransactionsByScripthash } from '../blue_modules/BCH2Electrum';
 import { sendTransaction, sendFromBech32 } from '../class/bch2-transaction';
 import { bc1AddressToScripthash } from '../class/bch2-airdrop';
@@ -133,50 +134,129 @@ const BCH2SendWrapper: React.FC = () => {
   const navigation = useNavigation();
   const { walletId, walletBalance, walletAddress, isBC2 } = route.params;
 
+  const [passwordModalVisible, setPasswordModalVisible] = useState(false);
+  const passwordModalRef = useRef<PasswordModalHandle>(null);
+  const pendingSendRef = useRef<{
+    resolve: (value: { txid: string }) => void;
+    reject: (error: Error) => void;
+    toAddress: string;
+    amount: number;
+    feePerByte: number;
+  } | null>(null);
+
+  const handlePasswordSubmit = useCallback(async (password: string) => {
+    const pending = pendingSendRef.current;
+    if (!pending) return;
+
+    try {
+      const mnemonic = await getWalletMnemonic(walletId, password);
+      if (!mnemonic) {
+        passwordModalRef.current?.showError();
+        return;
+      }
+
+      passwordModalRef.current?.showSuccess();
+
+      // Small delay to show success animation
+      setTimeout(async () => {
+        // Check if the send was cancelled during the animation
+        if (pendingSendRef.current !== pending) return;
+
+        setPasswordModalVisible(false);
+
+        try {
+          const isBech32Source = walletAddress.toLowerCase().startsWith('bc1');
+
+          let result;
+          if (isBech32Source && !isBC2) {
+            result = await sendFromBech32(
+              mnemonic,
+              walletAddress,
+              pending.toAddress,
+              pending.amount,
+              pending.feePerByte
+            );
+          } else {
+            result = await sendTransaction(
+              mnemonic,
+              pending.toAddress,
+              pending.amount,
+              pending.feePerByte,
+              isBC2 || false,
+              walletAddress
+            );
+          }
+
+          pending.resolve({ txid: result.txid });
+        } catch (err: any) {
+          pending.reject(err);
+        }
+        pendingSendRef.current = null;
+      }, 500);
+    } catch {
+      // Decryption failed — wrong password
+      passwordModalRef.current?.showError();
+    }
+  }, [walletId, walletAddress, isBC2]);
+
+  const handlePasswordCancel = useCallback(() => {
+    setPasswordModalVisible(false);
+    if (pendingSendRef.current) {
+      const err: any = new Error('Password entry cancelled');
+      err.__cancelled = true;
+      pendingSendRef.current.reject(err);
+      pendingSendRef.current = null;
+    }
+  }, []);
+
   const handleSend = async (toAddress: string, amount: number, feePerByte: number): Promise<{ txid: string }> => {
-    // Get wallet mnemonic
-    const mnemonic = await getWalletMnemonic(walletId);
-    if (!mnemonic) {
-      throw new Error('Could not retrieve wallet keys');
+    // Check if wallet is encrypted
+    const encrypted = await isWalletEncrypted(walletId);
+
+    if (!encrypted) {
+      // Legacy unencrypted wallet — proceed without password
+      const mnemonic = await getWalletMnemonic(walletId);
+      if (!mnemonic) {
+        throw new Error('Could not retrieve wallet keys');
+      }
+
+      const isBech32Source = walletAddress.toLowerCase().startsWith('bc1');
+
+      let result;
+      if (isBech32Source && !isBC2) {
+        result = await sendFromBech32(mnemonic, walletAddress, toAddress, amount, feePerByte);
+      } else {
+        result = await sendTransaction(mnemonic, toAddress, amount, feePerByte, isBC2 || false, walletAddress);
+      }
+
+      return { txid: result.txid };
     }
 
-    // Check if the source wallet is a bc1 (SegWit) address
-    // BCH2 supports spending from bc1 addresses via SegWit recovery
-    const isBech32Source = walletAddress.toLowerCase().startsWith('bc1');
-
-    let result;
-    if (isBech32Source && !isBC2) {
-      // Use SegWit recovery for bc1 addresses (BCH2 only)
-      result = await sendFromBech32(
-        mnemonic,
-        walletAddress,
-        toAddress,
-        amount,
-        feePerByte
-      );
-    } else {
-      // Standard P2PKH transaction for legacy/CashAddr addresses
-      result = await sendTransaction(
-        mnemonic,
-        toAddress,
-        amount,
-        feePerByte,
-        isBC2 || false,
-        walletAddress
-      );
-    }
-
-    return { txid: result.txid };
+    // Encrypted wallet — show password modal and wait for resolution
+    return new Promise((resolve, reject) => {
+      pendingSendRef.current = { resolve, reject, toAddress, amount, feePerByte };
+      setPasswordModalVisible(true);
+    });
   };
 
   return (
-    <BCH2Send
-      walletBalance={walletBalance}
-      walletAddress={walletAddress}
-      isBC2={isBC2}
-      onSend={handleSend}
-      navigation={navigation}
-    />
+    <>
+      <BCH2Send
+        walletBalance={walletBalance}
+        walletAddress={walletAddress}
+        isBC2={isBC2}
+        onSend={handleSend}
+        navigation={navigation}
+      />
+      <PasswordModalWithRef
+        ref={passwordModalRef}
+        visible={passwordModalVisible}
+        title="Unlock Wallet"
+        subtitle="Enter your password to sign this transaction"
+        onSubmit={handlePasswordSubmit}
+        onCancel={handlePasswordCancel}
+      />
+    </>
   );
 };
 

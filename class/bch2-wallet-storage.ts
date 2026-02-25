@@ -25,6 +25,7 @@ export interface StoredWallet {
   balance: number;
   unconfirmedBalance: number;
   createdAt: number;
+  isEncrypted?: boolean;  // false/undefined for legacy unencrypted wallets
 }
 
 /**
@@ -62,21 +63,26 @@ function decryptMnemonic(encryptedData: string, password: string): string {
 
 /**
  * Save a new wallet to storage
- * @param password - Encryption password for the mnemonic
+ * @param password - Encryption password for the mnemonic (required)
  */
 export async function saveWallet(
   label: string,
   mnemonic: string,
   walletType: 'bch2' | 'bc2' | 'bc1' = 'bch2',
-  password: string = ''
+  password: string
 ): Promise<StoredWallet> {
-  // Derive address from mnemonic (before encrypting)
-  const address = await deriveAddress(mnemonic, walletType);
+  if (!password) {
+    throw new Error('Password is required to save a wallet');
+  }
 
-  // Encrypt the mnemonic
-  const encryptedMnemonic = password
-    ? encryptMnemonic(mnemonic.trim(), password)
-    : mnemonic.trim(); // Fallback for callers that don't pass password yet
+  // Trim mnemonic once — must use same value for address derivation and encryption
+  const trimmedMnemonic = mnemonic.trim();
+
+  // Derive address from mnemonic (before encrypting)
+  const address = await deriveAddress(trimmedMnemonic, walletType);
+
+  // Always encrypt the mnemonic
+  const encryptedMnemonic = encryptMnemonic(trimmedMnemonic, password);
 
   const wallet: StoredWallet = {
     id: generateId(),
@@ -87,6 +93,7 @@ export async function saveWallet(
     balance: 0,
     unconfirmedBalance: 0,
     createdAt: Date.now(),
+    isEncrypted: true,
   };
 
   // Get existing wallets
@@ -219,12 +226,52 @@ function base58Encode(data: Buffer): string {
 
 /**
  * Get mnemonic for a wallet (for sending transactions)
- * @param password - Decryption password. If empty, returns raw stored value.
+ * @param password - Decryption password. Required for encrypted wallets.
  */
 export async function getWalletMnemonic(id: string, password: string = ''): Promise<string | null> {
   const wallet = await getWallet(id);
   if (!wallet?.mnemonic) return null;
-  return password ? decryptMnemonic(wallet.mnemonic, password) : wallet.mnemonic;
+
+  if (wallet.isEncrypted) {
+    if (!password) {
+      throw new Error('Password is required for encrypted wallets');
+    }
+    const decrypted = decryptMnemonic(wallet.mnemonic, password);
+    // Validate decrypted result — AES-CBC has ~1/256 chance of wrong password
+    // producing valid padding but garbage output
+    if (!bip39.validateMnemonic(decrypted)) {
+      throw new Error('Decryption failed');
+    }
+    return decrypted;
+  }
+
+  // Legacy unencrypted wallet — return as-is
+  return wallet.mnemonic;
+}
+
+/**
+ * Check if a wallet is encrypted
+ */
+export async function isWalletEncrypted(id: string): Promise<boolean> {
+  const wallet = await getWallet(id);
+  return wallet?.isEncrypted === true;
+}
+
+/**
+ * Verify a wallet password by attempting to decrypt the mnemonic.
+ * Returns true if decryption succeeds, false otherwise.
+ */
+export async function verifyWalletPassword(id: string, password: string): Promise<boolean> {
+  try {
+    const wallet = await getWallet(id);
+    if (!wallet?.mnemonic) return false;
+    if (!wallet.isEncrypted) return true; // Unencrypted wallets always pass
+    const decrypted = decryptMnemonic(wallet.mnemonic, password);
+    // Validate result — AES-CBC can produce garbage without throwing (~1/256)
+    return bip39.validateMnemonic(decrypted);
+  } catch {
+    return false;
+  }
 }
 
 // Helper functions
@@ -378,4 +425,6 @@ export default {
   updateWalletBalance,
   deleteWallet,
   getWalletMnemonic,
+  isWalletEncrypted,
+  verifyWalletPassword,
 };

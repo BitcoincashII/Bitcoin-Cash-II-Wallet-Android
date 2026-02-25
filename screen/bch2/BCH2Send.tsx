@@ -118,7 +118,9 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
       setTxid(result.txid);
       setStep('success');
     } catch (error: any) {
-      Alert.alert('Transaction Failed', error.message || 'Failed to broadcast transaction');
+      if (!error?.__cancelled) {
+        Alert.alert('Transaction Failed', error.message || 'Failed to broadcast transaction');
+      }
     } finally {
       setLoading(false);
     }

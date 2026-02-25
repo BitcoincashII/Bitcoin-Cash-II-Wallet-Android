@@ -3,7 +3,7 @@
  * Shows wallet details, transactions, and actions
  */
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -16,8 +16,9 @@ import {
   Linking,
 } from 'react-native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2Shadows, BCH2BorderRadius } from '../../components/BCH2Theme';
-import { getWalletMnemonic } from '../../class/bch2-wallet-storage';
+import { getWalletMnemonic, isWalletEncrypted } from '../../class/bch2-wallet-storage';
 import { getBCH2TransactionUrl, getBC2TransactionUrl, getBCH2BlockUrl, getBC2BlockUrl } from '../../class/bch2-constants';
+import { PasswordModalWithRef, PasswordModalHandle } from '../../components/PasswordModal';
 
 interface Transaction {
   txid: string;
@@ -54,6 +55,9 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
   refreshing: externalRefreshing,
 }) => {
   const [internalRefreshing, setInternalRefreshing] = useState(false);
+  const [passwordModalVisible, setPasswordModalVisible] = useState(false);
+  const passwordModalRef = useRef<PasswordModalHandle>(null);
+  const backupPendingRef = useRef(false);
   const refreshing = externalRefreshing ?? internalRefreshing;
   const primaryColor = isBC2 ? BCH2Colors.bc2Primary : BCH2Colors.primary;
   const coinSymbol = isBC2 ? 'BC2' : 'BCH2';
@@ -106,24 +110,59 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
     });
   };
 
+  const showMnemonicAlert = (mnemonic: string) => {
+    Alert.alert(
+      '⚠️ Backup Recovery Phrase',
+      `WRITE THIS DOWN AND KEEP IT SAFE!\n\nYour recovery phrase:\n\n${mnemonic}\n\nAnyone with this phrase can access your funds. Never share it.`,
+      [
+        { text: 'I\'ve Saved It', style: 'default' },
+      ]
+    );
+  };
+
   const handleBackupWallet = async () => {
     try {
-      const mnemonic = await getWalletMnemonic(walletId);
-      if (mnemonic) {
-        Alert.alert(
-          '⚠️ Backup Recovery Phrase',
-          `WRITE THIS DOWN AND KEEP IT SAFE!\n\nYour recovery phrase:\n\n${mnemonic}\n\nAnyone with this phrase can access your funds. Never share it.`,
-          [
-            { text: 'I\'ve Saved It', style: 'default' },
-          ]
-        );
-      } else {
-        Alert.alert('Error', 'Could not retrieve wallet backup phrase.');
+      const encrypted = await isWalletEncrypted(walletId);
+
+      if (!encrypted) {
+        // Legacy unencrypted wallet
+        const mnemonic = await getWalletMnemonic(walletId);
+        if (mnemonic) {
+          showMnemonicAlert(mnemonic);
+        } else {
+          Alert.alert('Error', 'Could not retrieve wallet backup phrase.');
+        }
+        return;
       }
+
+      // Encrypted wallet — show password modal
+      setPasswordModalVisible(true);
     } catch (error) {
       Alert.alert('Error', 'Failed to export wallet backup.');
     }
   };
+
+  const handleBackupPasswordSubmit = useCallback(async (password: string) => {
+    try {
+      const mnemonic = await getWalletMnemonic(walletId, password);
+      if (!mnemonic) {
+        passwordModalRef.current?.showError();
+        return;
+      }
+
+      passwordModalRef.current?.showSuccess();
+      backupPendingRef.current = true;
+
+      setTimeout(() => {
+        if (!backupPendingRef.current) return;
+        backupPendingRef.current = false;
+        setPasswordModalVisible(false);
+        showMnemonicAlert(mnemonic);
+      }, 500);
+    } catch {
+      passwordModalRef.current?.showError();
+    }
+  }, [walletId]);
 
   const formatTxid = (txid: string): string => {
     if (!txid || txid.length <= 16) return txid;
@@ -165,6 +204,7 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
   };
 
   return (
+    <>
     <ScrollView
       style={styles.container}
       contentContainerStyle={styles.content}
@@ -273,6 +313,18 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
         <Text style={styles.exportButtonText}>Export Wallet Backup</Text>
       </TouchableOpacity>
     </ScrollView>
+    <PasswordModalWithRef
+      ref={passwordModalRef}
+      visible={passwordModalVisible}
+      title="Unlock Backup"
+      subtitle="Enter your password to view your recovery phrase"
+      onSubmit={handleBackupPasswordSubmit}
+      onCancel={() => {
+        backupPendingRef.current = false;
+        setPasswordModalVisible(false);
+      }}
+    />
+    </>
   );
 };
 
