@@ -498,24 +498,40 @@ function addressToScript(address: string, isBC2: boolean): Buffer {
     }
   }
 
-  let pubkeyHash: Buffer;
-
   if (isBC2) {
-    // BC2 uses legacy P2PKH addresses (starts with 1)
-    if (!address.startsWith('1')) {
-      throw new Error('BC2 addresses must be legacy format (starting with 1)');
+    // BC2 uses legacy P2PKH addresses (starts with 1) or P2SH (starts with 3)
+    if (address.startsWith('3')) {
+      const scriptHash = decodeLegacyAddress(address);
+      // P2SH script: OP_HASH160 <scripthash> OP_EQUAL
+      return Buffer.concat([
+        Buffer.from([0xa9, 0x14]),
+        scriptHash,
+        Buffer.from([0x87]),
+      ]);
     }
-    pubkeyHash = decodeLegacyAddress(address);
-  } else {
-    // BCH2 uses CashAddr format
-    pubkeyHash = decodeCashAddr(address);
+    const pubkeyHash = decodeLegacyAddress(address);
+    return Buffer.concat([
+      Buffer.from([0x76, 0xa9, 0x14]),
+      pubkeyHash,
+      Buffer.from([0x88, 0xac]),
+    ]);
   }
 
-  // P2PKH script: OP_DUP OP_HASH160 <pubkeyhash> OP_EQUALVERIFY OP_CHECKSIG
+  // BCH2 CashAddr format
+  const decoded = decodeCashAddr(address, true);
+  if (decoded.type === 1) {
+    // P2SH: OP_HASH160 <scripthash> OP_EQUAL
+    return Buffer.concat([
+      Buffer.from([0xa9, 0x14]),
+      decoded.hash,
+      Buffer.from([0x87]),
+    ]);
+  }
+  // P2PKH: OP_DUP OP_HASH160 <pubkeyhash> OP_EQUALVERIFY OP_CHECKSIG
   return Buffer.concat([
-    Buffer.from([0x76, 0xa9, 0x14]), // OP_DUP OP_HASH160 PUSH20
-    pubkeyHash,
-    Buffer.from([0x88, 0xac]) // OP_EQUALVERIFY OP_CHECKSIG
+    Buffer.from([0x76, 0xa9, 0x14]),
+    decoded.hash,
+    Buffer.from([0x88, 0xac]),
   ]);
 }
 
@@ -546,9 +562,11 @@ function decodeLegacyAddress(address: string): Buffer {
 }
 
 /**
- * Decode CashAddr to pubkey hash
+ * Decode CashAddr to type and hash
  */
-function decodeCashAddr(address: string): Buffer {
+function decodeCashAddr(address: string): Buffer;
+function decodeCashAddr(address: string, returnType: true): { type: number; hash: Buffer };
+function decodeCashAddr(address: string, returnType?: boolean): Buffer | { type: number; hash: Buffer } {
   const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 
   // Determine prefix
@@ -611,11 +629,16 @@ function decodeCashAddr(address: string): Buffer {
     }
   }
 
+  const type = versionByte >> 3;
   const encodedSize = versionByte & 0x07;
   const expectedSizes = [20, 24, 28, 32, 40, 48, 56, 64];
   const expectedSize = expectedSizes[encodedSize] || 20;
+  const hash = Buffer.from(hashBytes.slice(0, expectedSize));
 
-  return Buffer.from(hashBytes.slice(0, expectedSize));
+  if (returnType) {
+    return { type, hash };
+  }
+  return hash;
 }
 
 /**

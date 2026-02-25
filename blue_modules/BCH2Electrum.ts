@@ -208,18 +208,28 @@ function addressToScriptHash(address: string): string {
     throw new Error('Invalid BCH2 address');
   }
 
-  // Create P2PKH script: OP_DUP OP_HASH160 <pubkeyhash> OP_EQUALVERIFY OP_CHECKSIG
-  const script = Buffer.concat([
-    Buffer.from([0x76, 0xa9, 0x14]), // OP_DUP OP_HASH160 PUSH20
-    decoded.hash,
-    Buffer.from([0x88, 0xac]), // OP_EQUALVERIFY OP_CHECKSIG
-  ]);
+  // Create script based on address type
+  let script: Buffer;
+  if (decoded.type === 1) {
+    // P2SH: OP_HASH160 <scripthash> OP_EQUAL
+    script = Buffer.concat([
+      Buffer.from([0xa9, 0x14]),
+      decoded.hash,
+      Buffer.from([0x87]),
+    ]);
+  } else {
+    // P2PKH: OP_DUP OP_HASH160 <pubkeyhash> OP_EQUALVERIFY OP_CHECKSIG
+    script = Buffer.concat([
+      Buffer.from([0x76, 0xa9, 0x14]),
+      decoded.hash,
+      Buffer.from([0x88, 0xac]),
+    ]);
+  }
 
-  // Double SHA256 and reverse
+  // Single SHA256 and reverse (Electrum protocol standard)
   const crypto = require('crypto');
-  const hash1 = crypto.createHash('sha256').update(script).digest();
-  const hash2 = crypto.createHash('sha256').update(hash1).digest();
-  return Buffer.from(hash2).reverse().toString('hex');
+  const hash = crypto.createHash('sha256').update(script).digest();
+  return Buffer.from(hash).reverse().toString('hex');
 }
 
 // CashAddr decoder with checksum validation
