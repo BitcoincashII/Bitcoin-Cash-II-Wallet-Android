@@ -38,7 +38,7 @@ export const hardcodedPeers: Peer[] = [
 // BC2 Electrum servers (for airdrop balance checking)
 export const bc2Peers: Peer[] = [
   { host: 'infra1.bitcoin-ii.org', ssl: 50009, tcp: 50008 },
-  { host: 'explorer.bitcoin-ii.org', tcp: 5008 },
+  { host: 'explorer.bitcoin-ii.org', tcp: 50008 },
 ];
 
 let mainClient: typeof ElectrumClient | undefined;
@@ -350,8 +350,8 @@ export async function getBC2Balance(address: string): Promise<{ confirmed: numbe
     const data = await response.json();
 
     // chain_stats contains confirmed, mempool_stats contains unconfirmed
-    const confirmed = data.chain_stats?.funded_txo_sum - data.chain_stats?.spent_txo_sum || 0;
-    const unconfirmed = data.mempool_stats?.funded_txo_sum - data.mempool_stats?.spent_txo_sum || 0;
+    const confirmed = (data.chain_stats?.funded_txo_sum ?? 0) - (data.chain_stats?.spent_txo_sum ?? 0);
+    const unconfirmed = (data.mempool_stats?.funded_txo_sum ?? 0) - (data.mempool_stats?.spent_txo_sum ?? 0);
 
     return { confirmed, unconfirmed };
   } catch (apiError) {
@@ -519,13 +519,26 @@ function addressToScriptHashLegacy(address: string): string {
     }
   }
 
-  // Create P2PKH script
-  const pubkeyHash = decoded.slice(1); // Remove version byte
-  const script = Buffer.concat([
-    Buffer.from([0x76, 0xa9, 0x14]), // OP_DUP OP_HASH160 PUSH20
-    pubkeyHash,
-    Buffer.from([0x88, 0xac]), // OP_EQUALVERIFY OP_CHECKSIG
-  ]);
+  const versionByte = decoded[0];
+  const hashData = decoded.slice(1); // Remove version byte
+
+  // Create appropriate script based on address version
+  let script: Buffer;
+  if (versionByte === 0x05) {
+    // P2SH: OP_HASH160 <scripthash> OP_EQUAL
+    script = Buffer.concat([
+      Buffer.from([0xa9, 0x14]),
+      hashData,
+      Buffer.from([0x87]),
+    ]);
+  } else {
+    // P2PKH: OP_DUP OP_HASH160 <pubkeyhash> OP_EQUALVERIFY OP_CHECKSIG
+    script = Buffer.concat([
+      Buffer.from([0x76, 0xa9, 0x14]),
+      hashData,
+      Buffer.from([0x88, 0xac]),
+    ]);
+  }
 
   // Single SHA256 and reverse (BC2 Electrum uses single SHA256, not double)
   const hash = crypto.createHash('sha256').update(script).digest();

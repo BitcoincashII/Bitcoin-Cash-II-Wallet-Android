@@ -17,7 +17,8 @@ import { useFocusEffect } from '@react-navigation/native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2BorderRadius, BCH2Shadows } from '../../components/BCH2Theme';
 import BCH2WalletCard from '../../components/BCH2WalletCard';
 import { getWallets, StoredWallet, updateWalletBalance } from '../../class/bch2-wallet-storage';
-import { getBalanceByAddress, getBC2Balance } from '../../blue_modules/BCH2Electrum';
+import { getBalanceByAddress, getBC2Balance, getBalanceByScripthash } from '../../blue_modules/BCH2Electrum';
+import { bc1AddressToScripthash } from '../../class/bch2-airdrop';
 
 interface Wallet {
   id: string;
@@ -62,6 +63,10 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
             let balance;
             if (wallet.type === 'bc2') {
               balance = await getBC2Balance(wallet.address);
+            } else if (wallet.type === 'bc1' || wallet.address.toLowerCase().startsWith('bc1')) {
+              const scripthash = bc1AddressToScripthash(wallet.address);
+              if (!scripthash) throw new Error('Invalid bc1 address');
+              balance = await getBalanceByScripthash(scripthash);
             } else {
               balance = await getBalanceByAddress(wallet.address);
             }
@@ -87,14 +92,15 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
         try {
           let balance;
           if (wallet.type === 'bc2') {
-            // BC2 uses BC2 Electrum servers
             balance = await getBC2Balance(wallet.address);
+          } else if (wallet.type === 'bc1' || wallet.address.toLowerCase().startsWith('bc1')) {
+            const scripthash = bc1AddressToScripthash(wallet.address);
+            if (!scripthash) throw new Error('Invalid bc1 address');
+            balance = await getBalanceByScripthash(scripthash);
           } else {
-            // BCH2 uses BCH2 Electrum servers
             balance = await getBalanceByAddress(wallet.address);
           }
 
-          // Update balance in storage
           await updateWalletBalance(wallet.id, balance.confirmed, balance.unconfirmed);
         } catch (error) {
           console.error(`Failed to fetch balance for ${wallet.label}:`, error);
@@ -196,6 +202,26 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
                     onPress={() => navigation.navigate('WalletDetail', { walletId: wallet.id })}
                     onReceive={() => navigation.navigate('BCH2Receive', { address: wallet.address, walletLabel: wallet.label, isBC2: true })}
                     onSend={() => navigation.navigate('BCH2Send', { walletId: wallet.id, walletBalance: wallet.balance, walletAddress: wallet.address, isBC2: true })}
+                  />
+                ))}
+              </View>
+            )}
+
+            {/* bc1 SegWit Wallets Section (airdrop claims) */}
+            {wallets.filter(w => w.type === 'bc1').length > 0 && (
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>SegWit Wallets (Airdrop)</Text>
+                {wallets.filter(w => w.type === 'bc1').map(wallet => (
+                  <BCH2WalletCard
+                    key={wallet.id}
+                    walletLabel={wallet.label}
+                    balance={wallet.balance}
+                    unconfirmedBalance={wallet.unconfirmedBalance}
+                    address={wallet.address}
+                    isBC2={false}
+                    onPress={() => navigation.navigate('WalletDetail', { walletId: wallet.id })}
+                    onReceive={() => navigation.navigate('BCH2Receive', { address: wallet.address, walletLabel: wallet.label, isBC2: false })}
+                    onSend={() => navigation.navigate('BCH2Send', { walletId: wallet.id, walletBalance: wallet.balance, walletAddress: wallet.address, isBC2: false })}
                   />
                 ))}
               </View>

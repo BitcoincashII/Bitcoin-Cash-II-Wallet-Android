@@ -303,7 +303,9 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
           </View>
           <View style={styles.infoRow}>
             <Text style={styles.infoLabel}>Derivation Path</Text>
-            <Text style={[styles.infoValue, styles.infoValueMono]}>m/44'/145'/0'</Text>
+            <Text style={[styles.infoValue, styles.infoValueMono]}>
+              {isBC2 ? "m/44'/0'/0'" : address.toLowerCase().startsWith('bc1') ? "m/84'/0'/0'" : "m/44'/145'/0'"}
+            </Text>
           </View>
         </View>
       </View>

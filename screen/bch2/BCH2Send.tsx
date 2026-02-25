@@ -59,9 +59,13 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
 
   const validateAddress = (addr: string): boolean => {
     if (!addr) return false;
-    // Basic validation - proper validation would check checksum
     if (isBC2) {
-      return addr.length >= 26 && addr.length <= 35;
+      // Validate Base58 character set and length
+      const BASE58_CHARS = /^[123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+$/;
+      if (!BASE58_CHARS.test(addr)) return false;
+      if (addr.length < 26 || addr.length > 35) return false;
+      // Must start with 1 (P2PKH) or 3 (P2SH)
+      return addr.startsWith('1') || addr.startsWith('3');
     } else {
       // BCH2 CashAddr format
       const normalizedAddr = addr.toLowerCase();
