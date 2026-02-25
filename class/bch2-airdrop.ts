@@ -476,10 +476,14 @@ function convertToCashAddr(legacyAddress: string): string {
   const decoded = Buffer.from(hex, 'hex');
   const bytes = Buffer.concat([Buffer.alloc(leadingZeros), decoded]);
 
-  // Extract pubkey hash (skip version byte, remove checksum)
-  const pubkeyHash = bytes.slice(1, 21);
+  // Extract version byte and hash (skip version byte, remove 4-byte checksum)
+  const versionByte = bytes[0];
+  const hash = bytes.slice(1, 21);
 
-  return encodeCashAddr('bitcoincashii', 0, pubkeyHash);
+  // Map version byte to CashAddr type: 0x00 = P2PKH (type 0), 0x05 = P2SH (type 1)
+  const cashAddrType = versionByte === 0x05 ? 1 : 0;
+
+  return encodeCashAddr('bitcoincashii', cashAddrType, hash);
 }
 
 // ============================================================================
