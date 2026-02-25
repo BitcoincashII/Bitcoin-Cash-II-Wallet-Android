@@ -75,7 +75,7 @@ export async function claimFromWIF(wif: string, checkBC2Balance: boolean = false
       segwitBalance = segwitResult.confirmed + segwitResult.unconfirmed;
       totalBalance += segwitBalance;
     } catch (e) {
-      console.log('SegWit balance check failed:', e);
+      // console.log('SegWit balance check failed:', e);
     }
 
     // Check BC2 balance for anti-gaming comparison
@@ -94,7 +94,7 @@ export async function claimFromWIF(wif: string, checkBC2Balance: boolean = false
         }
       }
     } catch (e) {
-      console.log('BC2 balance check failed:', e);
+      // console.log('BC2 balance check failed:', e);
     }
 
     return {

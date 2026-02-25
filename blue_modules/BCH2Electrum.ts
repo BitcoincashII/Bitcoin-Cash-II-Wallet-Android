@@ -10,6 +10,8 @@ const ElectrumClient = require('electrum-client');
 const net = require('net');
 const tls = require('tls');
 
+const DEBUG = __DEV__ || false;
+
 // RPC fallback configuration
 let rpcConfig: { host: string; port: number; user: string; password: string } | null = null;
 let useRpcFallback = false;
@@ -50,41 +52,48 @@ let bc2Client: typeof ElectrumClient | undefined;
 let bc2Connected: boolean = false;
 let bc2PeerIndex = 0;
 
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 1000;
+
 async function connectMain(): Promise<void> {
   if (mainConnected) return;
 
-  const peer = hardcodedPeers[currentPeerIndex];
-  currentPeerIndex = (currentPeerIndex + 1) % hardcodedPeers.length;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    const peer = hardcodedPeers[currentPeerIndex];
+    currentPeerIndex = (currentPeerIndex + 1) % hardcodedPeers.length;
 
-  try {
-    // Prefer TCP over SSL since BCH2 Electrum uses self-signed certs
-    const useSSL = !peer.tcp && peer.ssl;
-    mainClient = new ElectrumClient(
-      useSSL ? tls : net,
-      peer.tcp || peer.ssl,
-      peer.host,
-      useSSL ? 'tls' : 'tcp'
-    );
+    try {
+      const useSSL = !peer.tcp && peer.ssl;
+      mainClient = new ElectrumClient(
+        useSSL ? tls : net,
+        peer.tcp || peer.ssl,
+        peer.host,
+        useSSL ? 'tls' : 'tcp'
+      );
 
-    mainClient.onError = (e: Error) => {
-      console.log('BCH2 Electrum error:', e.message);
+      mainClient.onError = (e: Error) => {
+        mainConnected = false;
+      };
+
+      await mainClient.initElectrum({ client: 'bluewallet-bch2', version: '1.4' });
+      mainConnected = true;
+      serverName = peer.host;
+
+      // Subscribe to headers
+      const header = await mainClient.blockchainHeaders_subscribe();
+      if (header && header.height) {
+        latestBlock = { height: header.height, time: Math.floor(Date.now() / 1000) };
+      }
+      return; // Success
+    } catch (e) {
       mainConnected = false;
-    };
-
-    await mainClient.initElectrum({ client: 'bluewallet-bch2', version: '1.4' });
-    mainConnected = true;
-    serverName = peer.host;
-    console.log('Connected to BCH2 Electrum:', peer.host);
-
-    // Subscribe to headers
-    const header = await mainClient.blockchainHeaders_subscribe();
-    if (header && header.height) {
-      latestBlock = { height: header.height, time: Math.floor(Date.now() / 1000) };
+      if (attempt < MAX_RETRIES - 1) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      } else {
+        throw e;
+      }
     }
-  } catch (e) {
-    console.log('BCH2 Electrum connection failed:', e);
-    mainConnected = false;
-    throw e;
   }
 }
 
@@ -213,41 +222,75 @@ function addressToScriptHash(address: string): string {
   return Buffer.from(hash2).reverse().toString('hex');
 }
 
-// CashAddr decoder
+// CashAddr decoder with checksum validation
 function decodeCashAddr(addr: string): { type: number; hash: Buffer } | null {
   const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+  const GENERATORS = [0x98f2bc8e61n, 0x79b76d99e2n, 0xf33e5fb3c4n, 0xae2eabe2a8n, 0x1e4f43e470n];
 
-  let data: number[] = [];
+  const values: number[] = [];
   for (const char of addr.toLowerCase()) {
     const idx = CHARSET.indexOf(char);
     if (idx === -1) return null;
-    data.push(idx);
+    values.push(idx);
   }
 
-  if (data.length < 8) return null;
+  if (values.length < 8) return null;
 
-  // Remove checksum
-  data = data.slice(0, -8);
+  // Validate checksum (polymod must equal 1)
+  // Use bitcoincashii prefix for checksum computation
+  const prefix = 'bitcoincashii';
+  const prefixData: number[] = [];
+  for (const char of prefix) {
+    prefixData.push(char.charCodeAt(0) & 0x1f);
+  }
+  prefixData.push(0);
 
-  // Convert from 5-bit to 8-bit
+  let chk = 1n;
+  for (const value of [...prefixData, ...values]) {
+    const top = chk >> 35n;
+    chk = ((chk & 0x07ffffffffn) << 5n) ^ BigInt(value);
+    for (let i = 0; i < 5; i++) {
+      if ((top >> BigInt(i)) & 1n) {
+        chk ^= GENERATORS[i];
+      }
+    }
+  }
+  if (Number(chk) !== 1) return null;
+
+  // Remove checksum (last 8 values)
+  const data = values.slice(0, -8);
+
+  // Unpack: convert 5-bit groups to 8-bit version byte + hash
   let acc = 0;
   let bits = 0;
-  const result: number[] = [];
+  let versionByte = 0;
+  let versionExtracted = false;
+  const hashBytes: number[] = [];
 
-  for (const value of data) {
-    acc = (acc << 5) | value;
+  for (let i = 0; i < data.length; i++) {
+    acc = (acc << 5) | data[i];
     bits += 5;
-    while (bits >= 8) {
+
+    if (!versionExtracted && bits >= 8) {
       bits -= 8;
-      result.push((acc >> bits) & 0xff);
+      versionByte = (acc >> bits) & 0xff;
+      versionExtracted = true;
+    }
+
+    while (versionExtracted && bits >= 8) {
+      bits -= 8;
+      hashBytes.push((acc >> bits) & 0xff);
     }
   }
 
-  if (result.length < 21) return null;
+  const type = versionByte >> 3;
+  const encodedSize = versionByte & 0x07;
+  const expectedSizes = [20, 24, 28, 32, 40, 48, 56, 64];
+  const expectedSize = expectedSizes[encodedSize] || 20;
 
   return {
-    type: result[0] & 0x0f,
-    hash: Buffer.from(result.slice(1, 21)),
+    type,
+    hash: Buffer.from(hashBytes.slice(0, expectedSize)),
   };
 }
 
@@ -255,29 +298,34 @@ function decodeCashAddr(addr: string): { type: number; hash: Buffer } | null {
 async function connectBC2(): Promise<void> {
   if (bc2Connected) return;
 
-  const peer = bc2Peers[bc2PeerIndex];
-  bc2PeerIndex = (bc2PeerIndex + 1) % bc2Peers.length;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    const peer = bc2Peers[bc2PeerIndex];
+    bc2PeerIndex = (bc2PeerIndex + 1) % bc2Peers.length;
 
-  try {
-    bc2Client = new ElectrumClient(
-      peer.ssl ? tls : net,
-      peer.ssl || peer.tcp,
-      peer.host,
-      peer.ssl ? 'tls' : 'tcp'
-    );
+    try {
+      bc2Client = new ElectrumClient(
+        peer.ssl ? tls : net,
+        peer.ssl || peer.tcp,
+        peer.host,
+        peer.ssl ? 'tls' : 'tcp'
+      );
 
-    bc2Client.onError = (e: Error) => {
-      console.log('BC2 Electrum error:', e.message);
+      bc2Client.onError = (e: Error) => {
+        bc2Connected = false;
+      };
+
+      await bc2Client.initElectrum({ client: 'bluewallet-bch2', version: '1.4' });
+      bc2Connected = true;
+      return; // Success
+    } catch (e) {
       bc2Connected = false;
-    };
-
-    await bc2Client.initElectrum({ client: 'bluewallet-bch2', version: '1.4' });
-    bc2Connected = true;
-    console.log('Connected to BC2 Electrum:', peer.host);
-  } catch (e) {
-    console.log('BC2 Electrum connection failed:', e);
-    bc2Connected = false;
-    throw e;
+      if (attempt < MAX_RETRIES - 1) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      } else {
+        throw e;
+      }
+    }
   }
 }
 
@@ -297,7 +345,7 @@ export async function getBC2Balance(address: string): Promise<{ confirmed: numbe
 
     return { confirmed, unconfirmed };
   } catch (apiError) {
-    console.log('BC2 Explorer API failed, falling back to Electrum:', apiError);
+    DEBUG && console.log('BC2 Explorer API failed, falling back to Electrum:', apiError);
 
     // Fallback to Electrum (may not work due to indexing issues)
     try {
@@ -309,7 +357,7 @@ export async function getBC2Balance(address: string): Promise<{ confirmed: numbe
         unconfirmed: balance.unconfirmed,
       };
     } catch (electrumError) {
-      console.log('BC2 Electrum also failed:', electrumError);
+      DEBUG && console.log('BC2 Electrum also failed:', electrumError);
       return { confirmed: 0, unconfirmed: 0 };
     }
   }
@@ -325,29 +373,29 @@ export async function getBC2BalanceByScripthash(scripthash: string): Promise<{ c
       unconfirmed: balance.unconfirmed,
     };
   } catch (e) {
-    console.log('BC2 scripthash balance check failed:', e);
+    DEBUG && console.log('BC2 scripthash balance check failed:', e);
     return { confirmed: 0, unconfirmed: 0 };
   }
 }
 
 // Get BC2 UTXOs using explorer API
 export async function getBC2Utxos(address: string): Promise<any[]> {
-  console.log(`[BC2] Fetching UTXOs for address: ${address}`);
+  DEBUG && console.log(`[BC2] Fetching UTXOs for address: ${address}`);
   try {
     // Use explorer API as primary method
     const url = `https://explorer.bitcoin-ii.org/api/address/${address}/utxo`;
-    console.log(`[BC2] Explorer API URL: ${url}`);
+    DEBUG && console.log(`[BC2] Explorer API URL: ${url}`);
     const response = await fetch(url);
-    console.log(`[BC2] Explorer API response status: ${response.status}`);
+    DEBUG && console.log(`[BC2] Explorer API response status: ${response.status}`);
     if (!response.ok) {
       const errorText = await response.text();
-      console.log(`[BC2] Explorer API error response: ${errorText}`);
+      DEBUG && console.log(`[BC2] Explorer API error response: ${errorText}`);
       throw new Error(`Explorer API error: ${response.status} - ${errorText}`);
     }
     const utxos = await response.json();
-    console.log(`[BC2] Explorer API returned ${utxos.length} UTXOs`);
+    DEBUG && console.log(`[BC2] Explorer API returned ${utxos.length} UTXOs`);
     if (utxos.length > 0) {
-      console.log(`[BC2] First UTXO:`, JSON.stringify(utxos[0]));
+      DEBUG && console.log(`[BC2] First UTXO:`, JSON.stringify(utxos[0]));
     }
 
     return utxos.map((utxo: any) => ({
@@ -357,7 +405,7 @@ export async function getBC2Utxos(address: string): Promise<any[]> {
       height: utxo.status?.block_height || 0,
     }));
   } catch (apiError) {
-    console.log('[BC2] Explorer API failed, falling back to Electrum:', apiError);
+    DEBUG && console.log('[BC2] Explorer API failed, falling back to Electrum:', apiError);
 
     // Fallback to Electrum
     try {
@@ -371,7 +419,7 @@ export async function getBC2Utxos(address: string): Promise<any[]> {
         height: utxo.height,
       }));
     } catch (electrumError) {
-      console.log('BC2 Electrum also failed:', electrumError);
+      DEBUG && console.log('BC2 Electrum also failed:', electrumError);
       return [];
     }
   }
@@ -392,15 +440,15 @@ export async function getBC2Transactions(address: string): Promise<any[]> {
       confirmed: tx.status?.confirmed || false,
     }));
   } catch (apiError) {
-    console.log('BC2 Explorer API failed:', apiError);
+    DEBUG && console.log('BC2 Explorer API failed:', apiError);
     return [];
   }
 }
 
 // Broadcast BC2 transaction using explorer API
 export async function broadcastBC2Transaction(hex: string): Promise<string> {
-  console.log(`[BC2] Broadcasting transaction, hex length: ${hex.length}`);
-  console.log(`[BC2] Transaction hex: ${hex.substring(0, 100)}...`);
+  DEBUG && console.log(`[BC2] Broadcasting transaction, hex length: ${hex.length}`);
+  DEBUG && console.log(`[BC2] Transaction hex: ${hex.substring(0, 100)}...`);
 
   try {
     const response = await fetch('https://explorer.bitcoin-ii.org/api/tx', {
@@ -410,8 +458,8 @@ export async function broadcastBC2Transaction(hex: string): Promise<string> {
     });
 
     const responseText = await response.text();
-    console.log(`[BC2] Broadcast response status: ${response.status}`);
-    console.log(`[BC2] Broadcast response: ${responseText}`);
+    DEBUG && console.log(`[BC2] Broadcast response status: ${response.status}`);
+    DEBUG && console.log(`[BC2] Broadcast response: ${responseText}`);
 
     if (!response.ok) {
       throw new Error(`Broadcast failed: ${responseText}`);
@@ -419,23 +467,23 @@ export async function broadcastBC2Transaction(hex: string): Promise<string> {
 
     // Validate that response looks like a txid (64 hex chars)
     if (!/^[a-fA-F0-9]{64}$/.test(responseText.trim())) {
-      console.log(`[BC2] WARNING: Response does not look like a txid: ${responseText}`);
+      DEBUG && console.log(`[BC2] WARNING: Response does not look like a txid: ${responseText}`);
       throw new Error(`Broadcast may have failed: ${responseText}`);
     }
 
     return responseText.trim();
   } catch (apiError: any) {
-    console.log('[BC2] Explorer broadcast failed:', apiError.message);
+    DEBUG && console.log('[BC2] Explorer broadcast failed:', apiError.message);
 
     // Fallback to Electrum
-    console.log('[BC2] Trying Electrum fallback...');
+    DEBUG && console.log('[BC2] Trying Electrum fallback...');
     try {
       await connectBC2();
       const txid = await bc2Client.blockchainTransaction_broadcast(hex);
-      console.log(`[BC2] Electrum broadcast result: ${txid}`);
+      DEBUG && console.log(`[BC2] Electrum broadcast result: ${txid}`);
       return txid;
     } catch (electrumError: any) {
-      console.log('[BC2] Electrum broadcast also failed:', electrumError.message);
+      DEBUG && console.log('[BC2] Electrum broadcast also failed:', electrumError.message);
       throw new Error(`Broadcast failed: ${apiError.message}. Electrum: ${electrumError.message}`);
     }
   }
@@ -542,7 +590,7 @@ export async function getBalanceByAddressRpc(address: string): Promise<{ confirm
     return { confirmed, unconfirmed: 0 };
   } catch (e) {
     // addressindex not enabled
-    console.log('RPC balance check failed, addressindex may not be enabled');
+    DEBUG && console.log('RPC balance check failed, addressindex may not be enabled');
     return { confirmed: 0, unconfirmed: 0 };
   }
 }

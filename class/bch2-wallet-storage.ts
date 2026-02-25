@@ -12,13 +12,15 @@ const bip32 = BIP32Factory(ecc);
 const crypto = require('crypto');
 
 const WALLETS_KEY = '@bch2_wallets';
+const ENCRYPTION_ALGO = 'aes-256-cbc';
+const KEY_DERIVATION_ITERATIONS = 100000;
 const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 
 export interface StoredWallet {
   id: string;
   type: 'bch2' | 'bc2' | 'bc1';  // bc1 = Native SegWit for BCH2 airdrop claims
   label: string;
-  mnemonic: string; // Encrypted in production, plain for now
+  mnemonic: string; // AES-256-CBC encrypted (salt:iv:ciphertext, hex-encoded)
   address: string;
   balance: number;
   unconfirmedBalance: number;
@@ -26,21 +28,61 @@ export interface StoredWallet {
 }
 
 /**
+ * Encrypt a mnemonic using AES-256-CBC with PBKDF2 key derivation.
+ * Returns "salt:iv:ciphertext" (all hex-encoded).
+ */
+function encryptMnemonic(mnemonic: string, password: string): string {
+  const salt = crypto.randomBytes(16);
+  const key = crypto.pbkdf2Sync(password, salt, KEY_DERIVATION_ITERATIONS, 32, 'sha256');
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv(ENCRYPTION_ALGO, key, iv);
+  let encrypted = cipher.update(mnemonic, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  return salt.toString('hex') + ':' + iv.toString('hex') + ':' + encrypted;
+}
+
+/**
+ * Decrypt a mnemonic from "salt:iv:ciphertext" format.
+ */
+function decryptMnemonic(encryptedData: string, password: string): string {
+  const parts = encryptedData.split(':');
+  if (parts.length !== 3) {
+    // Legacy unencrypted mnemonic — return as-is
+    return encryptedData;
+  }
+  const salt = Buffer.from(parts[0], 'hex');
+  const iv = Buffer.from(parts[1], 'hex');
+  const ciphertext = parts[1 + 1]; // parts[2]
+  const key = crypto.pbkdf2Sync(password, salt, KEY_DERIVATION_ITERATIONS, 32, 'sha256');
+  const decipher = crypto.createDecipheriv(ENCRYPTION_ALGO, key, iv);
+  let decrypted = decipher.update(ciphertext, 'hex', 'utf8');
+  decrypted += decipher.final('utf8');
+  return decrypted;
+}
+
+/**
  * Save a new wallet to storage
+ * @param password - Encryption password for the mnemonic
  */
 export async function saveWallet(
   label: string,
   mnemonic: string,
-  walletType: 'bch2' | 'bc2' | 'bc1' = 'bch2'
+  walletType: 'bch2' | 'bc2' | 'bc1' = 'bch2',
+  password: string = ''
 ): Promise<StoredWallet> {
-  // Derive address from mnemonic
+  // Derive address from mnemonic (before encrypting)
   const address = await deriveAddress(mnemonic, walletType);
+
+  // Encrypt the mnemonic
+  const encryptedMnemonic = password
+    ? encryptMnemonic(mnemonic.trim(), password)
+    : mnemonic.trim(); // Fallback for callers that don't pass password yet
 
   const wallet: StoredWallet = {
     id: generateId(),
     type: walletType,
     label: label.trim(),
-    mnemonic: mnemonic.trim(),
+    mnemonic: encryptedMnemonic,
     address,
     balance: 0,
     unconfirmedBalance: 0,
@@ -177,10 +219,12 @@ function base58Encode(data: Buffer): string {
 
 /**
  * Get mnemonic for a wallet (for sending transactions)
+ * @param password - Decryption password. If empty, returns raw stored value.
  */
-export async function getWalletMnemonic(id: string): Promise<string | null> {
+export async function getWalletMnemonic(id: string, password: string = ''): Promise<string | null> {
   const wallet = await getWallet(id);
-  return wallet?.mnemonic || null;
+  if (!wallet?.mnemonic) return null;
+  return password ? decryptMnemonic(wallet.mnemonic, password) : wallet.mnemonic;
 }
 
 // Helper functions
@@ -196,9 +240,15 @@ function hash160(data: Buffer): Buffer {
 }
 
 function encodeCashAddr(prefix: string, type: number, hash: Buffer): string {
-  const payload = [type];
-  let acc = 0;
-  let bits = 0;
+  // Determine size code from hash length
+  const sizeMap: Record<number, number> = { 20: 0, 24: 1, 28: 2, 32: 3, 40: 4, 48: 5, 56: 6, 64: 7 };
+  const sizeCode = sizeMap[hash.length] ?? 0;
+
+  // Pack version byte (type << 3 | size_code) with hash into 5-bit groups
+  const versionByte = (type << 3) | sizeCode;
+  const payload: number[] = [];
+  let acc = versionByte;
+  let bits = 8;
 
   for (const byte of hash) {
     acc = (acc << 8) | byte;

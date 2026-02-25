@@ -28,6 +28,8 @@ const bip32 = BIP32Factory(ecc);
 const crypto = require('crypto');
 const bs58check = require('bs58check');
 
+const DEBUG = __DEV__ || false;
+
 // Bech32 constants
 const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 const BECH32_GENERATOR = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
@@ -72,18 +74,18 @@ export async function sendTransaction(
     ? getLegacyAddress(hash160(Buffer.from(child.publicKey)))
     : getCashAddr(hash160(Buffer.from(child.publicKey)));
 
-  console.log(`[TX] Derived ${isBC2 ? 'BC2' : 'BCH2'} address: ${fromAddress}`);
-  console.log(`[TX] Using derivation path: ${derivationPath}`);
+  DEBUG && console.log(`[TX] Derived ${isBC2 ? 'BC2' : 'BCH2'} address: ${fromAddress}`);
+  DEBUG && console.log(`[TX] Using derivation path: ${derivationPath}`);
 
   // Verify address matches if provided
   if (expectedAddress) {
     const normalizedExpected = expectedAddress.toLowerCase().replace(/^bitcoincash(ii)?:/, '');
     const normalizedDerived = fromAddress.toLowerCase().replace(/^bitcoincash(ii)?:/, '');
     if (normalizedExpected !== normalizedDerived) {
-      console.log(`[TX] WARNING: Address mismatch! Expected: ${expectedAddress}, Derived: ${fromAddress}`);
+      DEBUG && console.log(`[TX] WARNING: Address mismatch! Expected: ${expectedAddress}, Derived: ${fromAddress}`);
       // Try alternate derivation paths for BC2
       if (isBC2) {
-        console.log('[TX] Trying alternate BC2 derivation paths...');
+        DEBUG && console.log('[TX] Trying alternate BC2 derivation paths...');
         const altPaths = [
           "m/44'/145'/0'/0/0",  // BCH path (some wallets use this)
           "m/44'/0'/0'/0/1",    // Second address
@@ -93,7 +95,7 @@ export async function sendTransaction(
           const altChild = root.derivePath(altPath);
           const altAddress = getLegacyAddress(hash160(Buffer.from(altChild.publicKey)));
           if (altAddress === expectedAddress) {
-            console.log(`[TX] Found matching address at path: ${altPath}`);
+            DEBUG && console.log(`[TX] Found matching address at path: ${altPath}`);
             // Use this key instead
             return sendTransactionWithKey(
               Buffer.from(altChild.privateKey!),
@@ -111,14 +113,14 @@ export async function sendTransaction(
   }
 
   // Fetch UTXOs
-  console.log(`[TX] Fetching UTXOs for address: ${fromAddress}`);
+  DEBUG && console.log(`[TX] Fetching UTXOs for address: ${fromAddress}`);
   const utxos: UTXO[] = isBC2
     ? await getBC2Utxos(fromAddress)
     : await getUtxosByAddress(fromAddress);
 
-  console.log(`[TX] Found ${utxos.length} UTXOs`);
+  DEBUG && console.log(`[TX] Found ${utxos.length} UTXOs`);
   if (utxos.length > 0) {
-    console.log(`[TX] UTXOs:`, JSON.stringify(utxos.slice(0, 5))); // Log first 5
+    DEBUG && console.log(`[TX] UTXOs:`, JSON.stringify(utxos.slice(0, 5))); // Log first 5
   }
 
   if (utxos.length === 0) {
@@ -161,12 +163,12 @@ export async function sendTransaction(
   }
 
   // Build raw transaction
-  console.log(`[TX] Building transaction:`);
-  console.log(`[TX]   To: ${toAddress}`);
-  console.log(`[TX]   Amount: ${amountSats} sats`);
-  console.log(`[TX]   Fee: ${fee} sats (${feePerByte} sat/byte)`);
-  console.log(`[TX]   Change: ${changeAmount > 546 ? changeAmount : 0} sats`);
-  console.log(`[TX]   Inputs: ${selectedUtxos.length}`);
+  DEBUG && console.log(`[TX] Building transaction:`);
+  DEBUG && console.log(`[TX]   To: ${toAddress}`);
+  DEBUG && console.log(`[TX]   Amount: ${amountSats} sats`);
+  DEBUG && console.log(`[TX]   Fee: ${fee} sats (${feePerByte} sat/byte)`);
+  DEBUG && console.log(`[TX]   Change: ${changeAmount > 546 ? changeAmount : 0} sats`);
+  DEBUG && console.log(`[TX]   Inputs: ${selectedUtxos.length}`);
 
   const txHex = buildTransaction(
     selectedUtxos,
@@ -179,15 +181,15 @@ export async function sendTransaction(
     isBC2
   );
 
-  console.log(`[TX] Transaction hex (${txHex.length} chars): ${txHex}`);
+  DEBUG && console.log(`[TX] Transaction hex (${txHex.length} chars): ${txHex}`);
 
   // Broadcast
-  console.log(`[TX] Broadcasting to ${isBC2 ? 'BC2' : 'BCH2'} network...`);
+  DEBUG && console.log(`[TX] Broadcasting to ${isBC2 ? 'BC2' : 'BCH2'} network...`);
   const txid = isBC2
     ? await broadcastBC2Transaction(txHex)
     : await broadcastTransaction(txHex);
 
-  console.log(`[TX] Broadcast successful, txid: ${txid}`);
+  DEBUG && console.log(`[TX] Broadcast successful, txid: ${txid}`);
   return { txid, hex: txHex };
 }
 
@@ -523,12 +525,12 @@ function addressToScript(address: string, isBC2: boolean): Buffer {
 function decodeLegacyAddress(address: string): Buffer {
   // Trim any whitespace
   address = address.trim();
-  console.log(`[TX] Decoding legacy address: ${address}`);
+  DEBUG && console.log(`[TX] Decoding legacy address: ${address}`);
 
   try {
     // Use bs58check for reliable decoding
     const decoded = bs58check.decode(address);
-    console.log(`[TX] Decoded ${decoded.length} bytes: ${decoded.toString('hex')}`);
+    DEBUG && console.log(`[TX] Decoded ${decoded.length} bytes: ${decoded.toString('hex')}`);
 
     // First byte is version, rest is pubkey hash
     if (decoded.length !== 21) {
@@ -538,7 +540,7 @@ function decodeLegacyAddress(address: string): Buffer {
     // Return pubkey hash (skip version byte)
     return decoded.slice(1);
   } catch (err: any) {
-    console.log(`[TX] bs58check decode failed: ${err.message}`);
+    DEBUG && console.log(`[TX] bs58check decode failed: ${err.message}`);
     throw new Error(`Invalid legacy address: ${err.message}`);
   }
 }
@@ -899,12 +901,12 @@ async function sendTransactionWithKey(
   isBC2: boolean
 ): Promise<TransactionResult> {
   // Fetch UTXOs
-  console.log(`[TX] Fetching UTXOs for address: ${fromAddress}`);
+  DEBUG && console.log(`[TX] Fetching UTXOs for address: ${fromAddress}`);
   const utxos: UTXO[] = isBC2
     ? await getBC2Utxos(fromAddress)
     : await getUtxosByAddress(fromAddress);
 
-  console.log(`[TX] Found ${utxos.length} UTXOs`);
+  DEBUG && console.log(`[TX] Found ${utxos.length} UTXOs`);
 
   if (utxos.length === 0) {
     const coinType = isBC2 ? 'BC2' : 'BCH2';
@@ -975,7 +977,7 @@ export async function sendFromBech32(
   amountSats: number,
   feePerByte: number
 ): Promise<TransactionResult> {
-  console.log(`[TX] Sending from bech32 address: ${expectedAddress}`);
+  DEBUG && console.log(`[TX] Sending from bech32 address: ${expectedAddress}`);
 
   // Decode the bc1 address to get the pubkey hash
   const decoded = decodeBech32(expectedAddress);
@@ -1002,7 +1004,7 @@ export async function sendFromBech32(
       if (pubkeyHash.equals(targetPubkeyHash)) {
         matchedChild = child;
         matchedPath = path;
-        console.log(`[TX] Found matching key at path: ${path}`);
+        DEBUG && console.log(`[TX] Found matching key at path: ${path}`);
         break;
       }
     }
@@ -1013,15 +1015,15 @@ export async function sendFromBech32(
     throw new Error('Could not find private key for bc1 address in wallet');
   }
 
-  console.log(`[TX] Using derivation path: ${matchedPath}`);
+  DEBUG && console.log(`[TX] Using derivation path: ${matchedPath}`);
 
   // Get scripthash for UTXO lookup
   const scripthash = getSegwitScripthash(targetPubkeyHash);
-  console.log(`[TX] Scripthash: ${scripthash}`);
+  DEBUG && console.log(`[TX] Scripthash: ${scripthash}`);
 
   // Fetch UTXOs using scripthash
   const utxos: UTXO[] = await getUtxosByScripthash(scripthash);
-  console.log(`[TX] Found ${utxos.length} UTXOs`);
+  DEBUG && console.log(`[TX] Found ${utxos.length} UTXOs`);
 
   if (utxos.length === 0) {
     throw new Error(`No UTXOs available for bc1 address ${expectedAddress}`);
@@ -1061,12 +1063,12 @@ export async function sendFromBech32(
   }
 
   // Build transaction
-  console.log(`[TX] Building SegWit recovery transaction:`);
-  console.log(`[TX]   To: ${toAddress}`);
-  console.log(`[TX]   Amount: ${amountSats} sats`);
-  console.log(`[TX]   Fee: ${fee} sats (${feePerByte} sat/byte)`);
-  console.log(`[TX]   Change: ${changeAmount > 546 ? changeAmount : 0} sats`);
-  console.log(`[TX]   Inputs: ${selectedUtxos.length}`);
+  DEBUG && console.log(`[TX] Building SegWit recovery transaction:`);
+  DEBUG && console.log(`[TX]   To: ${toAddress}`);
+  DEBUG && console.log(`[TX]   Amount: ${amountSats} sats`);
+  DEBUG && console.log(`[TX]   Fee: ${fee} sats (${feePerByte} sat/byte)`);
+  DEBUG && console.log(`[TX]   Change: ${changeAmount > 546 ? changeAmount : 0} sats`);
+  DEBUG && console.log(`[TX]   Inputs: ${selectedUtxos.length}`);
 
   // For BCH2 SegWit recovery, we use the same BIP143 sighash and scriptSig format
   // as P2PKH. The node's SegWit recovery code detects the P2WPKH scriptPubKey
@@ -1082,19 +1084,133 @@ export async function sendFromBech32(
     targetPubkeyHash
   );
 
-  console.log(`[TX] Transaction hex (${txHex.length} chars): ${txHex}`);
+  DEBUG && console.log(`[TX] Transaction hex (${txHex.length} chars): ${txHex}`);
 
   // Broadcast to BCH2 network
-  console.log(`[TX] Broadcasting to BCH2 network...`);
+  DEBUG && console.log(`[TX] Broadcasting to BCH2 network...`);
   const txid = await broadcastTransaction(txHex);
 
-  console.log(`[TX] Broadcast successful, txid: ${txid}`);
   return { txid, hex: txHex };
 }
 
 /**
- * Build a raw transaction spending P2WPKH outputs via SegWit recovery
- * Uses BIP143 sighash with FORKID, scriptSig contains <sig> <pubkey>
+ * Send transaction from a P2SH-P2WPKH (3xxx wrapped SegWit) address
+ * BCH2 supports spending P2SH-P2WPKH via scriptSig with redeemScript appended
+ */
+export async function sendFromP2SH(
+  mnemonic: string,
+  expectedAddress: string,
+  toAddress: string,
+  amountSats: number,
+  feePerByte: number
+): Promise<TransactionResult> {
+  // Derive from mnemonic and search BIP49 paths
+  const seed = await bip39.mnemonicToSeed(mnemonic);
+  const root = bip32.fromSeed(seed);
+
+  // BIP49 paths: m/49'/0'/0'/0/x (receive) and m/49'/0'/0'/1/x (change)
+  const basePaths = ["m/49'/0'/0'/0", "m/49'/0'/0'/1"];
+  let matchedChild: ReturnType<typeof root.derivePath> | null = null;
+
+  // To match a 3xxx address we need to compute P2SH(P2WPKH(pubkey)) for each key
+  for (const basePath of basePaths) {
+    for (let i = 0; i < 20; i++) {
+      const path = `${basePath}/${i}`;
+      const child = root.derivePath(path);
+      const pubkeyHash = hash160(Buffer.from(child.publicKey));
+
+      // redeemScript = OP_0 PUSH_20 <pubkeyhash>
+      const rs = Buffer.concat([Buffer.from([0x00, 0x14]), pubkeyHash]);
+      const scriptHash = hash160(rs);
+
+      // P2SH address = Base58Check(0x05 || HASH160(redeemScript))
+      const versionedHash = Buffer.concat([Buffer.from([0x05]), scriptHash]);
+      const p2shAddress = bs58check.encode(versionedHash);
+
+      if (p2shAddress === expectedAddress) {
+        matchedChild = child;
+        break;
+      }
+    }
+    if (matchedChild) break;
+  }
+
+  if (!matchedChild || !matchedChild.privateKey) {
+    throw new Error('Could not find private key for P2SH address in wallet');
+  }
+
+  const pubkeyHash = hash160(Buffer.from(matchedChild.publicKey));
+  const redeemScript = Buffer.concat([Buffer.from([0x00, 0x14]), pubkeyHash]);
+
+  // Get scripthash for UTXO lookup (P2SH scriptPubKey)
+  const scriptHash = hash160(redeemScript);
+  const scriptPubKey = Buffer.concat([
+    Buffer.from([0xa9, 0x14]),
+    scriptHash,
+    Buffer.from([0x87]),
+  ]);
+  const sha = crypto.createHash('sha256').update(scriptPubKey).digest();
+  const scripthash = Buffer.from(sha).reverse().toString('hex');
+
+  // Fetch UTXOs using scripthash
+  const utxos: UTXO[] = await getUtxosByScripthash(scripthash);
+
+  if (utxos.length === 0) {
+    throw new Error(`No UTXOs available for P2SH address ${expectedAddress}`);
+  }
+
+  utxos.sort((a, b) => b.value - a.value);
+
+  const estimateTxSize = (inputCount: number, outputCount: number): number => {
+    // P2SH-P2WPKH inputs are ~148 bytes (sig + pubkey + redeemScript in scriptSig)
+    return 10 + (148 * inputCount) + (34 * outputCount);
+  };
+
+  let selectedUtxos: UTXO[] = [];
+  let totalInput = 0;
+  const outputCount = 2;
+
+  for (const utxo of utxos) {
+    selectedUtxos.push(utxo);
+    totalInput += utxo.value;
+
+    const estimatedSize = estimateTxSize(selectedUtxos.length, outputCount);
+    const estimatedFee = estimatedSize * feePerByte;
+
+    if (totalInput >= amountSats + estimatedFee) {
+      break;
+    }
+  }
+
+  const txSize = estimateTxSize(selectedUtxos.length, outputCount);
+  const fee = txSize * feePerByte;
+  const changeAmount = totalInput - amountSats - fee;
+
+  if (changeAmount < 0) {
+    throw new Error(`Insufficient funds. Need ${amountSats + fee} sats, have ${totalInput} sats`);
+  }
+
+  const txHex = buildSegwitRecoveryTransaction(
+    selectedUtxos,
+    toAddress,
+    amountSats,
+    changeAmount > 546 ? expectedAddress : null,
+    changeAmount > 546 ? changeAmount : 0,
+    Buffer.from(matchedChild.privateKey),
+    Buffer.from(matchedChild.publicKey),
+    pubkeyHash,
+    redeemScript  // Pass redeemScript for P2SH-P2WPKH
+  );
+
+  const txid = await broadcastTransaction(txHex);
+  return { txid, hex: txHex };
+}
+
+/**
+ * Build a raw transaction spending P2WPKH or P2SH-P2WPKH outputs via SegWit recovery
+ * Uses BIP143 sighash with FORKID
+ * For bare P2WPKH (bc1): scriptSig = <sig> <pubkey>
+ * For P2SH-P2WPKH (3xxx): scriptSig = <sig> <pubkey> <redeemScript>
  */
 function buildSegwitRecoveryTransaction(
   utxos: UTXO[],
@@ -1104,7 +1220,8 @@ function buildSegwitRecoveryTransaction(
   changeAmount: number,
   privateKey: Buffer,
   publicKey: Buffer,
-  pubkeyHash: Buffer
+  pubkeyHash: Buffer,
+  redeemScript?: Buffer  // For P2SH-P2WPKH: 0x0014<pubkeyhash>
 ): string {
   // Transaction version
   const version = Buffer.alloc(4);
@@ -1120,14 +1237,25 @@ function buildSegwitRecoveryTransaction(
   amountBytes.writeBigUInt64LE(BigInt(amount), 0);
   outputs = Buffer.concat([outputs, amountBytes, encodeVarInt(recipientScript.length), recipientScript]);
 
-  // Output 2: change (back to bc1 address)
+  // Output 2: change (back to original address)
   if (changeAddress && changeAmount > 0) {
     outputCount++;
-    // Change goes back to the bc1 address (P2WPKH script)
-    const changeScript = Buffer.concat([
-      Buffer.from([0x00, 0x14]),
-      pubkeyHash
-    ]);
+    let changeScript: Buffer;
+    if (redeemScript) {
+      // P2SH change: OP_HASH160 <HASH160(redeemScript)> OP_EQUAL
+      const scriptHash = hash160(redeemScript);
+      changeScript = Buffer.concat([
+        Buffer.from([0xa9, 0x14]),
+        scriptHash,
+        Buffer.from([0x87]),
+      ]);
+    } else {
+      // P2WPKH change: OP_0 <pubkeyhash>
+      changeScript = Buffer.concat([
+        Buffer.from([0x00, 0x14]),
+        pubkeyHash
+      ]);
+    }
     const changeBytes = Buffer.alloc(8);
     changeBytes.writeBigUInt64LE(BigInt(changeAmount), 0);
     outputs = Buffer.concat([outputs, changeBytes, encodeVarInt(changeScript.length), changeScript]);
@@ -1145,15 +1273,19 @@ function buildSegwitRecoveryTransaction(
     // Sign
     const signature = signWithPrivateKey(sighash, privateKey);
 
-    // Build scriptSig: <sig_with_FORKID> <pubkey>
-    // BCH2 SegWit recovery expects standard P2PKH-style scriptSig
+    // Build scriptSig
     const sigWithHashType = Buffer.concat([signature, Buffer.from([0x41])]); // SIGHASH_ALL | FORKID
-    const scriptSig = Buffer.concat([
+    const sigPubkey = Buffer.concat([
       encodeVarInt(sigWithHashType.length),
       sigWithHashType,
       encodeVarInt(publicKey.length),
       publicKey
     ]);
+    // For P2SH-P2WPKH: append redeemScript so P2SH evaluation finds it
+    // For bare P2WPKH: just <sig> <pubkey>
+    const scriptSig = redeemScript
+      ? Buffer.concat([sigPubkey, encodeVarInt(redeemScript.length), redeemScript])
+      : sigPubkey;
 
     // Build signed input
     const txidBytes = Buffer.from(utxo.txid, 'hex').reverse();
@@ -1272,4 +1404,5 @@ function createBIP143SighashForSegwit(
 export default {
   sendTransaction,
   sendFromBech32,
+  sendFromP2SH,
 };
