@@ -455,18 +455,26 @@ function cashAddrPolymod(values: number[]): number {
 function convertToCashAddr(legacyAddress: string): string {
   // Decode base58 address
   const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-  let num = 0n;
 
+  // Count leading '1' characters (each represents a leading 0x00 byte)
+  let leadingZeros = 0;
+  for (const char of legacyAddress) {
+    if (char === '1') leadingZeros++;
+    else break;
+  }
+
+  let num = 0n;
   for (const char of legacyAddress) {
     const idx = ALPHABET.indexOf(char);
     if (idx === -1) throw new Error('Invalid address character');
     num = num * 58n + BigInt(idx);
   }
 
-  // Convert to bytes
+  // Convert to bytes, restoring leading zero bytes
   let hex = num.toString(16);
   if (hex.length % 2) hex = '0' + hex;
-  const bytes = Buffer.from(hex, 'hex');
+  const decoded = Buffer.from(hex, 'hex');
+  const bytes = Buffer.concat([Buffer.alloc(leadingZeros), decoded]);
 
   // Extract pubkey hash (skip version byte, remove checksum)
   const pubkeyHash = bytes.slice(1, 21);
