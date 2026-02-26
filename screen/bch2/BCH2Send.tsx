@@ -71,13 +71,19 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
       // Must start with 1 (P2PKH) or 3 (P2SH)
       return addr.startsWith('1') || addr.startsWith('3');
     } else {
-      // BCH2 CashAddr format
+      // BCH2 CashAddr format - must have correct prefix or valid unprefixed format
       const normalizedAddr = addr.toLowerCase();
+      // Reject BCH addresses (wrong chain)
+      if (normalizedAddr.startsWith('bitcoincash:') || normalizedAddr.startsWith('bchtest:')) {
+        return false;
+      }
+      // Accept with bitcoincashii: prefix
       if (normalizedAddr.startsWith('bitcoincashii:')) {
         return normalizedAddr.length >= 42;
       }
-      // Also accept without prefix
-      return addr.length >= 42;
+      // Accept unprefixed CashAddr (must be valid base32 charset only)
+      const CASHADDR_CHARS = /^[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+$/;
+      return addr.length >= 34 && addr.length <= 50 && CASHADDR_CHARS.test(normalizedAddr);
     }
   };
 
