@@ -54,7 +54,11 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
   };
 
   const amountInSats = parseAmount(amount);
-  const feeInSats = parseInt(fee) * 226; // Estimate 226 bytes for typical P2PKH tx
+  // Estimate tx size: ~148 bytes/input + ~34 bytes/output + ~10 overhead
+  // Assume 1 input for display; actual fee computed during signing
+  const feePerByte = Math.max(1, parseInt(fee) || 1);
+  const estimatedSize = 1 * 148 + 2 * 34 + 10; // 226 for single-input
+  const feeInSats = feePerByte * estimatedSize;
   const totalInSats = amountInSats + feeInSats;
 
   const validateAddress = (addr: string): boolean => {
