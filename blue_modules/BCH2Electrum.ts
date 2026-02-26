@@ -293,6 +293,9 @@ function decodeCashAddr(addr: string): { type: number; hash: Buffer } | null {
     }
   }
 
+  // CashAddr spec: padding bits must be zero
+  if (bits > 0 && (acc & ((1 << bits) - 1)) !== 0) return null;
+
   const type = versionByte >> 3;
   const encodedSize = versionByte & 0x07;
   const expectedSizes = [20, 24, 28, 32, 40, 48, 56, 64];
