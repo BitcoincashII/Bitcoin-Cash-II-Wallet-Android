@@ -50,7 +50,7 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
   const parseAmount = (amountStr: string): number => {
     const parsed = parseFloat(amountStr);
     if (isNaN(parsed)) return 0;
-    return Math.floor(parsed * 100000000); // Convert to satoshis
+    return Math.round(parsed * 100000000); // Convert to satoshis
   };
 
   const amountInSats = parseAmount(amount);

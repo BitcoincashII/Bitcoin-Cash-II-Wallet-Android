@@ -202,7 +202,7 @@ export class BCH2Wallet extends AbstractWallet {
       }
       prefixData.push(0);
 
-      return cashAddrPolymod([...prefixData, ...data]) === 1;
+      return cashAddrPolymod([...prefixData, ...data]) === 1n;
     } catch {
       return false;
     }
@@ -276,11 +276,11 @@ function calculateCashAddrChecksum(prefix: string, payload: number[]): number[] 
   prefixData.push(0);
 
   const values = [...prefixData, ...payload, 0, 0, 0, 0, 0, 0, 0, 0];
-  const polymod = cashAddrPolymod(values) ^ 1;
+  const polymod = cashAddrPolymod(values) ^ 1n;
 
   const checksum = [];
   for (let i = 0; i < 8; i++) {
-    checksum.push((polymod >> (5 * (7 - i))) & 0x1f);
+    checksum.push(Number((polymod >> BigInt(5 * (7 - i))) & 0x1fn));
   }
   return checksum;
 }
@@ -288,7 +288,7 @@ function calculateCashAddrChecksum(prefix: string, payload: number[]): number[] 
 /**
  * CashAddr polymod function
  */
-function cashAddrPolymod(values: number[]): number {
+function cashAddrPolymod(values: number[]): bigint {
   const GENERATORS = [0x98f2bc8e61n, 0x79b76d99e2n, 0xf33e5fb3c4n, 0xae2eabe2a8n, 0x1e4f43e470n];
   let chk = 1n;
 
@@ -302,7 +302,7 @@ function cashAddrPolymod(values: number[]): number {
     }
   }
 
-  return Number(chk);
+  return chk;
 }
 
 export default BCH2Wallet;

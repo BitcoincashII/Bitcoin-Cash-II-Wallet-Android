@@ -599,7 +599,7 @@ function decodeCashAddr(address: string, returnType?: boolean): Buffer | { type:
     prefixData.push(char.charCodeAt(0) & 0x1f);
   }
   prefixData.push(0);
-  if (cashAddrPolymod([...prefixData, ...values]) !== 1) {
+  if (cashAddrPolymod([...prefixData, ...values]) !== 1n) {
     throw new Error('Invalid CashAddr checksum');
   }
 
@@ -697,16 +697,16 @@ function cashAddrChecksum(prefix: string, payload: number[]): number[] {
   prefixData.push(0);
 
   const values = [...prefixData, ...payload, 0, 0, 0, 0, 0, 0, 0, 0];
-  const polymod = cashAddrPolymod(values) ^ 1;
+  const polymod = cashAddrPolymod(values) ^ 1n;
 
   const checksum: number[] = [];
   for (let i = 0; i < 8; i++) {
-    checksum.push((polymod >> (5 * (7 - i))) & 0x1f);
+    checksum.push(Number((polymod >> BigInt(5 * (7 - i))) & 0x1fn));
   }
   return checksum;
 }
 
-function cashAddrPolymod(values: number[]): number {
+function cashAddrPolymod(values: number[]): bigint {
   const GENERATORS = [0x98f2bc8e61n, 0x79b76d99e2n, 0xf33e5fb3c4n, 0xae2eabe2a8n, 0x1e4f43e470n];
   let chk = 1n;
 
@@ -720,7 +720,7 @@ function cashAddrPolymod(values: number[]): number {
     }
   }
 
-  return Number(chk);
+  return chk;
 }
 
 // Helper functions

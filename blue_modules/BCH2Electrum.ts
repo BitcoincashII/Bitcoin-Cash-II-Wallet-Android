@@ -265,7 +265,7 @@ function decodeCashAddr(addr: string): { type: number; hash: Buffer } | null {
       }
     }
   }
-  if (Number(chk) !== 1) return null;
+  if (chk !== 1n) return null;
 
   // Remove checksum (last 8 values)
   const data = values.slice(0, -8);
@@ -597,7 +597,7 @@ export async function getBalanceByAddressRpc(address: string): Promise<{ confirm
     const result = await rpcCall('getaddressinfo', [address]);
     if (result.ismine || result.iswatchonly) {
       const balance = await rpcCall('getbalance');
-      return { confirmed: Math.floor(balance * 100000000), unconfirmed: 0 };
+      return { confirmed: Math.round(balance * 100000000), unconfirmed: 0 };
     }
   } catch (e) {
     // Address not in wallet

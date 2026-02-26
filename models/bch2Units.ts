@@ -46,7 +46,7 @@ export function parseBCH2Amount(amount: string): number {
   }
 
   // Otherwise, convert from BCH2 to satoshis
-  return Math.floor(value * 100000000);
+  return Math.round(value * 100000000);
 }
 
 /**
