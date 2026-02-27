@@ -27,14 +27,12 @@ class ElectrumClient {
         private const val MAX_RETRIES = 3
         private const val RETRY_DELAY_MS = 1000L // 1 second delay between retries
         
-        // Default list of Electrum servers to try
+        // BCH2 Electrum servers (SSL preferred for security)
         val hardcodedPeers = listOf(
-            ElectrumServer("electrum1.bluewallet.io", 50001, false),
-            ElectrumServer("electrum2.bluewallet.io", 50001, false),
-            ElectrumServer("electrum3.bluewallet.io", 50001, false),
-            ElectrumServer("electrum1.bluewallet.io", 443, true),
-            ElectrumServer("electrum2.bluewallet.io", 443, true),
-            ElectrumServer("electrum3.bluewallet.io", 443, true)
+            ElectrumServer("electrum.bch2.org", 50002, true),
+            ElectrumServer("electrum2.bch2.org", 50002, true),
+            ElectrumServer("electrum.bch2.org", 50001, false),
+            ElectrumServer("electrum2.bch2.org", 50001, false)
         )
     }
 
@@ -308,23 +306,14 @@ class ElectrumClient {
     }
     
     /**
-     * Create an SSL socket with optional certificate validation
+     * Create an SSL socket with proper certificate validation.
+     * Certificate validation is always enabled to prevent MITM attacks.
      */
-    private fun createSslSocket(host: String, port: Int, validateCertificates: Boolean): SSLSocket {
+    private fun createSslSocket(host: String, port: Int, validateCertificates: Boolean = true): SSLSocket {
         val sslContext = SSLContext.getInstance("TLS")
-        
-        if (!validateCertificates) {
-            val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
-                override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
-                override fun checkClientTrusted(certs: Array<X509Certificate>, authType: String) {}
-                override fun checkServerTrusted(certs: Array<X509Certificate>, authType: String) {}
-            })
-            
-            sslContext.init(null, trustAllCerts, SecureRandom())
-        } else {
-            sslContext.init(null, null, null)
-        }
-        
+        // Always use default trust manager for proper certificate validation
+        sslContext.init(null, null, null)
+
         val factory: SSLSocketFactory = sslContext.socketFactory
         return factory.createSocket(host, port) as SSLSocket
     }

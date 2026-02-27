@@ -71,22 +71,48 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
     setTesting(true);
     setStatus('unknown');
 
+    let client: any = null;
     try {
-      // Simulate connection test
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      const success = Math.random() > 0.2;
+      // Use the raw electrum-client npm package directly for connection test
+      const ElectrumClient = require('electrum-client');
+      const net = require('net');
+      const tls = require('tls');
 
-      if (success) {
+      client = new ElectrumClient(
+        server.ssl ? tls : net,
+        server.port,
+        server.host,
+        server.ssl ? 'tls' : 'tcp',
+      );
+
+      // Connect with 10s timeout
+      await Promise.race([
+        client.initElectrum({ client: 'bch2-wallet-test', version: '1.4' }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout (10s)')), 10000)),
+      ]);
+
+      // Request server version to verify it responds
+      const versionResult = await Promise.race([
+        client.server_version('BCH2Wallet', '1.4'),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Request timeout (5s)')), 5000)),
+      ]);
+
+      client.close();
+      client = null;
+
+      if (versionResult) {
+        const serverVersion = Array.isArray(versionResult) ? versionResult.join(' / ') : String(versionResult);
         setStatus('connected');
-        Alert.alert('Success', `Connected to ${coinName} server: ${server.host}:${server.port}`);
+        Alert.alert('Success', `Connected to ${coinName} server: ${server.host}:${server.port}\nServer: ${serverVersion}`);
       } else {
         setStatus('failed');
-        Alert.alert('Failed', `Could not connect to ${server.host}:${server.port}`);
+        Alert.alert('Failed', `Server did not respond to version request`);
       }
     } catch (error: any) {
       setStatus('failed');
       Alert.alert('Error', error.message || 'Connection test failed');
     } finally {
+      if (client) { try { client.close(); } catch {} }
       setTesting(false);
     }
   }, []);

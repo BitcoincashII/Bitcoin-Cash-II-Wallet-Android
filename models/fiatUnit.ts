@@ -235,5 +235,8 @@ export type FiatUnitType = {
 };
 
 export async function getFiatRate(ticker: string): Promise<number> {
-  return await RateExtractors[FiatUnit[ticker].source](ticker);
+  // TODO: BCH2 is not yet listed on exchanges. These APIs all return BTC prices,
+  // which would be misleading. Return 0 until BCH2 has its own market data feeds.
+  console.warn('getFiatRate: BCH2 price data not yet available from exchanges. Returning 0.');
+  return 0;
 }

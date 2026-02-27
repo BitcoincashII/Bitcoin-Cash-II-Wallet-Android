@@ -17,7 +17,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2BorderRadius, BCH2Shadows } from '../../components/BCH2Theme';
 import BCH2WalletCard from '../../components/BCH2WalletCard';
 import { getWallets, StoredWallet, updateWalletBalance } from '../../class/bch2-wallet-storage';
-import { getBalanceByAddress, getBC2Balance, getBalanceByScripthash } from '../../blue_modules/BCH2Electrum';
+import { getBalanceByAddress, getBC2Balance, getBalanceByScripthash, isConnected as isElectrumConnected } from '../../blue_modules/BCH2Electrum';
 import { bc1AddressToScripthash } from '../../class/bch2-airdrop';
 
 interface Wallet {
@@ -251,8 +251,8 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
 
         {/* Network Status */}
         <View style={styles.networkStatus}>
-          <View style={styles.statusDot} />
-          <Text style={styles.statusText}>Connected to BCH2 Network</Text>
+          <View style={[styles.statusDot, !isElectrumConnected() && { backgroundColor: '#f85149' }]} />
+          <Text style={styles.statusText}>{isElectrumConnected() ? 'Connected to BCH2 Network' : 'Disconnected'}</Text>
         </View>
       </ScrollView>
 

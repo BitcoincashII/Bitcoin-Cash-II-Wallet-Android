@@ -28,11 +28,11 @@ export const BCH2_ELECTRUM_TCP_PORT = 'bch2_electrum_tcp_port';
 export const BCH2_ELECTRUM_SSL_PORT = 'bch2_electrum_ssl_port';
 
 // Default BCH2 Electrum servers (post-fork chain)
-// TCP first as fallback since SSL uses self-signed cert which may fail on some devices
-const defaultPeer: Peer = { host: 'electrum.bch2.org', tcp: 50001, ssl: 50002 };
+// SSL preferred for security; TCP available as fallback
+const defaultPeer: Peer = { host: 'electrum.bch2.org', ssl: 50002, tcp: 50001 };
 export const hardcodedPeers: Peer[] = [
-  { host: 'electrum.bch2.org', tcp: 50001, ssl: 50002 },
-  { host: 'electrum2.bch2.org', tcp: 50001, ssl: 50002 },
+  { host: 'electrum.bch2.org', ssl: 50002, tcp: 50001 },
+  { host: 'electrum2.bch2.org', ssl: 50002, tcp: 50001 },
 ];
 
 // BC2 Electrum servers (for airdrop balance checking)
@@ -43,6 +43,7 @@ export const bc2Peers: Peer[] = [
 
 let mainClient: typeof ElectrumClient | undefined;
 let mainConnected: boolean = false;
+let connectingPromise: Promise<void> | null = null; // Mutex to prevent concurrent connection attempts
 let serverName: string | false = false;
 let currentPeerIndex = 0;
 let latestBlock: { height: number; time: number } | { height: undefined; time: undefined } = { height: undefined, time: undefined };
@@ -58,21 +59,38 @@ const BASE_DELAY_MS = 1000;
 async function connectMain(): Promise<void> {
   if (mainConnected) return;
 
+  // Prevent concurrent connection attempts (race condition)
+  if (connectingPromise) return connectingPromise;
+
+  connectingPromise = _doConnectMain();
+  try {
+    await connectingPromise;
+  } finally {
+    connectingPromise = null;
+  }
+}
+
+async function _doConnectMain(): Promise<void> {
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     const peer = hardcodedPeers[currentPeerIndex];
     currentPeerIndex = (currentPeerIndex + 1) % hardcodedPeers.length;
 
     try {
-      const useSSL = !peer.tcp && peer.ssl;
+      const useSSL = !!peer.ssl;
       mainClient = new ElectrumClient(
         useSSL ? tls : net,
-        peer.tcp || peer.ssl,
+        useSSL ? peer.ssl : peer.tcp,
         peer.host,
         useSSL ? 'tls' : 'tcp'
       );
 
       mainClient.onError = (e: Error) => {
         mainConnected = false;
+      };
+
+      mainClient.onClose = () => {
+        mainConnected = false;
+        DEBUG && console.log('[BCH2Electrum] Connection closed, will reconnect on next request');
       };
 
       await mainClient.initElectrum({ client: 'bluewallet-bch2', version: '1.4' });
@@ -164,7 +182,12 @@ export async function getUtxosByAddress(address: string): Promise<any[]> {
 
 export async function broadcastTransaction(hex: string): Promise<string> {
   await connectMain();
-  return mainClient.blockchainTransaction_broadcast(hex);
+  const result = await mainClient.blockchainTransaction_broadcast(hex);
+  // Validate that the server returned a valid txid (64-char hex)
+  if (typeof result !== 'string' || !/^[a-fA-F0-9]{64}$/.test(result.trim())) {
+    throw new Error(`Broadcast failed: ${String(result).substring(0, 200)}`);
+  }
+  return result.trim();
 }
 
 export async function getTransaction(txid: string): Promise<any> {
@@ -172,10 +195,18 @@ export async function getTransaction(txid: string): Promise<any> {
   return mainClient.blockchainTransaction_get(txid, true);
 }
 
+/**
+ * Estimate fee in sat/byte.
+ * Electrum returns BTC/kB; we convert to sat/byte (1 BTC/kB = 100000 sat/kB = 100 sat/byte).
+ */
 export async function estimateFee(blocks: number = 6): Promise<number> {
   await connectMain();
-  const fee = await mainClient.blockchainEstimatefee(blocks);
-  return fee > 0 ? fee : 0.00001; // Default 1 sat/byte if estimation fails
+  const feePerKB = await mainClient.blockchainEstimatefee(blocks);
+  if (feePerKB > 0) {
+    // BTC/kB → sat/byte: multiply by 100_000_000 (sat/BTC) / 1000 (bytes/kB) = 100_000
+    return Math.max(1, Math.ceil(feePerKB * 100000));
+  }
+  return 1; // Default 1 sat/byte if estimation fails
 }
 
 export function getLatestBlock(): { height: number; time: number } | { height: undefined; time: undefined } {
@@ -308,9 +339,21 @@ function decodeCashAddr(addr: string): { type: number; hash: Buffer } | null {
 }
 
 // BC2 connection for airdrop balance checking
+let bc2ConnectingPromise: Promise<void> | null = null;
+
 async function connectBC2(): Promise<void> {
   if (bc2Connected) return;
+  if (bc2ConnectingPromise) return bc2ConnectingPromise;
 
+  bc2ConnectingPromise = _doConnectBC2();
+  try {
+    await bc2ConnectingPromise;
+  } finally {
+    bc2ConnectingPromise = null;
+  }
+}
+
+async function _doConnectBC2(): Promise<void> {
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     const peer = bc2Peers[bc2PeerIndex];
     bc2PeerIndex = (bc2PeerIndex + 1) % bc2Peers.length;
@@ -371,7 +414,8 @@ export async function getBC2Balance(address: string): Promise<{ confirmed: numbe
       };
     } catch (electrumError) {
       DEBUG && console.log('BC2 Electrum also failed:', electrumError);
-      return { confirmed: 0, unconfirmed: 0 };
+      // Throw instead of silently returning zero, so callers know the balance is unknown
+      throw new Error('BC2 balance check failed: both Explorer API and Electrum unavailable');
     }
   }
 }
@@ -387,7 +431,7 @@ export async function getBC2BalanceByScripthash(scripthash: string): Promise<{ c
     };
   } catch (e) {
     DEBUG && console.log('BC2 scripthash balance check failed:', e);
-    return { confirmed: 0, unconfirmed: 0 };
+    throw new Error('BC2 scripthash balance check failed: Electrum unavailable');
   }
 }
 
@@ -461,7 +505,6 @@ export async function getBC2Transactions(address: string): Promise<any[]> {
 // Broadcast BC2 transaction using explorer API
 export async function broadcastBC2Transaction(hex: string): Promise<string> {
   DEBUG && console.log(`[BC2] Broadcasting transaction, hex length: ${hex.length}`);
-  DEBUG && console.log(`[BC2] Transaction hex: ${hex.substring(0, 100)}...`);
 
   try {
     const response = await fetch('https://explorer.bitcoin-ii.org/api/tx', {
@@ -516,7 +559,9 @@ function addressToScriptHashLegacy(address: string): string {
     // Try CashAddr format and convert
     const cashDecoded = decodeCashAddr(address.replace(/^bitcoincash(ii)?:/, ''));
     if (cashDecoded) {
-      decoded = Buffer.concat([Buffer.from([0x00]), cashDecoded.hash]);
+      // type 0 = P2PKH (version 0x00), type 1 = P2SH (version 0x05)
+      const versionByte = cashDecoded.type === 1 ? 0x05 : 0x00;
+      decoded = Buffer.concat([Buffer.from([versionByte]), cashDecoded.hash]);
     } else {
       throw new Error('Invalid address format');
     }
@@ -571,7 +616,11 @@ async function rpcCall(method: string, params: any[] = []): Promise<any> {
 
   const auth = Buffer.from(`${rpcConfig.user}:${rpcConfig.password}`).toString('base64');
 
-  const response = await fetch(`http://${rpcConfig.host}:${rpcConfig.port}/`, {
+  // Use HTTPS for RPC to protect auth credentials in transit.
+  // Only allow plaintext HTTP for localhost connections.
+  const isLocalhost = rpcConfig.host === '127.0.0.1' || rpcConfig.host === 'localhost';
+  const protocol = isLocalhost ? 'http' : 'https';
+  const response = await fetch(`${protocol}://${rpcConfig.host}:${rpcConfig.port}/`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

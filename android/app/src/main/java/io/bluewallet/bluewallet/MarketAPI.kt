@@ -31,24 +31,11 @@ object MarketAPI {
     data class PriceResult(val rateDouble: Double, val formattedRate: String?)
 
     suspend fun fetchPrice(context: Context, currency: String): String? {
-        Log.i(TAG, "Fetching Bitcoin price for currency: $currency")
-        val startTime = System.currentTimeMillis()
-        
-        return try {
-            val response = fetchPriceWithResponse(context, currency)
-            val duration = System.currentTimeMillis() - startTime
-            
-            if (response.code == 200) {
-                Log.i(TAG, "Successfully fetched price in ${duration}ms: ${response.body}")
-                response.body
-            } else {
-                Log.e(TAG, "Failed to fetch price in ${duration}ms, response code: ${response.code}")
-                null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error fetching price for $currency", e)
-            null
-        }
+        // TODO: BCH2 is not yet listed on exchanges. All price sources return BTC prices,
+        // which would be misleading to BCH2 users. Return null until BCH2 has its own
+        // market data feeds.
+        Log.w(TAG, "BCH2 price data not yet available from exchanges. Returning null for $currency.")
+        return null
     }
     
     suspend fun fetchPriceWithResponse(context: Context, currency: String): ApiResponse {
@@ -200,7 +187,7 @@ object MarketAPI {
             
             // First try connecting directly for fee histogram
             Log.d(TAG, "Attempting to connect directly to Electrum server for fee")
-            var success = electrumClient.connectToNextAvailable(validateCertificates = false)
+            var success = electrumClient.connectToNextAvailable(validateCertificates = true)
 
             if (success) {
                 Log.i(TAG, "Connected to Electrum server: ${ElectrumClient.hardcodedPeers}")
@@ -212,7 +199,7 @@ object MarketAPI {
                 Log.e(TAG, "Failed to connect to any Electrum server on first attempt. Retrying once more.")
                 // Short delay before retry
                 delay(1000)
-                success = electrumClient.connectToNextAvailable(validateCertificates = false)
+                success = electrumClient.connectToNextAvailable(validateCertificates = true)
                 
                 if (!success) {
                     Log.e(TAG, "Failed to connect to any Electrum server after retry. Fee unavailable.")

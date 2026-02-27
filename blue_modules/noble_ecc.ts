@@ -46,17 +46,6 @@ necc.utils.hmacSha256Sync = (key: Uint8Array, ...messages: Uint8Array[]): Uint8A
   return hmac(sha256, key, combinedMessages);
 };
 
-/* const normal = necc.utils._normalizePrivateKey;
-type Hex = string | Uint8Array;
-type PrivKey = Hex | bigint | number;
-
-necc.utils.privateAdd = (privateKey: PrivKey, tweak: Hex) => {
-  console.log({ privateKey, tweak });
-  const p = normal(privateKey);
-  const t = normal(tweak);
-  return necc.utils.privateAdd(necc.utils.mod(p + t, necc.CURVE.n));
-}; */
-
 const defaultTrue = (param?: boolean): boolean => param !== false;
 
 function throwToNull<Type>(fn: () => Type): Type | null {
@@ -122,13 +111,11 @@ const ecc: TinySecp256k1InterfaceExtended & TinySecp256k1Interface & TinySecp256
 
   privateAdd: (d: Uint8Array, tweak: Uint8Array): Uint8Array | null =>
     throwToNull(() => {
-      // console.log({ d, tweak });
       if (d.join('') === '00000000000000000000000000000001' && tweak.join('') === '00000000000000000000000000000000') {
         return new Uint8Array(d); // make test_ecc happy
       }
 
       const ret = necc.utils.privateAdd(d, tweak);
-      // console.log(ret);
       if (ret.join('') === '00000000000000000000000000000000') {
         return null;
       }

@@ -3,7 +3,7 @@
  * Send BCH2 or BC2 to another address
  */
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -38,6 +38,7 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
   const [loading, setLoading] = useState(false);
   const [step, setStep] = useState<'input' | 'confirm' | 'success'>('input');
   const [txid, setTxid] = useState('');
+  const sendingRef = useRef(false);
 
   const primaryColor = isBC2 ? BCH2Colors.bc2Primary : BCH2Colors.primary;
   const coinSymbol = isBC2 ? 'BC2' : 'BCH2';
@@ -77,13 +78,11 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
       if (normalizedAddr.startsWith('bitcoincash:') || normalizedAddr.startsWith('bchtest:')) {
         return false;
       }
-      // Accept with bitcoincashii: prefix
+      // Require bitcoincashii: prefix for BCH2 addresses
       if (normalizedAddr.startsWith('bitcoincashii:')) {
         return normalizedAddr.length >= 42;
       }
-      // Accept unprefixed CashAddr (must be valid base32 charset only)
-      const CASHADDR_CHARS = /^[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+$/;
-      return addr.length >= 34 && addr.length <= 50 && CASHADDR_CHARS.test(normalizedAddr);
+      return false; // Unprefixed CashAddr not accepted — require explicit prefix
     }
   };
 
@@ -125,6 +124,8 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
       Alert.alert('Error', 'Send function not configured');
       return;
     }
+    if (sendingRef.current) return; // Prevent double-tap
+    sendingRef.current = true;
 
     setLoading(true);
     try {
@@ -137,6 +138,7 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
       }
     } finally {
       setLoading(false);
+      sendingRef.current = false;
     }
   }, [onSend, toAddress, amountInSats, fee]);
 

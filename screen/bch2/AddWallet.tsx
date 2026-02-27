@@ -3,7 +3,7 @@
  * Create new or import existing BCH2 or BC2 wallet
  */
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -19,6 +19,7 @@ import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2BorderRadius, BCH2Shadows 
 import * as bip39 from 'bip39';
 import { saveWallet } from '../../class/bch2-wallet-storage';
 import { PasswordInput, PasswordInputHandle } from '../../components/PasswordInput';
+import { useScreenProtect } from '../../hooks/useScreenProtect';
 
 // Coin logos
 const BCH2_LOGO = require('../../img/bch2-logo-small.png');
@@ -43,6 +44,28 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
   const [passwordError, setPasswordError] = useState('');
   const passwordInputRef = useRef<PasswordInputHandle>(null);
   const confirmPasswordInputRef = useRef<PasswordInputHandle>(null);
+  const { enableScreenProtect, disableScreenProtect } = useScreenProtect();
+
+  // Enable screenshot protection when mnemonic is displayed, disable on unmount
+  useEffect(() => {
+    const showsMnemonic = mnemonic && (mode === 'create-bch2' || mode === 'create-bc2');
+    if (showsMnemonic) {
+      enableScreenProtect();
+    } else {
+      disableScreenProtect();
+    }
+    return () => { disableScreenProtect(); };
+  }, [mnemonic, mode]);
+
+  // Clear sensitive state on unmount
+  useEffect(() => {
+    return () => {
+      setMnemonic('');
+      setImportMnemonic('');
+      setPassword('');
+      setConfirmPassword('');
+    };
+  }, []);
 
   const getCurrentWalletType = (): WalletType => {
     const effectiveMode = mode === 'set-password' ? previousMode : mode;
@@ -104,7 +127,11 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
     setLoading(true);
     try {
       const wallet = await saveWallet(walletLabel, mnemonicToSave, walletType, password);
-      console.log('Wallet saved:', wallet.id, wallet.address);
+      setMnemonic('');
+      setImportMnemonic('');
+      setPassword('');
+      setConfirmPassword('');
+      __DEV__ && console.log('Wallet saved:', wallet.id);
 
       Alert.alert(
         isImport ? 'Wallet Imported' : 'Wallet Created',

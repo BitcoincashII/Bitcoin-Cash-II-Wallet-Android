@@ -140,13 +140,13 @@ export async function sendTransaction(
   // Coin selection - simple approach: add UTXOs until we have enough
   let selectedUtxos: UTXO[] = [];
   let totalInput = 0;
-  const outputCount = 2; // recipient + change (or 1 if no change needed)
 
   for (const utxo of utxos) {
     selectedUtxos.push(utxo);
     totalInput += utxo.value;
 
-    const estimatedSize = estimateTxSize(selectedUtxos.length, outputCount);
+    // Estimate with 2 outputs (recipient + change) initially
+    const estimatedSize = estimateTxSize(selectedUtxos.length, 2);
     const estimatedFee = estimatedSize * feePerByte;
 
     if (totalInput >= amountSats + estimatedFee) {
@@ -154,11 +154,18 @@ export async function sendTransaction(
     }
   }
 
-  const txSize = estimateTxSize(selectedUtxos.length, outputCount);
-  const fee = txSize * feePerByte;
-  const changeAmount = totalInput - amountSats - fee;
+  // Calculate fee with 2 outputs first to determine if change is viable
+  const fee2out = estimateTxSize(selectedUtxos.length, 2) * feePerByte;
+  const tentativeChange = totalInput - amountSats - fee2out;
 
-  if (changeAmount < 0) {
+  // If change would be dust (<=546), recalculate fee with 1 output
+  // so the fee accurately reflects the smaller transaction
+  const hasChange = tentativeChange > 546;
+  const actualOutputCount = hasChange ? 2 : 1;
+  const fee = estimateTxSize(selectedUtxos.length, actualOutputCount) * feePerByte;
+  const changeAmount = hasChange ? (totalInput - amountSats - fee) : 0;
+
+  if (totalInput < amountSats + fee) {
     throw new Error(`Insufficient funds. Need ${amountSats + fee} sats, have ${totalInput} sats`);
   }
 
@@ -167,15 +174,15 @@ export async function sendTransaction(
   DEBUG && console.log(`[TX]   To: ${toAddress}`);
   DEBUG && console.log(`[TX]   Amount: ${amountSats} sats`);
   DEBUG && console.log(`[TX]   Fee: ${fee} sats (${feePerByte} sat/byte)`);
-  DEBUG && console.log(`[TX]   Change: ${changeAmount > 546 ? changeAmount : 0} sats`);
+  DEBUG && console.log(`[TX]   Change: ${changeAmount} sats`);
   DEBUG && console.log(`[TX]   Inputs: ${selectedUtxos.length}`);
 
   const txHex = buildTransaction(
     selectedUtxos,
     toAddress,
     amountSats,
-    changeAmount > 546 ? fromAddress : null, // Only include change if > dust
-    changeAmount > 546 ? changeAmount : 0,
+    hasChange ? fromAddress : null,
+    changeAmount,
     Buffer.from(child.privateKey),
     Buffer.from(child.publicKey),
     isBC2
@@ -211,7 +218,7 @@ function buildTransaction(
 
   // Version (4 bytes, little-endian)
   const version = Buffer.alloc(4);
-  version.writeUInt32LE(1, 0);
+  version.writeUInt32LE(2, 0);
   tx = Buffer.concat([tx, version]);
 
   // Input count (varint)
@@ -323,7 +330,7 @@ function createBIP143Sighash(
 
   // 1. nVersion
   const version = Buffer.alloc(4);
-  version.writeUInt32LE(1, 0);
+  version.writeUInt32LE(2, 0);
 
   // 2. hashPrevouts (double SHA256 of all input outpoints)
   let prevouts = Buffer.alloc(0);
@@ -407,7 +414,7 @@ function createLegacySighash(
 ): Buffer {
   // Build transaction copy for signing
   const version = Buffer.alloc(4);
-  version.writeUInt32LE(1, 0);
+  version.writeUInt32LE(2, 0);
 
   let inputs = Buffer.alloc(0);
   for (let i = 0; i < utxos.length; i++) {
@@ -576,8 +583,8 @@ function decodeCashAddr(address: string, returnType?: boolean): Buffer | { type:
     prefix = 'bitcoincashii';
     addr = addr.slice(14);
   } else if (addr.startsWith('bitcoincash:')) {
-    prefix = 'bitcoincash';
-    addr = addr.slice(12);
+    // Reject BCH addresses — BCH2 uses bitcoincashii: prefix
+    throw new Error('Invalid address: use bitcoincashii: prefix for BCH2, not bitcoincash:');
   } else {
     // No prefix — assume bitcoincashii
     prefix = 'bitcoincashii';
@@ -1248,7 +1255,7 @@ function buildSegwitRecoveryTransaction(
 ): string {
   // Transaction version
   const version = Buffer.alloc(4);
-  version.writeUInt32LE(1, 0);
+  version.writeUInt32LE(2, 0);
 
   // Build outputs
   let outputs = Buffer.alloc(0);
@@ -1356,7 +1363,7 @@ function createBIP143SighashForSegwit(
 
   // 1. nVersion
   const version = Buffer.alloc(4);
-  version.writeUInt32LE(1, 0);
+  version.writeUInt32LE(2, 0);
 
   // 2. hashPrevouts
   let prevouts = Buffer.alloc(0);

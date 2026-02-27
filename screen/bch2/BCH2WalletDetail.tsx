@@ -17,6 +17,7 @@ import {
 } from 'react-native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2Shadows, BCH2BorderRadius } from '../../components/BCH2Theme';
 import { getWalletMnemonic, isWalletEncrypted } from '../../class/bch2-wallet-storage';
+import { useScreenProtect } from '../../hooks/useScreenProtect';
 import { getBCH2TransactionUrl, getBC2TransactionUrl, getBCH2BlockUrl, getBC2BlockUrl } from '../../class/bch2-constants';
 import { PasswordModalWithRef, PasswordModalHandle } from '../../components/PasswordModal';
 
@@ -110,13 +111,17 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
     });
   };
 
+  const { enableScreenProtect, disableScreenProtect } = useScreenProtect();
+
   const showMnemonicAlert = (mnemonic: string) => {
+    enableScreenProtect();
     Alert.alert(
       '⚠️ Backup Recovery Phrase',
       `WRITE THIS DOWN AND KEEP IT SAFE!\n\nYour recovery phrase:\n\n${mnemonic}\n\nAnyone with this phrase can access your funds. Never share it.`,
       [
-        { text: 'I\'ve Saved It', style: 'default' },
-      ]
+        { text: 'I\'ve Saved It', style: 'default', onPress: () => disableScreenProtect() },
+      ],
+      { onDismiss: () => disableScreenProtect() }
     );
   };
 

@@ -12,15 +12,16 @@ const bip32 = BIP32Factory(ecc);
 const crypto = require('crypto');
 
 const WALLETS_KEY = '@bch2_wallets';
-const ENCRYPTION_ALGO = 'aes-256-cbc';
-const KEY_DERIVATION_ITERATIONS = 100000;
+const ENCRYPTION_ALGO_GCM = 'aes-256-gcm';
+const ENCRYPTION_ALGO_CBC = 'aes-256-cbc'; // Legacy — decrypt only
+const KEY_DERIVATION_ITERATIONS = 600000; // OWASP 2023 recommended minimum for PBKDF2-SHA256
 const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 
 export interface StoredWallet {
   id: string;
   type: 'bch2' | 'bc2' | 'bc1';  // bc1 = Native SegWit for BCH2 airdrop claims
   label: string;
-  mnemonic: string; // AES-256-CBC encrypted (salt:iv:ciphertext, hex-encoded)
+  mnemonic: string; // AES-256-GCM encrypted (gcm:salt:iv:authTag:ciphertext) or legacy CBC (salt:iv:ciphertext)
   address: string;
   balance: number;
   unconfirmedBalance: number;
@@ -29,36 +30,57 @@ export interface StoredWallet {
 }
 
 /**
- * Encrypt a mnemonic using AES-256-CBC with PBKDF2 key derivation.
- * Returns "salt:iv:ciphertext" (all hex-encoded).
+ * Encrypt a mnemonic using AES-256-GCM with PBKDF2 key derivation.
+ * Returns "gcm:salt:iv:authTag:ciphertext" (all hex-encoded).
+ * GCM provides both confidentiality and authenticity (prevents ciphertext tampering).
  */
 function encryptMnemonic(mnemonic: string, password: string): string {
   const salt = crypto.randomBytes(16);
   const key = crypto.pbkdf2Sync(password, salt, KEY_DERIVATION_ITERATIONS, 32, 'sha256');
-  const iv = crypto.randomBytes(16);
-  const cipher = crypto.createCipheriv(ENCRYPTION_ALGO, key, iv);
+  const iv = crypto.randomBytes(12); // 96-bit IV recommended for GCM
+  const cipher = crypto.createCipheriv(ENCRYPTION_ALGO_GCM, key, iv);
   let encrypted = cipher.update(mnemonic, 'utf8', 'hex');
   encrypted += cipher.final('hex');
-  return salt.toString('hex') + ':' + iv.toString('hex') + ':' + encrypted;
+  const authTag = cipher.getAuthTag().toString('hex');
+  return 'gcm:' + salt.toString('hex') + ':' + iv.toString('hex') + ':' + authTag + ':' + encrypted;
 }
 
 /**
- * Decrypt a mnemonic from "salt:iv:ciphertext" format.
+ * Decrypt a mnemonic. Supports both new GCM format and legacy CBC format.
+ * GCM format: "gcm:salt:iv:authTag:ciphertext"
+ * Legacy CBC format: "salt:iv:ciphertext"
  */
 function decryptMnemonic(encryptedData: string, password: string): string {
   const parts = encryptedData.split(':');
-  if (parts.length !== 3) {
-    // Legacy unencrypted mnemonic — return as-is
-    return encryptedData;
+
+  // New GCM format: gcm:salt:iv:authTag:ciphertext (5 parts)
+  if (parts[0] === 'gcm' && parts.length === 5) {
+    const salt = Buffer.from(parts[1], 'hex');
+    const iv = Buffer.from(parts[2], 'hex');
+    const authTag = Buffer.from(parts[3], 'hex');
+    const ciphertext = parts[4];
+    const key = crypto.pbkdf2Sync(password, salt, KEY_DERIVATION_ITERATIONS, 32, 'sha256');
+    const decipher = crypto.createDecipheriv(ENCRYPTION_ALGO_GCM, key, iv);
+    decipher.setAuthTag(authTag);
+    let decrypted = decipher.update(ciphertext, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return decrypted;
   }
-  const salt = Buffer.from(parts[0], 'hex');
-  const iv = Buffer.from(parts[1], 'hex');
-  const ciphertext = parts[1 + 1]; // parts[2]
-  const key = crypto.pbkdf2Sync(password, salt, KEY_DERIVATION_ITERATIONS, 32, 'sha256');
-  const decipher = crypto.createDecipheriv(ENCRYPTION_ALGO, key, iv);
-  let decrypted = decipher.update(ciphertext, 'hex', 'utf8');
-  decrypted += decipher.final('utf8');
-  return decrypted;
+
+  // Legacy CBC format: salt:iv:ciphertext (3 parts)
+  if (parts.length === 3) {
+    const salt = Buffer.from(parts[0], 'hex');
+    const iv = Buffer.from(parts[1], 'hex');
+    const ciphertext = parts[2];
+    const key = crypto.pbkdf2Sync(password, salt, KEY_DERIVATION_ITERATIONS, 32, 'sha256');
+    const decipher = crypto.createDecipheriv(ENCRYPTION_ALGO_CBC, key, iv);
+    let decrypted = decipher.update(ciphertext, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return decrypted;
+  }
+
+  // Legacy unencrypted mnemonic — return as-is
+  return encryptedData;
 }
 
 /**
@@ -277,7 +299,8 @@ export async function verifyWalletPassword(id: string, password: string): Promis
 // Helper functions
 
 function generateId(): string {
-  return 'bch2_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+  const randomHex = crypto.randomBytes(8).toString('hex');
+  return 'bch2_' + Date.now().toString(36) + randomHex;
 }
 
 function hash160(data: Buffer): Buffer {
