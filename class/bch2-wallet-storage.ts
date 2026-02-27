@@ -17,6 +17,15 @@ const ENCRYPTION_ALGO_CBC = 'aes-256-cbc'; // Legacy — decrypt only
 const KEY_DERIVATION_ITERATIONS = 600000; // OWASP 2023 recommended minimum for PBKDF2-SHA256
 const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 
+// Simple async mutex to prevent concurrent read-modify-write races on wallet storage
+let _storageLock: Promise<void> = Promise.resolve();
+function withStorageLock<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = _storageLock;
+  let release: () => void;
+  _storageLock = new Promise<void>(r => { release = r; });
+  return prev.then(fn).finally(() => release!());
+}
+
 export interface StoredWallet {
   id: string;
   type: 'bch2' | 'bc2' | 'bc1';  // bc1 = Native SegWit for BCH2 airdrop claims
@@ -118,14 +127,12 @@ export async function saveWallet(
     isEncrypted: true,
   };
 
-  // Get existing wallets
-  const wallets = await getWallets();
-
-  // Add new wallet
-  wallets.push(wallet);
-
-  // Save to storage
-  await AsyncStorage.setItem(WALLETS_KEY, JSON.stringify(wallets));
+  // Serialized via lock to prevent concurrent read-modify-write races
+  await withStorageLock(async () => {
+    const wallets = await getWallets();
+    wallets.push(wallet);
+    await AsyncStorage.setItem(WALLETS_KEY, JSON.stringify(wallets));
+  });
 
   return wallet;
 }
@@ -134,13 +141,14 @@ export async function saveWallet(
  * Get all stored wallets
  */
 export async function getWallets(): Promise<StoredWallet[]> {
+  const data = await AsyncStorage.getItem(WALLETS_KEY);
+  if (!data) return [];
   try {
-    const data = await AsyncStorage.getItem(WALLETS_KEY);
-    if (!data) return [];
     return JSON.parse(data);
   } catch (error) {
-    console.error('Failed to load wallets:', error);
-    return [];
+    // Do NOT return [] on parse error — that would cause saveWallet to
+    // overwrite all existing wallets with just the new one.
+    throw new Error(`Wallet data corrupted (${data.length} bytes). Backup @bch2_wallets before clearing.`);
   }
 }
 
@@ -160,23 +168,39 @@ export async function updateWalletBalance(
   balance: number,
   unconfirmedBalance: number
 ): Promise<void> {
-  const wallets = await getWallets();
-  const index = wallets.findIndex(w => w.id === id);
+  // Reject non-finite values to prevent NaN/Infinity from corrupting storage
+  if (!Number.isFinite(balance) || !Number.isFinite(unconfirmedBalance)) return;
+  balance = Math.max(0, Math.floor(balance));
+  unconfirmedBalance = Math.floor(unconfirmedBalance); // Can be negative (pending spend)
+  await withStorageLock(async () => {
+    const wallets = await getWallets();
+    const index = wallets.findIndex(w => w.id === id);
 
-  if (index !== -1) {
-    wallets[index].balance = balance;
-    wallets[index].unconfirmedBalance = unconfirmedBalance;
-    await AsyncStorage.setItem(WALLETS_KEY, JSON.stringify(wallets));
-  }
+    if (index !== -1) {
+      wallets[index].balance = balance;
+      wallets[index].unconfirmedBalance = unconfirmedBalance;
+      await AsyncStorage.setItem(WALLETS_KEY, JSON.stringify(wallets));
+    }
+  });
 }
 
 /**
  * Delete a wallet
  */
 export async function deleteWallet(id: string): Promise<void> {
-  const wallets = await getWallets();
-  const filtered = wallets.filter(w => w.id !== id);
-  await AsyncStorage.setItem(WALLETS_KEY, JSON.stringify(filtered));
+  await withStorageLock(async () => {
+    const wallets = await getWallets();
+    // Overwrite the deleted wallet's mnemonic before removing, so SQLite page is overwritten
+    const target = wallets.find(w => w.id === id);
+    if (target) {
+      // Overwrite with random data of the same string length (best-effort secure erasure)
+      target.mnemonic = crypto.randomBytes(Math.ceil(target.mnemonic.length / 2)).toString('hex').slice(0, target.mnemonic.length);
+      await AsyncStorage.setItem(WALLETS_KEY, JSON.stringify(wallets));
+    }
+    // Now remove and write final state
+    const filtered = wallets.filter(w => w.id !== id);
+    await AsyncStorage.setItem(WALLETS_KEY, JSON.stringify(filtered));
+  });
 }
 
 /**
@@ -184,26 +208,33 @@ export async function deleteWallet(id: string): Promise<void> {
  */
 async function deriveAddress(mnemonic: string, walletType: 'bch2' | 'bc2' | 'bc1' = 'bch2'): Promise<string> {
   const seed = await bip39.mnemonicToSeed(mnemonic);
-  const root = bip32.fromSeed(seed);
+  try {
+    const root = bip32.fromSeed(seed);
 
-  if (walletType === 'bc2') {
-    // BC2 uses BTC derivation path: m/44'/0'/0'/0/0
-    const child = root.derivePath("m/44'/0'/0'/0/0");
+    if (walletType === 'bc2') {
+      // BC2 uses BTC derivation path: m/44'/0'/0'/0/0
+      const child = root.derivePath("m/44'/0'/0'/0/0");
+      const pubkeyHash = hash160(Buffer.from(child.publicKey));
+      return getLegacyAddress(pubkeyHash);
+    }
+
+    if (walletType === 'bc1') {
+      // Native SegWit uses BIP84 path: m/84'/0'/0'/0/0
+      const child = root.derivePath("m/84'/0'/0'/0/0");
+      const pubkeyHash = hash160(Buffer.from(child.publicKey));
+      return encodeBech32('bc', 0, pubkeyHash);
+    }
+
+    // BCH2 uses BCH derivation path: m/44'/145'/0'/0/0
+    const child = root.derivePath("m/44'/145'/0'/0/0");
     const pubkeyHash = hash160(Buffer.from(child.publicKey));
-    return getLegacyAddress(pubkeyHash);
+    return encodeCashAddr('bitcoincashii', 0, pubkeyHash);
+  } finally {
+    // Zero seed material regardless of success/failure
+    if (seed instanceof Buffer || seed instanceof Uint8Array) {
+      seed.fill(0);
+    }
   }
-
-  if (walletType === 'bc1') {
-    // Native SegWit uses BIP84 path: m/84'/0'/0'/0/0
-    const child = root.derivePath("m/84'/0'/0'/0/0");
-    const pubkeyHash = hash160(Buffer.from(child.publicKey));
-    return encodeBech32('bc', 0, pubkeyHash);
-  }
-
-  // BCH2 uses BCH derivation path: m/44'/145'/0'/0/0
-  const child = root.derivePath("m/44'/145'/0'/0/0");
-  const pubkeyHash = hash160(Buffer.from(child.publicKey));
-  return encodeCashAddr('bitcoincashii', 0, pubkeyHash);
 }
 
 /**

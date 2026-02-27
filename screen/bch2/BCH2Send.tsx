@@ -16,6 +16,8 @@ import {
   Keyboard,
 } from 'react-native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2Shadows, BCH2BorderRadius } from '../../components/BCH2Theme';
+import { decodeCashAddr } from '../../class/bch2-transaction';
+const bs58check = require('bs58check');
 
 interface BCH2SendProps {
   walletBalance: number;
@@ -49,9 +51,15 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
   };
 
   const parseAmount = (amountStr: string): number => {
-    const parsed = parseFloat(amountStr);
-    if (isNaN(parsed)) return 0;
-    return Math.round(parsed * 100000000); // Convert to satoshis
+    // Normalize comma decimal separator for European locales
+    const normalized = amountStr.replace(',', '.');
+    // Reject scientific notation and non-numeric input
+    if (!/^\d*\.?\d*$/.test(normalized) || normalized === '' || normalized === '.') return 0;
+    const parsed = parseFloat(normalized);
+    if (isNaN(parsed) || !isFinite(parsed)) return 0;
+    const sats = Math.round(parsed * 100000000);
+    if (!Number.isSafeInteger(sats) || sats < 0) return 0;
+    return sats;
   };
 
   const amountInSats = parseAmount(amount);
@@ -65,24 +73,33 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
   const validateAddress = (addr: string): boolean => {
     if (!addr) return false;
     if (isBC2) {
-      // Validate Base58 character set and length
-      const BASE58_CHARS = /^[123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+$/;
-      if (!BASE58_CHARS.test(addr)) return false;
-      if (addr.length < 26 || addr.length > 35) return false;
-      // Must start with 1 (P2PKH) or 3 (P2SH)
-      return addr.startsWith('1') || addr.startsWith('3');
+      // Validate with full Base58Check checksum verification
+      try {
+        const decoded = bs58check.decode(addr);
+        if (decoded.length !== 21) return false;
+        // Version byte: 0x00 = P2PKH (starts with 1), 0x05 = P2SH (starts with 3)
+        return decoded[0] === 0x00 || decoded[0] === 0x05;
+      } catch {
+        return false;
+      }
     } else {
-      // BCH2 CashAddr format - must have correct prefix or valid unprefixed format
+      // BCH2 CashAddr format with full polymod checksum verification
       const normalizedAddr = addr.toLowerCase();
       // Reject BCH addresses (wrong chain)
       if (normalizedAddr.startsWith('bitcoincash:') || normalizedAddr.startsWith('bchtest:')) {
         return false;
       }
       // Require bitcoincashii: prefix for BCH2 addresses
-      if (normalizedAddr.startsWith('bitcoincashii:')) {
-        return normalizedAddr.length >= 42;
+      if (!normalizedAddr.startsWith('bitcoincashii:')) {
+        return false;
       }
-      return false; // Unprefixed CashAddr not accepted — require explicit prefix
+      // Validate CashAddr checksum using decodeCashAddr
+      try {
+        decodeCashAddr(addr);
+        return true;
+      } catch {
+        return false;
+      }
     }
   };
 
@@ -267,7 +284,7 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
           <View style={styles.confirmCard}>
             <View style={styles.confirmRow}>
               <Text style={styles.confirmLabel}>To</Text>
-              <Text style={styles.confirmValue}>{formatAddress(toAddress)}</Text>
+              <Text style={[styles.confirmValue, { fontSize: 12 }]} selectable numberOfLines={3}>{toAddress}</Text>
             </View>
             <View style={styles.confirmRow}>
               <Text style={styles.confirmLabel}>Amount</Text>

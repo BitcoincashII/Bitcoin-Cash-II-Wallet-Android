@@ -161,9 +161,15 @@ export class BCH2Wallet extends AbstractWallet {
     const ourAddress = this.getAddress();
     if (!ourAddress) return false;
 
-    // Normalize addresses for comparison
+    // Reject BCH addresses (wrong chain) — do not strip 'bitcoincash:' prefix
+    const lowerAddr = address.toLowerCase();
+    if (lowerAddr.startsWith('bitcoincash:') && !lowerAddr.startsWith('bitcoincashii:')) {
+      return false;
+    }
+
+    // Normalize: only strip the BCH2 prefix for comparison
     const normalize = (addr: string) => {
-      return addr.toLowerCase().replace('bitcoincashii:', '').replace('bitcoincash:', '');
+      return addr.toLowerCase().replace('bitcoincashii:', '');
     };
 
     return normalize(ourAddress) === normalize(address);
@@ -175,14 +181,14 @@ export class BCH2Wallet extends AbstractWallet {
   static isValidAddress(address: string): boolean {
     try {
       let addr = address.toLowerCase();
-      let prefix = 'bitcoincashii';
-      const knownPrefixes = ['bitcoincashii:', 'bitcoincash:', 'bchtest:'];
-      for (const p of knownPrefixes) {
-        if (addr.startsWith(p)) {
-          prefix = p.slice(0, -1); // Remove trailing ':'
-          addr = addr.slice(p.length);
-          break;
-        }
+      const prefix = 'bitcoincashii';
+
+      // Only accept bitcoincashii: prefix (reject bitcoincash: and bchtest:)
+      if (addr.startsWith('bitcoincash:') && !addr.startsWith('bitcoincashii:')) return false;
+      if (addr.startsWith('bchtest:')) return false;
+
+      if (addr.startsWith('bitcoincashii:')) {
+        addr = addr.slice('bitcoincashii:'.length);
       }
 
       // Decode payload

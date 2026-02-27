@@ -3,7 +3,7 @@
  * Allows users to claim their BCH2 from BC2 wallets
  */
 
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -44,6 +44,11 @@ export const ClaimAirdropScreen: React.FC = () => {
   const [passwordError, setPasswordError] = useState('');
   const claimPasswordRef = useRef<PasswordInputHandle>(null);
   const claimConfirmPasswordRef = useRef<PasswordInputHandle>(null);
+
+  // Clear sensitive state on unmount
+  useEffect(() => {
+    return () => { setInput(''); setPassphrase(''); setWalletPassword(''); setWalletConfirmPassword(''); };
+  }, []);
 
   const handleClaim = useCallback(async () => {
     if (!input.trim()) {
@@ -149,6 +154,7 @@ export const ClaimAirdropScreen: React.FC = () => {
     setImporting(true);
     try {
       const wallet = await saveWallet('Claimed BCH2 Wallet', input.trim(), 'bch2', walletPassword);
+      setInput(''); setPassphrase(''); setWalletPassword(''); setWalletConfirmPassword('');
       setShowPasswordStep(false);
       Alert.alert(
         'Wallet Imported!',

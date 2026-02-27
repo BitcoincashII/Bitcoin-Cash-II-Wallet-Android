@@ -120,8 +120,8 @@ export async function getBalanceByAddress(address: string): Promise<{ confirmed:
   const script = addressToScriptHash(address);
   const balance = await mainClient.blockchainScripthash_getBalance(script);
   return {
-    confirmed: balance.confirmed,
-    unconfirmed: balance.unconfirmed,
+    confirmed: Math.max(0, Math.floor(Number(balance.confirmed) || 0)),
+    unconfirmed: Math.floor(Number(balance.unconfirmed) || 0),
   };
 }
 
@@ -133,8 +133,8 @@ export async function getBalanceByScripthash(scripthash: string): Promise<{ conf
   await connectMain();
   const balance = await mainClient.blockchainScripthash_getBalance(scripthash);
   return {
-    confirmed: balance.confirmed,
-    unconfirmed: balance.unconfirmed,
+    confirmed: Math.max(0, Math.floor(Number(balance.confirmed) || 0)),
+    unconfirmed: Math.floor(Number(balance.unconfirmed) || 0),
   };
 }
 
@@ -144,12 +144,21 @@ export async function getBalanceByScripthash(scripthash: string): Promise<{ conf
 export async function getUtxosByScripthash(scripthash: string): Promise<any[]> {
   await connectMain();
   const utxos = await mainClient.blockchainScripthash_listunspent(scripthash);
-  return utxos.map((utxo: any) => ({
-    txid: utxo.tx_hash,
-    vout: utxo.tx_pos,
-    value: utxo.value,
-    height: utxo.height,
-  }));
+  const seen = new Set<string>();
+  return utxos
+    .filter((utxo: any) => typeof utxo.value === 'number' && Number.isInteger(utxo.value) && utxo.value > 0)
+    .filter((utxo: any) => {
+      const key = `${utxo.tx_hash}:${utxo.tx_pos}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .map((utxo: any) => ({
+      txid: utxo.tx_hash,
+      vout: utxo.tx_pos,
+      value: utxo.value,
+      height: utxo.height,
+    }));
 }
 
 /**
@@ -158,26 +167,35 @@ export async function getUtxosByScripthash(scripthash: string): Promise<any[]> {
 export async function getTransactionsByScripthash(scripthash: string): Promise<any[]> {
   await connectMain();
   const history = await mainClient.blockchainScripthash_getHistory(scripthash);
-  return history;
+  return Array.isArray(history) ? history.slice(0, 500) : [];
 }
 
 export async function getTransactionsByAddress(address: string): Promise<any[]> {
   await connectMain();
   const script = addressToScriptHash(address);
   const history = await mainClient.blockchainScripthash_getHistory(script);
-  return history;
+  return Array.isArray(history) ? history.slice(0, 500) : [];
 }
 
 export async function getUtxosByAddress(address: string): Promise<any[]> {
   await connectMain();
   const script = addressToScriptHash(address);
   const utxos = await mainClient.blockchainScripthash_listunspent(script);
-  return utxos.map((utxo: any) => ({
-    txid: utxo.tx_hash,
-    vout: utxo.tx_pos,
-    value: utxo.value,
-    height: utxo.height,
-  }));
+  const seen = new Set<string>();
+  return utxos
+    .filter((utxo: any) => typeof utxo.value === 'number' && Number.isInteger(utxo.value) && utxo.value > 0)
+    .filter((utxo: any) => {
+      const key = `${utxo.tx_hash}:${utxo.tx_pos}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .map((utxo: any) => ({
+      txid: utxo.tx_hash,
+      vout: utxo.tx_pos,
+      value: utxo.value,
+      height: utxo.height,
+    }));
 }
 
 export async function broadcastTransaction(hex: string): Promise<string> {
@@ -204,7 +222,9 @@ export async function estimateFee(blocks: number = 6): Promise<number> {
   const feePerKB = await mainClient.blockchainEstimatefee(blocks);
   if (feePerKB > 0) {
     // BTC/kB → sat/byte: multiply by 100_000_000 (sat/BTC) / 1000 (bytes/kB) = 100_000
-    return Math.max(1, Math.ceil(feePerKB * 100000));
+    // Cap at 100 sat/byte to prevent fee-drain from malicious Electrum server
+    const satPerByte = Math.ceil(feePerKB * 100000);
+    return Math.min(Math.max(1, satPerByte), 100);
   }
   return 1; // Default 1 sat/byte if estimation fails
 }
@@ -223,14 +243,15 @@ export function getServerName(): string | false {
 
 // CashAddr to scripthash conversion
 function addressToScriptHash(address: string): string {
-  // Remove prefix if present
+  // Reject non-BCH2 prefixes to prevent cross-chain address confusion
+  const lowerAddr = address.toLowerCase();
+  if (lowerAddr.startsWith('bitcoincash:') || lowerAddr.startsWith('bchtest:')) {
+    throw new Error('Invalid BCH2 address: wrong prefix (expected bitcoincashii:)');
+  }
+  // Remove BCH2 prefix if present
   let addr = address;
-  const prefixes = ['bitcoincashii:', 'bitcoincash:', 'bchtest:'];
-  for (const prefix of prefixes) {
-    if (address.toLowerCase().startsWith(prefix)) {
-      addr = address.slice(prefix.length);
-      break;
-    }
+  if (lowerAddr.startsWith('bitcoincashii:')) {
+    addr = address.slice('bitcoincashii:'.length);
   }
 
   // Decode CashAddr and convert to scripthash
@@ -369,6 +390,9 @@ async function _doConnectBC2(): Promise<void> {
       bc2Client.onError = (e: Error) => {
         bc2Connected = false;
       };
+      bc2Client.onClose = () => {
+        bc2Connected = false;
+      };
 
       await bc2Client.initElectrum({ client: 'bluewallet-bch2', version: '1.4' });
       bc2Connected = true;
@@ -389,7 +413,7 @@ async function _doConnectBC2(): Promise<void> {
 export async function getBC2Balance(address: string): Promise<{ confirmed: number; unconfirmed: number }> {
   try {
     // Use explorer API as primary method (more reliable than Electrum)
-    const response = await fetch(`https://explorer.bitcoin-ii.org/api/address/${address}`);
+    const response = await fetch(`https://explorer.bitcoin-ii.org/api/address/${encodeURIComponent(address)}`);
     if (!response.ok) {
       throw new Error(`Explorer API error: ${response.status}`);
     }
@@ -408,9 +432,11 @@ export async function getBC2Balance(address: string): Promise<{ confirmed: numbe
       await connectBC2();
       const script = addressToScriptHashLegacy(address);
       const balance = await bc2Client.blockchainScripthash_getBalance(script);
+      const confirmed = typeof balance.confirmed === 'number' && Number.isFinite(balance.confirmed) ? balance.confirmed : 0;
+      const unconfirmed = typeof balance.unconfirmed === 'number' && Number.isFinite(balance.unconfirmed) ? balance.unconfirmed : 0;
       return {
-        confirmed: balance.confirmed,
-        unconfirmed: balance.unconfirmed,
+        confirmed,
+        unconfirmed,
       };
     } catch (electrumError) {
       DEBUG && console.log('BC2 Electrum also failed:', electrumError);
@@ -426,8 +452,8 @@ export async function getBC2BalanceByScripthash(scripthash: string): Promise<{ c
     await connectBC2();
     const balance = await bc2Client.blockchainScripthash_getBalance(scripthash);
     return {
-      confirmed: balance.confirmed,
-      unconfirmed: balance.unconfirmed,
+      confirmed: typeof balance.confirmed === 'number' && Number.isFinite(balance.confirmed) ? balance.confirmed : 0,
+      unconfirmed: typeof balance.unconfirmed === 'number' && Number.isFinite(balance.unconfirmed) ? balance.unconfirmed : 0,
     };
   } catch (e) {
     DEBUG && console.log('BC2 scripthash balance check failed:', e);
@@ -440,7 +466,7 @@ export async function getBC2Utxos(address: string): Promise<any[]> {
   DEBUG && console.log(`[BC2] Fetching UTXOs for address: ${address}`);
   try {
     // Use explorer API as primary method
-    const url = `https://explorer.bitcoin-ii.org/api/address/${address}/utxo`;
+    const url = `https://explorer.bitcoin-ii.org/api/address/${encodeURIComponent(address)}/utxo`;
     DEBUG && console.log(`[BC2] Explorer API URL: ${url}`);
     const response = await fetch(url);
     DEBUG && console.log(`[BC2] Explorer API response status: ${response.status}`);
@@ -455,12 +481,21 @@ export async function getBC2Utxos(address: string): Promise<any[]> {
       DEBUG && console.log(`[BC2] First UTXO:`, JSON.stringify(utxos[0]));
     }
 
-    return utxos.map((utxo: any) => ({
-      txid: utxo.txid,
-      vout: utxo.vout,
-      value: utxo.value,
-      height: utxo.status?.block_height || 0,
-    }));
+    const seen = new Set<string>();
+    return utxos
+      .filter((utxo: any) => typeof utxo.value === 'number' && Number.isInteger(utxo.value) && utxo.value > 0)
+      .filter((utxo: any) => {
+        const key = `${utxo.txid}:${utxo.vout}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .map((utxo: any) => ({
+        txid: utxo.txid,
+        vout: utxo.vout,
+        value: utxo.value,
+        height: utxo.status?.block_height || 0,
+      }));
   } catch (apiError) {
     DEBUG && console.log('[BC2] Explorer API failed, falling back to Electrum:', apiError);
 
@@ -469,12 +504,21 @@ export async function getBC2Utxos(address: string): Promise<any[]> {
       await connectBC2();
       const script = addressToScriptHashLegacy(address);
       const utxos = await bc2Client.blockchainScripthash_listunspent(script);
-      return utxos.map((utxo: any) => ({
-        txid: utxo.tx_hash,
-        vout: utxo.tx_pos,
-        value: utxo.value,
-        height: utxo.height,
-      }));
+      const seen2 = new Set<string>();
+      return utxos
+        .filter((utxo: any) => typeof utxo.value === 'number' && Number.isInteger(utxo.value) && utxo.value > 0)
+        .filter((utxo: any) => {
+          const key = `${utxo.tx_hash}:${utxo.tx_pos}`;
+          if (seen2.has(key)) return false;
+          seen2.add(key);
+          return true;
+        })
+        .map((utxo: any) => ({
+          txid: utxo.tx_hash,
+          vout: utxo.tx_pos,
+          value: utxo.value,
+          height: utxo.height,
+        }));
     } catch (electrumError) {
       DEBUG && console.log('BC2 Electrum also failed:', electrumError);
       return [];
@@ -485,13 +529,13 @@ export async function getBC2Utxos(address: string): Promise<any[]> {
 // Get BC2 transaction history using explorer API
 export async function getBC2Transactions(address: string): Promise<any[]> {
   try {
-    const response = await fetch(`https://explorer.bitcoin-ii.org/api/address/${address}/txs`);
+    const response = await fetch(`https://explorer.bitcoin-ii.org/api/address/${encodeURIComponent(address)}/txs`);
     if (!response.ok) {
       throw new Error(`Explorer API error: ${response.status}`);
     }
     const txs = await response.json();
 
-    return txs.map((tx: any) => ({
+    return (Array.isArray(txs) ? txs.slice(0, 500) : []).map((tx: any) => ({
       tx_hash: tx.txid,
       height: tx.status?.block_height || 0,
       confirmed: tx.status?.confirmed || false,
@@ -522,12 +566,22 @@ export async function broadcastBC2Transaction(hex: string): Promise<string> {
     }
 
     // Validate that response looks like a txid (64 hex chars)
-    if (!/^[a-fA-F0-9]{64}$/.test(responseText.trim())) {
+    // Also try to extract txid from JSON wrapper (some explorers return {"txid":"..."})
+    let txidResult = responseText.trim();
+    if (!/^[a-fA-F0-9]{64}$/.test(txidResult)) {
+      try {
+        const parsed = JSON.parse(responseText);
+        if (parsed.txid && /^[a-fA-F0-9]{64}$/.test(parsed.txid)) {
+          txidResult = parsed.txid;
+        }
+      } catch { /* not JSON */ }
+    }
+    if (!/^[a-fA-F0-9]{64}$/.test(txidResult)) {
       DEBUG && console.log(`[BC2] WARNING: Response does not look like a txid: ${responseText}`);
       throw new Error(`Broadcast may have failed: ${responseText}`);
     }
 
-    return responseText.trim();
+    return txidResult;
   } catch (apiError: any) {
     DEBUG && console.log('[BC2] Explorer broadcast failed:', apiError.message);
 
@@ -537,6 +591,9 @@ export async function broadcastBC2Transaction(hex: string): Promise<string> {
       await connectBC2();
       const txid = await bc2Client.blockchainTransaction_broadcast(hex);
       DEBUG && console.log(`[BC2] Electrum broadcast result: ${txid}`);
+      if (typeof txid !== 'string' || !/^[a-fA-F0-9]{64}$/.test(txid)) {
+        throw new Error(`Unexpected Electrum response: ${String(txid).substring(0, 200)}`);
+      }
       return txid;
     } catch (electrumError: any) {
       DEBUG && console.log('[BC2] Electrum broadcast also failed:', electrumError.message);

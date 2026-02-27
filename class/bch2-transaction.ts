@@ -57,6 +57,9 @@ export async function sendTransaction(
   isBC2: boolean,
   expectedAddress?: string // Optional: pass stored address to verify derivation
 ): Promise<TransactionResult> {
+  feePerByte = Math.ceil(feePerByte); // Ensure integer sat/byte
+  if (!Number.isFinite(feePerByte) || feePerByte < 1) feePerByte = 1;
+  if (amountSats < 546) throw new Error('Amount below dust threshold (546 sats)');
   // Derive private key from mnemonic
   const seed = await bip39.mnemonicToSeed(mnemonic);
   const root = bip32.fromSeed(seed);
@@ -128,6 +131,23 @@ export async function sendTransaction(
     throw new Error(`No UTXOs available for ${coinType} address ${fromAddress}. The address may have no confirmed balance, or the coins may have already been spent.`);
   }
 
+  // Validate UTXO txids and deduplicate
+  const txidRegex = /^[0-9a-fA-F]{64}$/;
+  const seenUtxos = new Set<string>();
+  for (let i = utxos.length - 1; i >= 0; i--) {
+    const u = utxos[i];
+    if (!txidRegex.test(u.txid)) {
+      utxos.splice(i, 1);
+      continue;
+    }
+    const key = `${u.txid}:${u.vout}`;
+    if (seenUtxos.has(key)) {
+      utxos.splice(i, 1);
+      continue;
+    }
+    seenUtxos.add(key);
+  }
+
   // Sort UTXOs by value (largest first for efficiency)
   utxos.sort((a, b) => b.value - a.value);
 
@@ -177,16 +197,30 @@ export async function sendTransaction(
   DEBUG && console.log(`[TX]   Change: ${changeAmount} sats`);
   DEBUG && console.log(`[TX]   Inputs: ${selectedUtxos.length}`);
 
-  const txHex = buildTransaction(
-    selectedUtxos,
-    toAddress,
-    amountSats,
-    hasChange ? fromAddress : null,
-    changeAmount,
-    Buffer.from(child.privateKey),
-    Buffer.from(child.publicKey),
-    isBC2
-  );
+  let txHex: string;
+  try {
+    txHex = buildTransaction(
+      selectedUtxos,
+      toAddress,
+      amountSats,
+      hasChange ? fromAddress : null,
+      changeAmount,
+      Buffer.from(child.privateKey),
+      Buffer.from(child.publicKey),
+      isBC2
+    );
+  } finally {
+    // Zero seed and private key material after signing
+    if (seed instanceof Buffer || seed instanceof Uint8Array) {
+      crypto.randomFillSync(seed);
+      seed.fill(0);
+    }
+    if (child.privateKey) {
+      const pk = Buffer.from(child.privateKey);
+      crypto.randomFillSync(pk);
+      pk.fill(0);
+    }
+  }
 
   DEBUG && console.log(`[TX] Transaction hex (${txHex.length} chars): ${txHex}`);
 
@@ -571,9 +605,9 @@ function decodeLegacyAddress(address: string): Buffer {
 /**
  * Decode CashAddr to type and hash
  */
-function decodeCashAddr(address: string): Buffer;
-function decodeCashAddr(address: string, returnType: true): { type: number; hash: Buffer };
-function decodeCashAddr(address: string, returnType?: boolean): Buffer | { type: number; hash: Buffer } {
+export function decodeCashAddr(address: string): Buffer;
+export function decodeCashAddr(address: string, returnType: true): { type: number; hash: Buffer };
+export function decodeCashAddr(address: string, returnType?: boolean): Buffer | { type: number; hash: Buffer } {
   const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 
   // Determine prefix
@@ -640,6 +674,9 @@ function decodeCashAddr(address: string, returnType?: boolean): Buffer | { type:
   const encodedSize = versionByte & 0x07;
   const expectedSizes = [20, 24, 28, 32, 40, 48, 56, 64];
   const expectedSize = expectedSizes[encodedSize] || 20;
+  if (hashBytes.length < expectedSize) {
+    throw new Error('Invalid CashAddr: insufficient hash data');
+  }
   const hash = Buffer.from(hashBytes.slice(0, expectedSize));
 
   if (returnType) {
@@ -856,6 +893,9 @@ function decodeBech32(address: string): { version: number; program: Buffer } | n
     }
   }
 
+  // BIP173: padding bits must be zero
+  if (bits > 0 && (acc & ((1 << bits) - 1)) !== 0) return null;
+
   // Validate program length for version 0
   if (version === 0 && program.length !== 20 && program.length !== 32) {
     return null;
@@ -930,6 +970,8 @@ async function sendTransactionWithKey(
   feePerByte: number,
   isBC2: boolean
 ): Promise<TransactionResult> {
+  feePerByte = Math.ceil(feePerByte); // Ensure integer sat/byte
+  if (!Number.isFinite(feePerByte) || feePerByte < 1) feePerByte = 1;
   // Fetch UTXOs
   DEBUG && console.log(`[TX] Fetching UTXOs for address: ${fromAddress}`);
   const utxos: UTXO[] = isBC2
@@ -941,6 +983,17 @@ async function sendTransactionWithKey(
   if (utxos.length === 0) {
     const coinType = isBC2 ? 'BC2' : 'BCH2';
     throw new Error(`No UTXOs available for ${coinType} address ${fromAddress}`);
+  }
+
+  // Validate UTXO txids and deduplicate
+  const txidRegex = /^[0-9a-fA-F]{64}$/;
+  const seenUtxos = new Set<string>();
+  for (let i = utxos.length - 1; i >= 0; i--) {
+    const u = utxos[i];
+    if (!txidRegex.test(u.txid)) { utxos.splice(i, 1); continue; }
+    const key = `${u.txid}:${u.vout}`;
+    if (seenUtxos.has(key)) { utxos.splice(i, 1); continue; }
+    seenUtxos.add(key);
   }
 
   // Sort UTXOs by value (largest first for efficiency)
@@ -968,25 +1021,40 @@ async function sendTransactionWithKey(
     }
   }
 
-  const txSize = estimateTxSize(selectedUtxos.length, outputCount);
-  const fee = txSize * feePerByte;
-  const changeAmount = totalInput - amountSats - fee;
+  // Calculate fee with 2 outputs first to determine if change is viable
+  const fee2out = estimateTxSize(selectedUtxos.length, 2) * feePerByte;
+  const tentativeChange = totalInput - amountSats - fee2out;
 
-  if (changeAmount < 0) {
+  // If change would be dust (<=546), recalculate fee with 1 output
+  const hasChange = tentativeChange > 546;
+  const actualOutputCount = hasChange ? 2 : 1;
+  const fee = estimateTxSize(selectedUtxos.length, actualOutputCount) * feePerByte;
+  const changeAmount = hasChange ? (totalInput - amountSats - fee) : 0;
+
+  if (totalInput < amountSats + fee) {
     throw new Error(`Insufficient funds. Need ${amountSats + fee} sats, have ${totalInput} sats`);
   }
 
   // Build raw transaction
-  const txHex = buildTransaction(
-    selectedUtxos,
-    toAddress,
-    amountSats,
-    changeAmount > 546 ? fromAddress : null,
-    changeAmount > 546 ? changeAmount : 0,
-    privateKey,
-    publicKey,
-    isBC2
-  );
+  let txHex: string;
+  try {
+    txHex = buildTransaction(
+      selectedUtxos,
+      toAddress,
+      amountSats,
+      hasChange ? fromAddress : null,
+      changeAmount,
+      privateKey,
+      publicKey,
+      isBC2
+    );
+  } finally {
+    // Zero private key material after signing
+    if (privateKey instanceof Buffer || privateKey instanceof Uint8Array) {
+      crypto.randomFillSync(privateKey);
+      privateKey.fill(0);
+    }
+  }
 
   // Broadcast
   const txid = isBC2
@@ -1007,6 +1075,9 @@ export async function sendFromBech32(
   amountSats: number,
   feePerByte: number
 ): Promise<TransactionResult> {
+  feePerByte = Math.ceil(feePerByte); // Ensure integer sat/byte
+  if (!Number.isFinite(feePerByte) || feePerByte < 1) feePerByte = 1;
+  if (amountSats < 546) throw new Error('Amount below dust threshold (546 sats)');
   DEBUG && console.log(`[TX] Sending from bech32 address: ${expectedAddress}`);
 
   // Decode the bc1 address to get the pubkey hash
@@ -1059,6 +1130,17 @@ export async function sendFromBech32(
     throw new Error(`No UTXOs available for bc1 address ${expectedAddress}`);
   }
 
+  // Validate UTXO txids and deduplicate
+  const txidRegex2 = /^[0-9a-fA-F]{64}$/;
+  const seenUtxos2 = new Set<string>();
+  for (let i = utxos.length - 1; i >= 0; i--) {
+    const u = utxos[i];
+    if (!txidRegex2.test(u.txid)) { utxos.splice(i, 1); continue; }
+    const key = `${u.txid}:${u.vout}`;
+    if (seenUtxos2.has(key)) { utxos.splice(i, 1); continue; }
+    seenUtxos2.add(key);
+  }
+
   // Sort UTXOs by value (largest first)
   utxos.sort((a, b) => b.value - a.value);
 
@@ -1084,11 +1166,17 @@ export async function sendFromBech32(
     }
   }
 
-  const txSize = estimateTxSize(selectedUtxos.length, outputCount);
-  const fee = txSize * feePerByte;
-  const changeAmount = totalInput - amountSats - fee;
+  // Calculate fee with 2 outputs first to determine if change is viable
+  const fee2out = estimateTxSize(selectedUtxos.length, 2) * feePerByte;
+  const tentativeChange = totalInput - amountSats - fee2out;
 
-  if (changeAmount < 0) {
+  // If change would be dust (<=546), recalculate fee with 1 output
+  const hasChange = tentativeChange > 546;
+  const actualOutputCount = hasChange ? 2 : 1;
+  const fee = estimateTxSize(selectedUtxos.length, actualOutputCount) * feePerByte;
+  const changeAmount = hasChange ? (totalInput - amountSats - fee) : 0;
+
+  if (totalInput < amountSats + fee) {
     throw new Error(`Insufficient funds. Need ${amountSats + fee} sats, have ${totalInput} sats`);
   }
 
@@ -1097,22 +1185,38 @@ export async function sendFromBech32(
   DEBUG && console.log(`[TX]   To: ${toAddress}`);
   DEBUG && console.log(`[TX]   Amount: ${amountSats} sats`);
   DEBUG && console.log(`[TX]   Fee: ${fee} sats (${feePerByte} sat/byte)`);
-  DEBUG && console.log(`[TX]   Change: ${changeAmount > 546 ? changeAmount : 0} sats`);
+  DEBUG && console.log(`[TX]   Change: ${changeAmount} sats`);
   DEBUG && console.log(`[TX]   Inputs: ${selectedUtxos.length}`);
 
   // For BCH2 SegWit recovery, we use the same BIP143 sighash and scriptSig format
   // as P2PKH. The node's SegWit recovery code detects the P2WPKH scriptPubKey
   // and validates using the scriptSig contents.
-  const txHex = buildSegwitRecoveryTransaction(
-    selectedUtxos,
-    toAddress,
-    amountSats,
-    changeAmount > 546 ? expectedAddress : null,
-    changeAmount > 546 ? changeAmount : 0,
-    Buffer.from(matchedChild.privateKey),
-    Buffer.from(matchedChild.publicKey),
-    targetPubkeyHash
-  );
+  // NOTE: Change goes to P2PKH (CashAddr) derived from the same pubkey, not back
+  // to the bc1 address. The changeAddress param is only used as a flag (non-null = has change).
+  let txHex: string;
+  try {
+    txHex = buildSegwitRecoveryTransaction(
+      selectedUtxos,
+      toAddress,
+      amountSats,
+      hasChange ? expectedAddress : null,
+      changeAmount,
+      Buffer.from(matchedChild.privateKey),
+      Buffer.from(matchedChild.publicKey),
+      targetPubkeyHash
+    );
+  } finally {
+    // Zero seed and private key material after signing
+    if (seed instanceof Buffer || seed instanceof Uint8Array) {
+      crypto.randomFillSync(seed);
+      seed.fill(0);
+    }
+    if (matchedChild.privateKey) {
+      const pk = Buffer.from(matchedChild.privateKey);
+      crypto.randomFillSync(pk);
+      pk.fill(0);
+    }
+  }
 
   DEBUG && console.log(`[TX] Transaction hex (${txHex.length} chars): ${txHex}`);
 
@@ -1134,6 +1238,9 @@ export async function sendFromP2SH(
   amountSats: number,
   feePerByte: number
 ): Promise<TransactionResult> {
+  feePerByte = Math.ceil(feePerByte); // Ensure integer sat/byte
+  if (!Number.isFinite(feePerByte) || feePerByte < 1) feePerByte = 1;
+  if (amountSats < 546) throw new Error('Amount below dust threshold (546 sats)');
   // Derive from mnemonic and search BIP49 paths
   const seed = await bip39.mnemonicToSeed(mnemonic);
   const root = bip32.fromSeed(seed);
@@ -1189,11 +1296,22 @@ export async function sendFromP2SH(
     throw new Error(`No UTXOs available for P2SH address ${expectedAddress}`);
   }
 
+  // Validate UTXO txids and deduplicate
+  const txidRegex3 = /^[0-9a-fA-F]{64}$/;
+  const seenUtxos3 = new Set<string>();
+  for (let i = utxos.length - 1; i >= 0; i--) {
+    const u = utxos[i];
+    if (!txidRegex3.test(u.txid)) { utxos.splice(i, 1); continue; }
+    const key = `${u.txid}:${u.vout}`;
+    if (seenUtxos3.has(key)) { utxos.splice(i, 1); continue; }
+    seenUtxos3.add(key);
+  }
+
   utxos.sort((a, b) => b.value - a.value);
 
   const estimateTxSize = (inputCount: number, outputCount: number): number => {
-    // P2SH-P2WPKH inputs are ~148 bytes (sig + pubkey + redeemScript in scriptSig)
-    return 10 + (148 * inputCount) + (34 * outputCount);
+    // P2SH-P2WPKH inputs are ~171 bytes (sig + pubkey + redeemScript push in scriptSig)
+    return 10 + (171 * inputCount) + (34 * outputCount);
   };
 
   let selectedUtxos: UTXO[] = [];
@@ -1212,25 +1330,45 @@ export async function sendFromP2SH(
     }
   }
 
-  const txSize = estimateTxSize(selectedUtxos.length, outputCount);
-  const fee = txSize * feePerByte;
-  const changeAmount = totalInput - amountSats - fee;
+  // Calculate fee with 2 outputs first to determine if change is viable
+  const fee2out = estimateTxSize(selectedUtxos.length, 2) * feePerByte;
+  const tentativeChange = totalInput - amountSats - fee2out;
 
-  if (changeAmount < 0) {
+  // If change would be dust (<=546), recalculate fee with 1 output
+  const hasChange = tentativeChange > 546;
+  const actualOutputCount = hasChange ? 2 : 1;
+  const fee = estimateTxSize(selectedUtxos.length, actualOutputCount) * feePerByte;
+  const changeAmount = hasChange ? (totalInput - amountSats - fee) : 0;
+
+  if (totalInput < amountSats + fee) {
     throw new Error(`Insufficient funds. Need ${amountSats + fee} sats, have ${totalInput} sats`);
   }
 
-  const txHex = buildSegwitRecoveryTransaction(
-    selectedUtxos,
-    toAddress,
-    amountSats,
-    changeAmount > 546 ? expectedAddress : null,
-    changeAmount > 546 ? changeAmount : 0,
-    Buffer.from(matchedChild.privateKey),
-    Buffer.from(matchedChild.publicKey),
-    pubkeyHash,
-    redeemScript  // Pass redeemScript for P2SH-P2WPKH
-  );
+  let txHex: string;
+  try {
+    txHex = buildSegwitRecoveryTransaction(
+      selectedUtxos,
+      toAddress,
+      amountSats,
+      hasChange ? expectedAddress : null,
+      changeAmount,
+      Buffer.from(matchedChild.privateKey),
+      Buffer.from(matchedChild.publicKey),
+      pubkeyHash,
+      redeemScript  // Pass redeemScript for P2SH-P2WPKH
+    );
+  } finally {
+    // Zero seed and private key material after signing
+    if (seed instanceof Buffer || seed instanceof Uint8Array) {
+      crypto.randomFillSync(seed);
+      seed.fill(0);
+    }
+    if (matchedChild.privateKey) {
+      const pk = Buffer.from(matchedChild.privateKey);
+      crypto.randomFillSync(pk);
+      pk.fill(0);
+    }
+  }
 
   const txid = await broadcastTransaction(txHex);
   return { txid, hex: txHex };
@@ -1271,21 +1409,14 @@ function buildSegwitRecoveryTransaction(
   if (changeAddress && changeAmount > 0) {
     outputCount++;
     let changeScript: Buffer;
-    if (redeemScript) {
-      // P2SH change: OP_HASH160 <HASH160(redeemScript)> OP_EQUAL
-      const scriptHash = hash160(redeemScript);
-      changeScript = Buffer.concat([
-        Buffer.from([0xa9, 0x14]),
-        scriptHash,
-        Buffer.from([0x87]),
-      ]);
-    } else {
-      // P2WPKH change: OP_0 <pubkeyhash>
-      changeScript = Buffer.concat([
-        Buffer.from([0x00, 0x14]),
-        pubkeyHash
-      ]);
-    }
+    // BCH2: Always send change to P2PKH (CashAddr) — not back to SegWit/P2SH
+    // which would require another recovery spend. P2PKH is natively spendable.
+    // OP_DUP OP_HASH160 <pubkeyhash> OP_EQUALVERIFY OP_CHECKSIG
+    changeScript = Buffer.concat([
+      Buffer.from([0x76, 0xa9, 0x14]),
+      pubkeyHash,
+      Buffer.from([0x88, 0xac]),
+    ]);
     const changeBytes = Buffer.alloc(8);
     changeBytes.writeBigUInt64LE(BigInt(changeAmount), 0);
     outputs = Buffer.concat([outputs, changeBytes, encodeVarInt(changeScript.length), changeScript]);

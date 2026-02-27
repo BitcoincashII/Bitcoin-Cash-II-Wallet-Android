@@ -26,27 +26,32 @@ export function formatBCH2Amount(satoshis: number, unit: BCH2Unit = BCH2Unit.BCH
     case BCH2Unit.BCH2:
       return (satoshis / 100000000).toFixed(8) + ' BCH2';
     case BCH2Unit.SATS:
-      return satoshis.toLocaleString() + ' sats';
+      return satoshis.toString() + ' sats';
     default:
       return (satoshis / 100000000).toFixed(8) + ' BCH2';
   }
 }
 
 /**
- * Parse BCH2 amount string to satoshis
+ * Parse BCH2 amount string to satoshis.
+ * Caller must specify the unit to avoid ambiguity.
+ * Defaults to BCH2 (i.e. "1.5" = 150_000_000 sats).
  */
-export function parseBCH2Amount(amount: string): number {
+export function parseBCH2Amount(amount: string, unit: BCH2Unit = BCH2Unit.BCH2): number {
   const cleaned = amount.replace(/[^0-9.]/g, '');
   const value = parseFloat(cleaned);
-  if (isNaN(value)) return 0;
+  if (isNaN(value) || !isFinite(value)) return 0;
 
-  // If the amount looks like satoshis (no decimal), return as-is
-  if (!cleaned.includes('.') && value > 1000) {
-    return Math.floor(value);
+  if (unit === BCH2Unit.SATS) {
+    const sats = Math.floor(value);
+    if (!Number.isSafeInteger(sats) || sats < 0) return 0;
+    return sats;
   }
 
-  // Otherwise, convert from BCH2 to satoshis
-  return Math.round(value * 100000000);
+  // BCH2 unit: convert to satoshis
+  const sats = Math.round(value * 100000000);
+  if (!Number.isSafeInteger(sats) || sats < 0) return 0;
+  return sats;
 }
 
 /**

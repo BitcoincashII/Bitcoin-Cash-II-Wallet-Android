@@ -39,9 +39,12 @@ object MarketAPI {
     }
     
     suspend fun fetchPriceWithResponse(context: Context, currency: String): ApiResponse {
+        // BCH2: Price data not yet available. Return null to avoid showing BTC prices as BCH2.
+        Log.w(TAG, "BCH2 price data not yet available. Returning null for $currency.")
+        return ApiResponse(null, 200)
         val startTime = System.currentTimeMillis()
         Log.d(TAG, "Starting price fetch for currency: $currency")
-        
+
         try {
             // Load the currency info from JSON
             val fiatUnitsJson = context.assets.open("fiatUnits.json").bufferedReader().use { it.readText() }
@@ -273,7 +276,7 @@ object MarketAPI {
             Log.d(TAG, "Calculating fee from histogram with ${feeHistogram.length()} entries for $targetBlocks blocks")
             
             // Transform histogram - accumulate vsize until we reach the target block size
-            val blockSize = 1000000 // 1MB block size
+            val blockSize = 32000000 // 32MB block size (BCH2)
             var totalVsize = 0.0
             val histogramToUse = mutableListOf<Pair<Double, Double>>() // (fee, vsize)
             
@@ -378,38 +381,12 @@ object MarketAPI {
                 }
             }
             
-            // 1. Fetch price
-            Log.d(TAG, "Fetching price for $currency")
-            val priceStartTime = System.currentTimeMillis()
-            val response = fetchPriceWithResponse(context, currency)
-            val priceDuration = System.currentTimeMillis() - priceStartTime
-            
-            if (response.code == 429) {
-                Log.e(TAG, "Rate limited by price API, aborting market data fetch")
-                throw RateLimitException("Rate limited by price API")
-            }
-            
-            val priceStr = response.body
-            if (priceStr != null) {
-                val rate = priceStr.toDoubleOrNull() ?: 0.0
-                marketData.rate = rate
-                Log.d(TAG, "Parsed price rate: $rate")
-                
-                if (rate > 0) {
-                    // Format price with currency symbol - convert to integer
-                    marketData.price = formatCurrencyAmount(rate, currency)
-                    Log.d(TAG, "Formatted price: ${marketData.price}")
-                    
-                    // Calculate sats - convert to integer for display
-                    val satsValue = ((10 / rate) * 10000000).toInt()
-                    marketData.sats = numberFormatter.format(satsValue)
-                    Log.d(TAG, "Calculated sats: ${marketData.sats}")
-                } else {
-                    Log.w(TAG, "Price rate is zero or negative: $rate")
-                }
-            } else {
-                Log.w(TAG, "No price data received")
-            }
+            // 1. Price — disabled until BCH2 is listed on exchanges.
+            // fetchPriceWithResponse() returns BTC prices which would be misleading.
+            Log.w(TAG, "BCH2 price data not yet available. Skipping price fetch for $currency.")
+            marketData.price = "N/A"
+            marketData.sats = "N/A"
+            marketData.rate = 0.0
             
             // 2. Fetch next block fee - Always run this, regardless of price fetch result
             Log.d(TAG, "Fetching next block fee")

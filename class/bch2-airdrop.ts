@@ -135,6 +135,10 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
 
     const seed = await bip39.mnemonicToSeed(mnemonic, passphrase);
     const root = bip32.fromSeed(seed);
+    // Zero seed after BIP32 derivation — root holds master key internally
+    if (seed instanceof Buffer || seed instanceof Uint8Array) {
+      seed.fill(0);
+    }
 
     const results: AirdropClaimResult[] = [];
 
@@ -566,6 +570,9 @@ function decodeBech32(address: string): { version: number; program: Buffer } | n
       program.push((acc >> bits) & 0xff);
     }
   }
+
+  // BIP173: padding bits must be zero
+  if (bits > 0 && (acc & ((1 << bits) - 1)) !== 0) return null;
 
   return { version, program: Buffer.from(program) };
 }

@@ -23,6 +23,7 @@ class DeeplinkSchemaMatch {
     if (typeof schemaString !== 'string' || schemaString.length <= 0) return false;
     const lowercaseString = schemaString.trim().toLowerCase();
     return (
+      lowercaseString.startsWith('bitcoincashii:') ||
       lowercaseString.startsWith('bitcoin:') ||
       lowercaseString.startsWith('lightning:') ||
       lowercaseString.startsWith('blue:') ||
@@ -141,6 +142,17 @@ class DeeplinkSchemaMatch {
           onWalletSelect: (wallet: TWallet, { navigation }: any) => {
             navigation.pop(); // close select wallet screen
             navigation.navigate(...DeeplinkSchemaMatch.isBothBitcoinAndLightningOnWalletSelect(wallet, isBothBitcoinAndLightning));
+          },
+        },
+      ]);
+    } else if (event.url.toLowerCase().startsWith('bitcoincashii:')) {
+      // BCH2 CashAddr payment URI — route to BCH2Send screen
+      completionHandler([
+        'BCH2SendRoot',
+        {
+          screen: 'BCH2Send',
+          params: {
+            uri: event.url,
           },
         },
       ]);

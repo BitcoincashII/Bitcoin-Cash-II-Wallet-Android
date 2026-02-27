@@ -37,6 +37,14 @@ export const BCH2ReceiveScreen: React.FC<BCH2ReceiveProps> = ({
     Clipboard.setString(address);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+    // Clear clipboard after 60 seconds to prevent other apps from reading the address
+    setTimeout(() => {
+      Clipboard.getString().then((current: string) => {
+        if (current === address) {
+          Clipboard.setString('');
+        }
+      }).catch(() => {});
+    }, 60000);
   }, [address]);
 
   const handleShare = useCallback(async () => {

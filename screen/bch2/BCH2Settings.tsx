@@ -141,9 +141,26 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
     testConnection(server, setBc2Testing, setBc2Status, 'BC2');
   }, [bc2SelectedServer, bc2CustomHost, bc2CustomPort, bc2UseSSL, testConnection]);
 
-  const handleSaveSettings = useCallback(() => {
-    Alert.alert('Settings Saved', 'Your Electrum server settings have been saved');
-  }, []);
+  const handleSaveSettings = useCallback(async () => {
+    try {
+      const DefaultPreference = require('react-native-default-preference').default;
+      // Save BCH2 server settings
+      if (bch2SelectedServer === -1 && bch2CustomHost.trim()) {
+        await DefaultPreference.set('bch2_electrum_host', bch2CustomHost.trim());
+        await DefaultPreference.set('bch2_electrum_port', bch2UseSSL ? bch2CustomPort : bch2CustomPort);
+        await DefaultPreference.set('bch2_electrum_ssl', bch2UseSSL ? '1' : '0');
+      }
+      // Save BC2 server settings
+      if (bc2SelectedServer === -1 && bc2CustomHost.trim()) {
+        await DefaultPreference.set('bc2_electrum_host', bc2CustomHost.trim());
+        await DefaultPreference.set('bc2_electrum_port', bc2UseSSL ? bc2CustomPort : bc2CustomPort);
+        await DefaultPreference.set('bc2_electrum_ssl', bc2UseSSL ? '1' : '0');
+      }
+      Alert.alert('Settings Saved', 'Your Electrum server settings have been saved. Restart the app for changes to take effect.');
+    } catch (error: any) {
+      Alert.alert('Error', 'Failed to save settings: ' + (error.message || 'Unknown error'));
+    }
+  }, [bch2SelectedServer, bch2CustomHost, bch2CustomPort, bch2UseSSL, bc2SelectedServer, bc2CustomHost, bc2CustomPort, bc2UseSSL]);
 
   const renderServerSection = (
     title: string,

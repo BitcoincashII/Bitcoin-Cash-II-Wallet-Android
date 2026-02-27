@@ -38,7 +38,7 @@ Download the latest APK from [Releases](https://github.com/BitcoincashII/Bitcoin
 |-----------|------|-----|
 | Address Format | CashAddr (`bitcoincashii:`) | Legacy (`1...`) |
 | Fork Height | Block 53,200 | - |
-| Derivation Path | m/44'/145'/0' | m/44'/145'/0' |
+| Derivation Path | m/44'/145'/0' | m/44'/0'/0' |
 
 ## Building from Source
 
