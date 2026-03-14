@@ -1,6 +1,6 @@
 /**
- * BCH2 Airdrop Claim Screen
- * Allows users to claim their BCH2 from BC2 wallets
+ * BCH2 Airdrop Claim Wizard
+ * Guided 5-step flow to claim BCH2 from BC2 wallets
  */
 
 import React, { useState, useCallback, useRef, useEffect } from 'react';
@@ -14,125 +14,408 @@ import {
   ActivityIndicator,
   Alert,
   Image,
-  Linking,
 } from 'react-native';
 
-// Coin logos
 const BC2_LOGO = require('../../img/bc2-logo-small.png');
 const BCH2_LOGO = require('../../img/bch2-logo-small.png');
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2Shadows, BCH2BorderRadius } from '../../components/BCH2Theme';
-import { claimFromWIF, claimFromMnemonic, AirdropClaimResult } from '../../class/bch2-airdrop';
+import {
+  claimFromWIF,
+  claimFromMnemonic,
+  scanDescriptorForAirdrop,
+  getAntiGamingStatus,
+  buildScanResult,
+  AirdropClaimResult,
+  AirdropScanResult,
+} from '../../class/bch2-airdrop';
 import { saveWallet } from '../../class/bch2-wallet-storage';
 import { useNavigation } from '@react-navigation/native';
 import { PasswordInput, PasswordInputHandle } from '../../components/PasswordInput';
+import { useScreenProtect } from '../../hooks/useScreenProtect';
 
-type ImportMode = 'mnemonic' | 'wif';
+// ============================================================================
+// Types & Config
+// ============================================================================
+
+type WalletTypeId = 'bitcoin-core' | 'electrum' | 'mobile-bip39' | 'hardware' | 'paper-wallet' | 'other';
+type InputMode = 'wif' | 'phrase' | 'descriptor';
+
+interface WalletTypeConfig {
+  id: WalletTypeId;
+  label: string;
+  icon: string;
+  description: string;
+  inputMode: InputMode;
+  inputLabel: string;
+  inputPlaceholder: string;
+  multiline: boolean;
+  warning?: string;
+  helperText: string;
+  instructions: string[];
+}
+
+const WALLET_TYPES: WalletTypeConfig[] = [
+  {
+    id: 'bitcoin-core',
+    label: 'Bitcoin Core',
+    icon: '>_',
+    description: 'Full node wallet',
+    inputMode: 'descriptor',
+    inputLabel: 'Descriptor or WIF',
+    inputPlaceholder: 'Paste listdescriptors output, xprv, or WIF...',
+    multiline: true,
+    helperText: 'Accepts listdescriptors JSON, xprv key, or single WIF',
+    instructions: [
+      'Open Bitcoin Core and go to Window > Console',
+      'If encrypted, run: walletpassphrase "your-passphrase" 60',
+      'Run: listdescriptors true',
+      'Copy the entire JSON output and paste it below',
+    ],
+  },
+  {
+    id: 'electrum',
+    label: 'Electrum',
+    icon: '\u26A1',
+    description: 'Desktop wallet',
+    inputMode: 'phrase',
+    inputLabel: '12-Word Recovery Phrase',
+    inputPlaceholder: 'Enter your 12 words separated by spaces',
+    multiline: true,
+    helperText: 'Scans BIP44, BIP84, BIP49, BIP86 paths',
+    instructions: [
+      'Open Electrum and go to Wallet > Seed',
+      'Enter your wallet password when prompted',
+      'Copy the 12-word seed phrase shown',
+      'Paste it into the field below',
+    ],
+  },
+  {
+    id: 'mobile-bip39',
+    label: 'Mobile / BIP39',
+    icon: '\uD83D\uDCF1',
+    description: 'Trust Wallet, Coinomi, etc.',
+    inputMode: 'phrase',
+    inputLabel: '12/24-Word Recovery Phrase',
+    inputPlaceholder: 'Enter your recovery words separated by spaces',
+    multiline: true,
+    helperText: 'Scans BIP44, BIP84, BIP49, BIP86 paths',
+    instructions: [
+      'Open your wallet app and go to Settings > Security',
+      'Find "Show Recovery Phrase" or "Backup Wallet"',
+      'Authenticate and copy your 12 or 24 word phrase',
+      'Paste it into the field below',
+    ],
+  },
+  {
+    id: 'hardware',
+    label: 'Hardware Wallet',
+    icon: '\uD83D\uDD11',
+    description: 'Ledger, Trezor, etc.',
+    inputMode: 'phrase',
+    inputLabel: 'Recovery Phrase',
+    inputPlaceholder: 'Enter the recovery phrase from your hardware wallet backup',
+    multiline: true,
+    warning: 'Entering your hardware wallet recovery phrase into any software reduces its security. Only proceed if you understand the risk and plan to move funds to a new wallet afterward.',
+    helperText: 'Use the 24-word backup phrase that came with your device',
+    instructions: [
+      'Locate the recovery phrase card that came with your device',
+      'Carefully type each word in order into the field below',
+      'After claiming, consider generating a new wallet on the device',
+    ],
+  },
+  {
+    id: 'paper-wallet',
+    label: 'Paper Wallet',
+    icon: '\uD83D\uDCC4',
+    description: 'Single private key (WIF)',
+    inputMode: 'wif',
+    inputLabel: 'Private Key (WIF)',
+    inputPlaceholder: '5K... or L... or K...',
+    multiline: false,
+    helperText: 'Checks Legacy, bc1, 3xxx, and bc1p addresses',
+    instructions: [
+      'Find your paper wallet or backup with the private key',
+      'The key starts with 5, K, or L',
+      'Type or paste the full WIF private key into the field below',
+    ],
+  },
+  {
+    id: 'other',
+    label: 'Other / Unsure',
+    icon: '?',
+    description: 'Choose input format',
+    inputMode: 'wif',
+    inputLabel: 'Private Key (WIF)',
+    inputPlaceholder: '5K... or L... or K...',
+    multiline: false,
+    helperText: 'Select the tab matching your input type',
+    instructions: [
+      'Choose the input type that matches what you have',
+      'WIF: a single private key starting with 5, K, or L',
+      'Phrase: a 12 or 24-word BIP39 recovery phrase',
+      'Descriptor: Bitcoin Core descriptor output or xprv key',
+    ],
+  },
+];
+
+// ============================================================================
+// Step Progress Component
+// ============================================================================
+
+function StepProgress({ current }: { current: number }) {
+  const totalSteps = 5;
+  const elements: React.ReactNode[] = [];
+  for (let i = 0; i < totalSteps; i++) {
+    if (i > 0) {
+      elements.push(
+        <View
+          key={`line-${i}`}
+          style={[styles.stepLine, i <= current && styles.stepLineCompleted]}
+        />,
+      );
+    }
+    elements.push(
+      <View
+        key={`dot-${i}`}
+        style={[
+          styles.stepDot,
+          i === current && styles.stepDotActive,
+          i < current && styles.stepDotCompleted,
+        ]}
+      />,
+    );
+  }
+  return <View style={styles.stepProgress}>{elements}</View>;
+}
+
+// ============================================================================
+// Main Component
+// ============================================================================
 
 export const ClaimAirdropScreen: React.FC = () => {
   const navigation = useNavigation();
-  const [mode, setMode] = useState<ImportMode>('mnemonic');
-  const [input, setInput] = useState('');
+  const { enableScreenProtect, disableScreenProtect } = useScreenProtect();
+
+  // Wizard state
+  const [step, setStep] = useState(0);
+  const [walletType, setWalletType] = useState<WalletTypeId | null>(null);
+  const [otherInputType, setOtherInputType] = useState<InputMode>('wif');
+
+  // Input state
+  const [wifInput, setWifInput] = useState('');
+  const [phraseInput, setPhraseInput] = useState('');
+  const [descriptorInput, setDescriptorInput] = useState('');
   const [passphrase, setPassphrase] = useState('');
+
+  // Scan results
+  const [scanResult, setScanResult] = useState<AirdropScanResult | null>(null);
+  const [scanProgress, setScanProgress] = useState('');
   const [loading, setLoading] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const [results, setResults] = useState<AirdropClaimResult[]>([]);
-  const [totalClaimable, setTotalClaimable] = useState(0);
-  const [showBitcoinCoreHelp, setShowBitcoinCoreHelp] = useState(false);
+  const [error, setError] = useState('');
+  const [antiGamingWarning, setAntiGamingWarning] = useState<string | null>(null);
+  const [antiGamingBlocked, setAntiGamingBlocked] = useState(false);
+
+  // Import state
+  const [storedCredentials, setStoredCredentials] = useState<{ type: InputMode; value: string } | null>(null);
   const [showPasswordStep, setShowPasswordStep] = useState(false);
   const [walletPassword, setWalletPassword] = useState('');
   const [walletConfirmPassword, setWalletConfirmPassword] = useState('');
   const [passwordError, setPasswordError] = useState('');
+  const [importing, setImporting] = useState(false);
+
   const claimPasswordRef = useRef<PasswordInputHandle>(null);
   const claimConfirmPasswordRef = useRef<PasswordInputHandle>(null);
 
+  // Refs to avoid stale closures
+  const wifRef = useRef(wifInput);
+  wifRef.current = wifInput;
+  const phraseRef = useRef(phraseInput);
+  phraseRef.current = phraseInput;
+  const descriptorRef = useRef(descriptorInput);
+  descriptorRef.current = descriptorInput;
+
+  // Enable screenshot protection when sensitive inputs have content
+  useEffect(() => {
+    const hasSensitiveInput = !!(wifInput || phraseInput || descriptorInput);
+    if (hasSensitiveInput) {
+      enableScreenProtect();
+    } else {
+      disableScreenProtect();
+    }
+    return () => { disableScreenProtect(); };
+  }, [wifInput, phraseInput, descriptorInput]);
+
   // Clear sensitive state on unmount
   useEffect(() => {
-    return () => { setInput(''); setPassphrase(''); setWalletPassword(''); setWalletConfirmPassword(''); };
+    return () => {
+      setWifInput('');
+      setPhraseInput('');
+      setDescriptorInput('');
+      setPassphrase('');
+      setWalletPassword('');
+      setWalletConfirmPassword('');
+      setStoredCredentials(null);
+    };
   }, []);
 
-  const handleClaim = useCallback(async () => {
-    if (!input.trim()) {
-      Alert.alert('Error', 'Please enter your seed phrase or private key');
-      return;
-    }
+  // ============================================================================
+  // Helpers
+  // ============================================================================
 
-    setLoading(true);
-    setResults([]);
+  const getEffectiveInputMode = (): InputMode => {
+    if (!walletType) return 'wif';
+    if (walletType === 'other') return otherInputType;
+    const config = WALLET_TYPES.find(w => w.id === walletType);
+    return config?.inputMode ?? 'wif';
+  };
 
-    try {
-      let claimResults: AirdropClaimResult[];
+  const getWalletConfig = (): WalletTypeConfig | undefined => {
+    return WALLET_TYPES.find(w => w.id === walletType);
+  };
 
-      if (mode === 'mnemonic') {
-        claimResults = await claimFromMnemonic(input.trim(), passphrase);
-      } else {
-        const result = await claimFromWIF(input.trim());
-        claimResults = [result];
+  const getEffectiveConfig = () => {
+    if (walletType === 'other') {
+      if (otherInputType === 'phrase') {
+        return { inputLabel: 'Recovery Phrase', inputPlaceholder: 'Enter your recovery words...', multiline: true, helperText: 'BIP39 12 or 24 word phrase' };
       }
-
-      setResults(claimResults);
-
-      const total = claimResults
-        .filter(r => r.success)
-        .reduce((sum, r) => sum + r.balance, 0);
-      setTotalClaimable(total);
-
-      // Anti-gaming: airdrop portion = min(bch2, bc2) per address
-      const airdropTotal = claimResults
-        .filter(r => r.success)
-        .reduce((sum, r) => {
-          const bc2 = r.bc2Balance ?? 0;
-          return sum + Math.min(r.balance, bc2);
-        }, 0);
-      const postForkTotal = total - airdropTotal;
-
-      if (total > 0) {
-        let message = `You have ${(total / 100000000).toFixed(8)} BCH2 available.`;
-
-        if (postForkTotal > 0 && airdropTotal === 0) {
-          message += `\n\n⚠️ Warning: No matching BC2 balance found. This BCH2 may have been received after the fork and is not from the airdrop.`;
-        } else if (postForkTotal > 0) {
-          message += `\n\n${(airdropTotal / 100000000).toFixed(8)} BCH2 from airdrop`;
-          message += `\n${(postForkTotal / 100000000).toFixed(8)} BCH2 exceeds BC2 balance (may be post-fork)`;
-        }
-
-        Alert.alert('BCH2 Found!', message);
-      } else if (claimResults[0]?.error) {
-        Alert.alert('Error', claimResults[0].error);
-      } else {
-        Alert.alert('No Balance', 'No BCH2 balance found for this wallet');
+      if (otherInputType === 'descriptor') {
+        return { inputLabel: 'Descriptor or xprv', inputPlaceholder: 'Paste descriptor JSON, xprv, or WIF...', multiline: true, helperText: 'Bitcoin Core descriptor, xprv, or WIF' };
       }
-    } catch (err: any) {
-      Alert.alert('Error', err.message || 'Failed to check balance');
-    } finally {
-      setLoading(false);
+      return { inputLabel: 'Private Key (WIF)', inputPlaceholder: '5K... or L... or K...', multiline: false, helperText: 'Single WIF private key' };
     }
-  }, [input, passphrase, mode]);
+    const config = getWalletConfig();
+    return config;
+  };
+
+  const hasInput = (): boolean => {
+    const mode = getEffectiveInputMode();
+    switch (mode) {
+      case 'wif': return !!wifRef.current.trim();
+      case 'phrase': return !!phraseRef.current.trim();
+      case 'descriptor': return !!descriptorRef.current.trim();
+    }
+  };
 
   const formatBalance = (sats: number): string => {
     return (sats / 100000000).toFixed(8);
   };
 
+  const getAddressTypeLabel = (type?: string) => {
+    switch (type) {
+      case 'legacy': return 'Legacy (1xxx)';
+      case 'bc1': return 'SegWit (bc1)';
+      case 'p2sh-segwit': return 'Wrapped SegWit (3xxx)';
+      case 'p2tr': return 'Taproot (bc1p)';
+      default: return 'Address';
+    }
+  };
+
+  // ============================================================================
+  // Scan Handlers
+  // ============================================================================
+
+  const handleScan = useCallback(async () => {
+    const mode = getEffectiveInputMode();
+    const currentWif = wifRef.current.trim();
+    const currentPhrase = phraseRef.current.trim();
+    const currentDescriptor = descriptorRef.current.trim();
+
+    setError('');
+    setStep(2);
+    setLoading(true);
+    setScanProgress('Preparing scan...');
+
+    try {
+      if (mode === 'wif') {
+        setScanProgress('Scanning for claimable balances...');
+        const result = await claimFromWIF(currentWif);
+        const scanRes = buildScanResult([result]);
+        const agStatus = getAntiGamingStatus(scanRes);
+        setAntiGamingWarning(agStatus.warning);
+        setAntiGamingBlocked(agStatus.blocked);
+        setScanResult(scanRes);
+        setStoredCredentials({ type: 'wif', value: currentWif });
+        setStep(3);
+      } else if (mode === 'phrase') {
+        setScanProgress('Scanning addresses (BIP44, BIP84, BIP49, BIP86)...');
+        const results = await claimFromMnemonic(currentPhrase, passphrase);
+        const scanRes = buildScanResult(results);
+        const agStatus = getAntiGamingStatus(scanRes);
+        setAntiGamingWarning(agStatus.warning);
+        setAntiGamingBlocked(agStatus.blocked);
+        setScanResult(scanRes);
+        setStoredCredentials({ type: 'phrase', value: currentPhrase });
+        setStep(3);
+      } else {
+        // Descriptor mode — auto-detect WIF
+        const wifPattern = /^[5KL][1-9A-HJ-NP-Za-km-z]{50,51}$/;
+        if (wifPattern.test(currentDescriptor)) {
+          setScanProgress('Detected WIF key, scanning...');
+          const result = await claimFromWIF(currentDescriptor);
+          const scanRes = buildScanResult([result]);
+          const agStatus = getAntiGamingStatus(scanRes);
+          setAntiGamingWarning(agStatus.warning);
+          setAntiGamingBlocked(agStatus.blocked);
+          setScanResult(scanRes);
+          setStoredCredentials({ type: 'wif', value: currentDescriptor });
+          setStep(3);
+        } else {
+          setScanProgress('Parsing descriptors...');
+          const scanRes = await scanDescriptorForAirdrop(currentDescriptor);
+          const agStatus = getAntiGamingStatus(scanRes);
+          setAntiGamingWarning(agStatus.warning);
+          setAntiGamingBlocked(agStatus.blocked);
+          setScanResult(scanRes);
+          setStoredCredentials({ type: 'descriptor', value: currentDescriptor });
+          setStep(3);
+        }
+      }
+    } catch (err: any) {
+      setError('Failed to scan for airdrop');
+      setWifInput('');
+      setPhraseInput('');
+      setDescriptorInput('');
+      setPassphrase('');
+      setStep(1);
+    } finally {
+      setLoading(false);
+      setScanProgress('');
+    }
+  }, [passphrase, walletType, otherInputType]);
+
+  // ============================================================================
+  // Import Handler
+  // ============================================================================
+
   const handleImportWallet = useCallback(async () => {
-    if (!input.trim() || totalClaimable === 0) {
+    if (!storedCredentials || !scanResult || scanResult.totalBalance === 0) {
       Alert.alert('Error', 'No wallet to import');
       return;
     }
 
-    if (mode === 'mnemonic') {
-      // Show password step
+    if (storedCredentials.type === 'phrase') {
       setWalletPassword('');
       setWalletConfirmPassword('');
       setPasswordError('');
       setShowPasswordStep(true);
-    } else {
-      // WIF import - for now show message that they need to use full import
+    } else if (storedCredentials.type === 'wif') {
       Alert.alert(
         'WIF Import',
         'To import a WIF private key, please use the "Add Wallet" screen and select "Import BCH2 Wallet".',
-        [{ text: 'OK' }]
+        [{ text: 'OK' }],
+      );
+    } else {
+      // Descriptor — can't directly import, guide user
+      Alert.alert(
+        'Descriptor Wallet',
+        'Descriptor wallets cannot be directly imported. To claim your BCH2:\n\n' +
+        '1. Open Bitcoin Core console\n' +
+        '2. Run: dumpprivkey <address>\n' +
+        '3. Use the WIF key with "Add Wallet" > "Import BCH2"',
+        [{ text: 'OK' }],
       );
     }
-  }, [input, mode, totalClaimable]);
+  }, [storedCredentials, scanResult]);
 
   const handleClaimWithPassword = useCallback(async () => {
     setPasswordError('');
@@ -153,303 +436,487 @@ export const ClaimAirdropScreen: React.FC = () => {
 
     setImporting(true);
     try {
-      const wallet = await saveWallet('Claimed BCH2 Wallet', input.trim(), 'bch2', walletPassword);
-      setInput(''); setPassphrase(''); setWalletPassword(''); setWalletConfirmPassword('');
+      await saveWallet('Claimed BCH2 Wallet', storedCredentials!.value, 'bch2', walletPassword);
+      // Clear sensitive data
+      setWifInput('');
+      setPhraseInput('');
+      setDescriptorInput('');
+      setPassphrase('');
+      setWalletPassword('');
+      setWalletConfirmPassword('');
+      setStoredCredentials(null);
       setShowPasswordStep(false);
-      Alert.alert(
-        'Wallet Imported!',
-        `Your BCH2 wallet has been imported with ${formatBalance(totalClaimable)} BCH2`,
-        [{ text: 'OK', onPress: () => navigation.goBack() }]
-      );
+      setStep(4);
     } catch (error: any) {
-      Alert.alert('Import Failed', error.message || 'Failed to import wallet');
+      Alert.alert('Import Failed', 'Failed to import wallet');
     } finally {
       setImporting(false);
     }
-  }, [input, walletPassword, walletConfirmPassword, totalClaimable, navigation]);
+  }, [walletPassword, walletConfirmPassword, storedCredentials, navigation]);
 
-  return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      {/* Header */}
-      <View style={styles.header}>
-        <Text style={styles.title}>Claim Your BCH2</Text>
-        <Text style={styles.subtitle}>
-          BCH2 forked from BC2 at block 53,200. If you held BC2 at that time,
-          you have the same balance on BCH2!
-        </Text>
-      </View>
+  // ============================================================================
+  // Step 0: Wallet Selection
+  // ============================================================================
 
-      {/* Coin Conversion Visual */}
-      <View style={styles.conversionCard}>
-        <View style={styles.conversionCoin}>
-          <Image source={BC2_LOGO} style={styles.coinLogo} resizeMode="contain" />
-          <Text style={styles.coinLabel}>BC2</Text>
+  if (step === 0) {
+    return (
+      <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+        {/* Header */}
+        <View style={styles.headerCenter}>
+          <Image source={BCH2_LOGO} style={styles.headerLogo} resizeMode="contain" />
+          <Text style={styles.title}>Claim BCH2 Airdrop</Text>
+          <Text style={styles.subtitle}>
+            What wallet software holds your BC2/BTC keys?
+          </Text>
         </View>
-        <Text style={styles.conversionArrow}>→</Text>
-        <View style={styles.conversionCoin}>
-          <Image source={BCH2_LOGO} style={styles.coinLogo} resizeMode="contain" />
-          <Text style={styles.coinLabelAccent}>BCH2</Text>
-        </View>
-      </View>
 
-      {/* Info Card */}
-      <View style={styles.infoCard}>
-        <Text style={styles.infoTitle}>How it works</Text>
-        <Text style={styles.infoText}>
-          1. Enter your BC2 seed phrase or private key{'\n'}
-          2. We'll check your BCH2 balance{'\n'}
-          3. Import the wallet to send your BCH2
-        </Text>
+        {/* Coin Conversion Visual */}
+        <View style={styles.conversionCard}>
+          <View style={styles.conversionCoin}>
+            <Image source={BC2_LOGO} style={styles.coinLogo} resizeMode="contain" />
+            <Text style={styles.coinLabel}>BC2</Text>
+          </View>
+          <Text style={styles.conversionArrow}>{'\u2192'}</Text>
+          <View style={styles.conversionCoin}>
+            <Image source={BCH2_LOGO} style={styles.coinLogo} resizeMode="contain" />
+            <Text style={styles.coinLabelAccent}>BCH2</Text>
+          </View>
+        </View>
+
+        {/* Wallet Type Grid */}
+        <View style={styles.walletTypeGrid}>
+          {WALLET_TYPES.map(wt => (
+            <TouchableOpacity
+              key={wt.id}
+              style={styles.walletTypeCard}
+              onPress={() => {
+                setWalletType(wt.id);
+                setError('');
+                setStep(1);
+              }}
+              activeOpacity={0.7}
+              accessibilityLabel={`${wt.label}, ${wt.description}`}
+              accessibilityRole="button"
+            >
+              <Text style={styles.walletTypeIcon}>{wt.icon}</Text>
+              <Text style={styles.walletTypeName}>{wt.label}</Text>
+              <Text style={styles.walletTypeDesc}>{wt.description}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        {/* Back */}
+        <TouchableOpacity
+          style={styles.backButton}
+          onPress={() => navigation.goBack()}
+        >
+          <Text style={styles.backButtonText}>Back</Text>
+        </TouchableOpacity>
+      </ScrollView>
+    );
+  }
+
+  // ============================================================================
+  // Step 1: Instructions + Input
+  // ============================================================================
+
+  if (step === 1) {
+    const config = getWalletConfig();
+    const effectiveMode = getEffectiveInputMode();
+    const effectiveConfig = getEffectiveConfig();
+
+    return (
+      <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+        <StepProgress current={1} />
+
+        {/* Header */}
+        <View style={styles.headerRow}>
+          <Text style={styles.walletIcon}>{config?.icon}</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.stepTitle}>{config?.label || 'Import Keys'}</Text>
+            <Text style={styles.stepSubtitle}>{config?.description}</Text>
+          </View>
+        </View>
+
+        {/* Security Notice */}
         <View style={styles.securityNote}>
           <Text style={styles.securityNoteText}>
-            🔒 Your keys never leave your device
+            Your keys never leave your device
           </Text>
         </View>
-      </View>
 
-      {/* Bitcoin Core Help */}
-      <TouchableOpacity
-        style={styles.helpToggle}
-        onPress={() => setShowBitcoinCoreHelp(!showBitcoinCoreHelp)}
-      >
-        <Text style={styles.helpToggleText}>
-          {showBitcoinCoreHelp ? '▼' : '▶'} Using Bitcoin Core? (bc1 addresses)
+        {/* Hardware Wallet Warning */}
+        {config?.warning && (
+          <View style={styles.warningCard}>
+            <Text style={styles.warningText}>{config.warning}</Text>
+          </View>
+        )}
+
+        {/* Instructions */}
+        <View style={styles.instructionCard}>
+          {config?.instructions.map((instruction, index) => (
+            <View key={index} style={styles.instructionRow}>
+              <View style={styles.instructionNumber}>
+                <Text style={styles.instructionNumberText}>{index + 1}</Text>
+              </View>
+              <Text style={styles.instructionText}>{instruction}</Text>
+            </View>
+          ))}
+        </View>
+
+        {/* Error */}
+        {error ? (
+          <View style={styles.errorCard}>
+            <Text style={styles.errorText}>{error}</Text>
+          </View>
+        ) : null}
+
+        {/* Tab Bar for "Other" mode */}
+        {walletType === 'other' && (
+          <View style={styles.modeSelector}>
+            {(['wif', 'phrase', 'descriptor'] as InputMode[]).map(mode => (
+              <TouchableOpacity
+                key={mode}
+                style={[styles.modeButton, otherInputType === mode && styles.modeButtonActive]}
+                onPress={() => setOtherInputType(mode)}
+              >
+                <Text style={[styles.modeButtonText, otherInputType === mode && styles.modeButtonTextActive]}>
+                  {mode === 'wif' ? 'WIF' : mode === 'phrase' ? 'Phrase' : 'Descriptor'}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
+
+        {/* Input Field */}
+        <View style={styles.inputContainer}>
+          <Text style={styles.inputLabel}>{effectiveConfig?.inputLabel}</Text>
+          {effectiveMode === 'wif' && (
+            <TextInput
+              style={styles.input}
+              value={wifInput}
+              onChangeText={setWifInput}
+              placeholder={effectiveConfig?.inputPlaceholder}
+              placeholderTextColor={BCH2Colors.textMuted}
+              autoCapitalize="none"
+              autoCorrect={false}
+              secureTextEntry
+            />
+          )}
+          {effectiveMode === 'phrase' && (
+            <TextInput
+              style={[styles.input, styles.inputMultiline]}
+              value={phraseInput}
+              onChangeText={setPhraseInput}
+              placeholder={effectiveConfig?.inputPlaceholder}
+              placeholderTextColor={BCH2Colors.textMuted}
+              multiline
+              numberOfLines={3}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+          )}
+          {effectiveMode === 'descriptor' && (
+            <TextInput
+              style={[styles.input, styles.inputMultiline, { minHeight: 120 }]}
+              value={descriptorInput}
+              onChangeText={setDescriptorInput}
+              placeholder={effectiveConfig?.inputPlaceholder}
+              placeholderTextColor={BCH2Colors.textMuted}
+              multiline
+              numberOfLines={6}
+              maxLength={5000}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+          )}
+          <Text style={styles.helperText}>{effectiveConfig?.helperText}</Text>
+        </View>
+
+        {/* Passphrase (for mnemonic modes) */}
+        {effectiveMode === 'phrase' && (
+          <View style={styles.inputContainer}>
+            <Text style={styles.inputLabel}>Passphrase (optional)</Text>
+            <TextInput
+              style={styles.input}
+              value={passphrase}
+              onChangeText={setPassphrase}
+              placeholder="BIP39 passphrase if used..."
+              placeholderTextColor={BCH2Colors.textMuted}
+              secureTextEntry
+            />
+          </View>
+        )}
+
+        {/* Scan Button */}
+        <TouchableOpacity
+          style={[styles.primaryButton, (!hasInput() || loading) && styles.buttonDisabled]}
+          onPress={handleScan}
+          disabled={!hasInput() || loading}
+        >
+          {loading ? (
+            <ActivityIndicator color={BCH2Colors.textPrimary} />
+          ) : (
+            <Text style={styles.primaryButtonText}>Scan for BCH2</Text>
+          )}
+        </TouchableOpacity>
+
+        {/* Back */}
+        <TouchableOpacity
+          style={styles.backButton}
+          onPress={() => {
+            setError('');
+            setStep(0);
+          }}
+        >
+          <Text style={styles.backButtonText}>Back</Text>
+        </TouchableOpacity>
+      </ScrollView>
+    );
+  }
+
+  // ============================================================================
+  // Step 2: Scanning Progress
+  // ============================================================================
+
+  if (step === 2) {
+    return (
+      <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+        <StepProgress current={2} />
+
+        <View style={styles.scanContainer}>
+          <ActivityIndicator size="large" color={BCH2Colors.primary} style={styles.scanSpinner} />
+          <Text style={styles.scanTitle}>Scanning...</Text>
+          <Text style={styles.scanProgressText}>{scanProgress || 'Looking for claimable BCH2...'}</Text>
+        </View>
+      </ScrollView>
+    );
+  }
+
+  // ============================================================================
+  // Step 3: Results & Import
+  // ============================================================================
+
+  if (step === 3) {
+    const claims = scanResult?.claims ?? [];
+    const hasClaims = claims.length > 0;
+
+    return (
+      <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+        <StepProgress current={3} />
+
+        <Text style={styles.stepTitle}>
+          {hasClaims ? 'BCH2 Found!' : 'No BCH2 Found'}
         </Text>
-      </TouchableOpacity>
 
-      {showBitcoinCoreHelp && (
-        <View style={styles.bitcoinCoreHelp}>
-          <Text style={styles.helpTitle}>Bitcoin Core / BC2 Core Users</Text>
-          <Text style={styles.helpText}>
-            Bitcoin Core uses descriptors instead of seed phrases. To claim your BCH2 from bc1 addresses:
-          </Text>
-
-          <View style={styles.helpStep}>
-            <Text style={styles.helpStepNumber}>1</Text>
-            <View style={styles.helpStepContent}>
-              <Text style={styles.helpStepTitle}>Find addresses with balance</Text>
-              <Text style={styles.helpCode}>bitcoin-cli listunspent</Text>
-            </View>
-          </View>
-
-          <View style={styles.helpStep}>
-            <Text style={styles.helpStepNumber}>2</Text>
-            <View style={styles.helpStepContent}>
-              <Text style={styles.helpStepTitle}>Export private key for each bc1 address</Text>
-              <Text style={styles.helpCode}>bitcoin-cli dumpprivkey bc1q...</Text>
-              <Text style={styles.helpNote}>Returns WIF like: L1aW4aubDFB7yfras...</Text>
-            </View>
-          </View>
-
-          <View style={styles.helpStep}>
-            <Text style={styles.helpStepNumber}>3</Text>
-            <View style={styles.helpStepContent}>
-              <Text style={styles.helpStepTitle}>Paste the WIF key above</Text>
-              <Text style={styles.helpNote}>Select "Private Key" mode and paste the WIF</Text>
-            </View>
-          </View>
-
-          <View style={styles.helpWarning}>
-            <Text style={styles.helpWarningText}>
-              ⚠️ For legacy wallets (non-descriptor), you may need to run:{'\n'}
-              <Text style={styles.helpCode}>bitcoin-cli -rpcwallet=wallet_name dumpprivkey "address"</Text>
+        {/* Total Card */}
+        {hasClaims && scanResult && (
+          <View style={styles.totalCard}>
+            <Text style={styles.totalLabel}>Total Claimable</Text>
+            <Text style={styles.totalAmount}>
+              {formatBalance(scanResult.totalBalance)} BCH2
             </Text>
           </View>
-
-          <Text style={styles.helpText}>
-            The same private key works for both bc1 (SegWit) and legacy addresses. We automatically check both.
-          </Text>
-        </View>
-      )}
-
-      {/* Mode Selector */}
-      <View style={styles.modeSelector}>
-        <TouchableOpacity
-          style={[styles.modeButton, mode === 'mnemonic' && styles.modeButtonActive]}
-          onPress={() => setMode('mnemonic')}
-        >
-          <Text style={[styles.modeButtonText, mode === 'mnemonic' && styles.modeButtonTextActive]}>
-            Seed Phrase
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.modeButton, mode === 'wif' && styles.modeButtonActive]}
-          onPress={() => setMode('wif')}
-        >
-          <Text style={[styles.modeButtonText, mode === 'wif' && styles.modeButtonTextActive]}>
-            Private Key
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Input */}
-      <View style={styles.inputContainer}>
-        <Text style={styles.inputLabel}>
-          {mode === 'mnemonic' ? '12/24 Word Seed Phrase' : 'WIF Private Key'}
-        </Text>
-        <TextInput
-          style={styles.input}
-          value={input}
-          onChangeText={setInput}
-          placeholder={mode === 'mnemonic'
-            ? 'Enter your seed phrase...'
-            : 'Enter your private key (WIF format)...'}
-          placeholderTextColor={BCH2Colors.textMuted}
-          multiline={mode === 'mnemonic'}
-          numberOfLines={mode === 'mnemonic' ? 3 : 1}
-          autoCapitalize="none"
-          autoCorrect={false}
-          secureTextEntry={mode === 'wif'}
-        />
-      </View>
-
-      {/* Passphrase (optional for mnemonic) */}
-      {mode === 'mnemonic' && (
-        <View style={styles.inputContainer}>
-          <Text style={styles.inputLabel}>Passphrase (optional)</Text>
-          <TextInput
-            style={styles.input}
-            value={passphrase}
-            onChangeText={setPassphrase}
-            placeholder="BIP39 passphrase if used..."
-            placeholderTextColor={BCH2Colors.textMuted}
-            secureTextEntry
-          />
-        </View>
-      )}
-
-      {/* Claim Button */}
-      <TouchableOpacity
-        style={[styles.claimButton, loading && styles.claimButtonDisabled]}
-        onPress={handleClaim}
-        disabled={loading}
-      >
-        {loading ? (
-          <ActivityIndicator color={BCH2Colors.textPrimary} />
-        ) : (
-          <Text style={styles.claimButtonText}>Check BCH2 Balance</Text>
         )}
-      </TouchableOpacity>
 
-      {/* Results */}
-      {results.length > 0 && (
-        <View style={styles.resultsContainer}>
-          <Text style={styles.resultsTitle}>Results</Text>
+        {/* Anti-gaming Warning */}
+        {antiGamingWarning && (
+          <View style={[styles.warningCard, antiGamingBlocked && styles.errorCard]}>
+            <Text style={[styles.warningText, antiGamingBlocked && styles.errorText]}>
+              {antiGamingWarning}
+            </Text>
+          </View>
+        )}
 
-          {totalClaimable > 0 && (
-            <View style={styles.totalCard}>
-              <Text style={styles.totalLabel}>Total Claimable</Text>
-              <Text style={styles.totalAmount}>{formatBalance(totalClaimable)} BCH2</Text>
-            </View>
-          )}
-
-          {results.filter(r => r.success && r.balance > 0).map((result, index) => {
-            const bc2 = result.bc2Balance ?? 0;
-            const excess = result.balance - Math.min(result.balance, bc2);
-            return (
-              <View key={index} style={styles.resultCard}>
-                {excess > 0 && bc2 === 0 && (
-                  <View style={styles.warningBadge}>
-                    <Text style={styles.warningBadgeText}>⚠️ No matching BC2 balance</Text>
-                  </View>
-                )}
-                {excess > 0 && bc2 > 0 && (
-                  <View style={styles.warningBadge}>
-                    <Text style={styles.warningBadgeText}>⚠️ {formatBalance(excess)} BCH2 exceeds BC2 balance</Text>
-                  </View>
-                )}
-                <View style={styles.resultRow}>
-                  <Text style={styles.resultLabel}>{result.address.startsWith('bc1') ? 'SegWit Address' : 'BC2 Address'}</Text>
-                  <Text style={styles.resultValue}>{result.address}</Text>
-                </View>
-                <View style={styles.resultRow}>
-                  <Text style={styles.resultLabel}>BCH2 Address</Text>
-                  <Text style={styles.resultValueAccent}>{result.bch2Address}</Text>
-                </View>
-                <View style={styles.resultRow}>
-                  <Text style={styles.resultLabel}>Balance</Text>
-                  <Text style={styles.resultBalance}>{formatBalance(result.balance)} BCH2</Text>
-                </View>
-                {bc2 > 0 && (
-                  <View style={styles.resultRow}>
-                    <Text style={styles.resultLabel}>BC2 Balance</Text>
-                    <Text style={styles.resultValue}>{formatBalance(bc2)} BC2</Text>
-                  </View>
-                )}
+        {/* Per-address Results */}
+        {claims.map((claim, index) => {
+          const bc2 = claim.bc2Balance ?? 0;
+          const excess = claim.balance - Math.min(claim.balance, bc2);
+          return (
+            <View key={index} style={styles.resultCard}>
+              {/* Address type badge */}
+              <View style={styles.addressTypeBadge}>
+                <Text style={styles.addressTypeBadgeText}>
+                  {getAddressTypeLabel(claim.addressType)}
+                </Text>
               </View>
-            );
-          })}
 
-          {totalClaimable > 0 && !showPasswordStep && (
+              {excess > 0 && bc2 === 0 && (
+                <View style={styles.warningBadge}>
+                  <Text style={styles.warningBadgeText}>No matching BC2 balance</Text>
+                </View>
+              )}
+              {excess > 0 && bc2 > 0 && (
+                <View style={styles.warningBadge}>
+                  <Text style={styles.warningBadgeText}>
+                    {formatBalance(excess)} BCH2 exceeds BC2 balance
+                  </Text>
+                </View>
+              )}
+
+              <View style={styles.resultRow}>
+                <Text style={styles.resultLabel}>BC2 Address</Text>
+                <Text style={styles.resultValue} numberOfLines={1} ellipsizeMode="middle">
+                  {claim.address}
+                </Text>
+              </View>
+              <View style={styles.resultRow}>
+                <Text style={styles.resultLabel}>BCH2 Address</Text>
+                <Text style={styles.resultValueAccent} numberOfLines={1} ellipsizeMode="middle">
+                  {claim.bch2Address}
+                </Text>
+              </View>
+              <View style={styles.resultRow}>
+                <Text style={styles.resultLabel}>Balance</Text>
+                <Text style={styles.resultBalance}>
+                  {formatBalance(claim.balance)} BCH2
+                </Text>
+              </View>
+              {bc2 > 0 && (
+                <View style={styles.resultRow}>
+                  <Text style={styles.resultLabel}>BC2 Balance</Text>
+                  <Text style={styles.resultValue}>{formatBalance(bc2)} BC2</Text>
+                </View>
+              )}
+              {claim.derivationPath && (
+                <View style={styles.resultRow}>
+                  <Text style={styles.resultLabel}>Path</Text>
+                  <Text style={styles.resultValueMono}>{claim.derivationPath}</Text>
+                </View>
+              )}
+            </View>
+          );
+        })}
+
+        {/* No Results */}
+        {!hasClaims && (
+          <View style={styles.emptyCard}>
+            <Text style={styles.emptyText}>
+              No BCH2 balance found for this wallet. Make sure you had BC2 balance at fork block 53,200.
+            </Text>
+          </View>
+        )}
+
+        {/* Import Button */}
+        {hasClaims && !showPasswordStep && (
+          <TouchableOpacity
+            style={[styles.primaryButton, (importing || antiGamingBlocked) && styles.buttonDisabled]}
+            onPress={handleImportWallet}
+            disabled={importing || antiGamingBlocked}
+          >
+            {importing ? (
+              <ActivityIndicator color={BCH2Colors.textPrimary} />
+            ) : (
+              <Text style={styles.primaryButtonText}>Import Wallet</Text>
+            )}
+          </TouchableOpacity>
+        )}
+
+        {/* Password Step */}
+        {showPasswordStep && (
+          <View style={styles.passwordStepCard}>
+            <Text style={styles.passwordStepTitle}>Set Wallet Password</Text>
+            <Text style={styles.passwordStepSubtitle}>
+              This password encrypts your recovery phrase.
+            </Text>
+
+            <View style={styles.passwordInputGroup}>
+              <Text style={styles.inputLabel}>Password (min. 8 characters)</Text>
+              <PasswordInput
+                ref={claimPasswordRef}
+                onSubmit={() => claimConfirmPasswordRef.current?.focus()}
+                placeholder="Enter password"
+                onChangeText={setWalletPassword}
+              />
+            </View>
+
+            <View style={styles.passwordInputGroup}>
+              <Text style={styles.inputLabel}>Confirm Password</Text>
+              <PasswordInput
+                ref={claimConfirmPasswordRef}
+                onSubmit={handleClaimWithPassword}
+                placeholder="Confirm password"
+                onChangeText={setWalletConfirmPassword}
+              />
+            </View>
+
+            {passwordError ? (
+              <Text style={styles.passwordError}>{passwordError}</Text>
+            ) : null}
+
             <TouchableOpacity
-              style={[styles.importButton, importing && styles.claimButtonDisabled]}
-              onPress={handleImportWallet}
+              style={[styles.primaryButton, importing && styles.buttonDisabled]}
+              onPress={handleClaimWithPassword}
               disabled={importing}
             >
               {importing ? (
                 <ActivityIndicator color={BCH2Colors.textPrimary} />
               ) : (
-                <Text style={styles.importButtonText}>Import Wallet</Text>
+                <Text style={styles.primaryButtonText}>Set Password & Import</Text>
               )}
             </TouchableOpacity>
-          )}
 
-          {showPasswordStep && (
-            <View style={styles.passwordStepCard}>
-              <Text style={styles.passwordStepTitle}>Set Wallet Password</Text>
-              <Text style={styles.passwordStepSubtitle}>
-                This password encrypts your recovery phrase.
-              </Text>
+            <TouchableOpacity
+              style={styles.backButton}
+              onPress={() => setShowPasswordStep(false)}
+            >
+              <Text style={styles.backButtonText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
-              <View style={styles.passwordInputGroup}>
-                <Text style={styles.inputLabel}>Password (min. 8 characters)</Text>
-                <PasswordInput
-                  ref={claimPasswordRef}
-                  onSubmit={() => claimConfirmPasswordRef.current?.focus()}
-                  placeholder="Enter password"
-                  onChangeText={setWalletPassword}
-                />
-              </View>
+        {/* Back */}
+        {!showPasswordStep && (
+          <TouchableOpacity
+            style={styles.backButton}
+            onPress={() => {
+              setScanResult(null);
+              setAntiGamingWarning(null);
+              setAntiGamingBlocked(false);
+              setStep(1);
+            }}
+          >
+            <Text style={styles.backButtonText}>Back</Text>
+          </TouchableOpacity>
+        )}
+      </ScrollView>
+    );
+  }
 
-              <View style={styles.passwordInputGroup}>
-                <Text style={styles.inputLabel}>Confirm Password</Text>
-                <PasswordInput
-                  ref={claimConfirmPasswordRef}
-                  onSubmit={handleClaimWithPassword}
-                  placeholder="Confirm password"
-                  onChangeText={setWalletConfirmPassword}
-                />
-              </View>
+  // ============================================================================
+  // Step 4: Success
+  // ============================================================================
 
-              {passwordError ? (
-                <Text style={styles.passwordError}>{passwordError}</Text>
-              ) : null}
+  if (step === 4) {
+    return (
+      <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+        <StepProgress current={4} />
 
-              <TouchableOpacity
-                style={[styles.importButton, importing && styles.claimButtonDisabled]}
-                onPress={handleClaimWithPassword}
-                disabled={importing}
-              >
-                {importing ? (
-                  <ActivityIndicator color={BCH2Colors.textPrimary} />
-                ) : (
-                  <Text style={styles.importButtonText}>Set Password & Import</Text>
-                )}
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.cancelPasswordButton}
-                onPress={() => setShowPasswordStep(false)}
-              >
-                <Text style={styles.cancelPasswordText}>Back</Text>
-              </TouchableOpacity>
-            </View>
-          )}
+        <View style={styles.successContainer}>
+          <Image source={BCH2_LOGO} style={styles.successLogo} resizeMode="contain" />
+          <Text style={styles.successTitle}>Wallet Imported!</Text>
+          <Text style={styles.successSubtitle}>
+            Your BCH2 wallet has been imported with{' '}
+            {formatBalance(scanResult?.totalBalance ?? 0)} BCH2
+          </Text>
         </View>
-      )}
-    </ScrollView>
-  );
+
+        <TouchableOpacity
+          style={styles.primaryButton}
+          onPress={() => navigation.goBack()}
+        >
+          <Text style={styles.primaryButtonText}>Go to Wallet</Text>
+        </TouchableOpacity>
+      </ScrollView>
+    );
+  }
+
+  return null;
 };
+
+// ============================================================================
+// Styles
+// ============================================================================
 
 const styles = StyleSheet.create({
   container: {
@@ -458,21 +925,60 @@ const styles = StyleSheet.create({
   },
   content: {
     padding: BCH2Spacing.lg,
+    paddingBottom: BCH2Spacing.xxl,
   },
-  header: {
-    marginBottom: BCH2Spacing.xl,
+
+  // Header
+  headerCenter: {
+    alignItems: 'center',
+    marginBottom: BCH2Spacing.lg,
+  },
+  headerLogo: {
+    width: 56,
+    height: 56,
+    marginBottom: BCH2Spacing.md,
   },
   title: {
     fontSize: BCH2Typography.fontSize.xxl,
     fontWeight: BCH2Typography.fontWeight.bold,
     color: BCH2Colors.textPrimary,
-    marginBottom: BCH2Spacing.sm,
+    textAlign: 'center',
+    marginBottom: BCH2Spacing.xs,
   },
   subtitle: {
     fontSize: BCH2Typography.fontSize.base,
     color: BCH2Colors.textSecondary,
+    textAlign: 'center',
     lineHeight: 22,
   },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: BCH2Spacing.md,
+    marginBottom: BCH2Spacing.md,
+  },
+  walletIcon: {
+    fontSize: 32,
+    width: 48,
+    height: 48,
+    textAlign: 'center',
+    lineHeight: 48,
+    backgroundColor: BCH2Colors.backgroundCard,
+    borderRadius: BCH2BorderRadius.lg,
+    overflow: 'hidden',
+  },
+  stepTitle: {
+    fontSize: BCH2Typography.fontSize.xl,
+    fontWeight: BCH2Typography.fontWeight.bold,
+    color: BCH2Colors.textPrimary,
+    marginBottom: BCH2Spacing.xs,
+  },
+  stepSubtitle: {
+    fontSize: BCH2Typography.fontSize.sm,
+    color: BCH2Colors.textSecondary,
+  },
+
+  // Conversion Card
   conversionCard: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -486,8 +992,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   coinLogo: {
-    width: 56,
-    height: 56,
+    width: 48,
+    height: 48,
     marginBottom: BCH2Spacing.sm,
   },
   coinLabel: {
@@ -501,39 +1007,170 @@ const styles = StyleSheet.create({
     color: BCH2Colors.primary,
   },
   conversionArrow: {
-    fontSize: 32,
+    fontSize: 28,
     color: BCH2Colors.textMuted,
     marginHorizontal: BCH2Spacing.xl,
   },
-  infoCard: {
+
+  // Wallet Type Grid
+  walletTypeGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: BCH2Spacing.md,
+    marginBottom: BCH2Spacing.lg,
+  },
+  walletTypeCard: {
+    width: '47%',
     backgroundColor: BCH2Colors.backgroundCard,
     borderRadius: BCH2BorderRadius.lg,
-    padding: BCH2Spacing.lg,
-    marginBottom: BCH2Spacing.xl,
-    borderLeftWidth: 3,
-    borderLeftColor: BCH2Colors.primary,
+    padding: BCH2Spacing.md,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: BCH2Colors.border,
   },
-  infoTitle: {
-    fontSize: BCH2Typography.fontSize.lg,
+  walletTypeIcon: {
+    fontSize: 28,
+    marginBottom: BCH2Spacing.sm,
+    lineHeight: 36,
+  },
+  walletTypeName: {
+    fontSize: BCH2Typography.fontSize.base,
     fontWeight: BCH2Typography.fontWeight.semibold,
     color: BCH2Colors.textPrimary,
-    marginBottom: BCH2Spacing.sm,
+    marginBottom: BCH2Spacing.xs,
   },
-  infoText: {
-    fontSize: BCH2Typography.fontSize.base,
-    color: BCH2Colors.textSecondary,
-    lineHeight: 24,
+  walletTypeDesc: {
+    fontSize: BCH2Typography.fontSize.xs,
+    color: BCH2Colors.textMuted,
+    textAlign: 'center',
   },
+
+  // Step Progress
+  stepProgress: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: BCH2Spacing.lg,
+  },
+  stepDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: BCH2Colors.border,
+    borderWidth: 2,
+    borderColor: BCH2Colors.border,
+  },
+  stepDotActive: {
+    backgroundColor: BCH2Colors.primary,
+    borderColor: BCH2Colors.primary,
+    ...BCH2Shadows.glow,
+  },
+  stepDotCompleted: {
+    backgroundColor: BCH2Colors.primary,
+    borderColor: BCH2Colors.primary,
+  },
+  stepLine: {
+    width: 32,
+    height: 2,
+    backgroundColor: BCH2Colors.border,
+  },
+  stepLineCompleted: {
+    backgroundColor: BCH2Colors.primary,
+  },
+
+  // Security Note
   securityNote: {
-    marginTop: BCH2Spacing.md,
-    paddingTop: BCH2Spacing.md,
-    borderTopWidth: 1,
-    borderTopColor: BCH2Colors.border,
+    backgroundColor: BCH2Colors.primaryGlow,
+    borderRadius: BCH2BorderRadius.md,
+    padding: BCH2Spacing.sm,
+    marginBottom: BCH2Spacing.md,
+    alignItems: 'center',
   },
   securityNoteText: {
     fontSize: BCH2Typography.fontSize.sm,
     color: BCH2Colors.primary,
+    fontWeight: BCH2Typography.fontWeight.medium,
   },
+
+  // Warning Card
+  warningCard: {
+    backgroundColor: 'rgba(246, 173, 85, 0.1)',
+    borderRadius: BCH2BorderRadius.md,
+    padding: BCH2Spacing.md,
+    marginBottom: BCH2Spacing.md,
+    borderLeftWidth: 3,
+    borderLeftColor: BCH2Colors.warning,
+  },
+  warningText: {
+    fontSize: BCH2Typography.fontSize.sm,
+    color: BCH2Colors.warning,
+    lineHeight: 20,
+  },
+
+  // Instructions
+  instructionCard: {
+    backgroundColor: BCH2Colors.backgroundCard,
+    borderRadius: BCH2BorderRadius.lg,
+    padding: BCH2Spacing.lg,
+    marginBottom: BCH2Spacing.lg,
+  },
+  instructionRow: {
+    flexDirection: 'row',
+    marginBottom: BCH2Spacing.md,
+    alignItems: 'flex-start',
+  },
+  instructionNumber: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: BCH2Colors.primaryGlow,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: BCH2Spacing.sm,
+    marginTop: 1,
+  },
+  instructionNumberText: {
+    fontSize: BCH2Typography.fontSize.xs,
+    fontWeight: BCH2Typography.fontWeight.bold,
+    color: BCH2Colors.primary,
+  },
+  instructionText: {
+    flex: 1,
+    fontSize: BCH2Typography.fontSize.sm,
+    color: BCH2Colors.textSecondary,
+    lineHeight: 20,
+  },
+
+  // Input
+  inputContainer: {
+    marginBottom: BCH2Spacing.md,
+  },
+  inputLabel: {
+    fontSize: BCH2Typography.fontSize.sm,
+    color: BCH2Colors.textSecondary,
+    marginBottom: BCH2Spacing.sm,
+  },
+  input: {
+    backgroundColor: BCH2Colors.backgroundCard,
+    borderRadius: BCH2BorderRadius.md,
+    borderWidth: 1,
+    borderColor: BCH2Colors.border,
+    padding: BCH2Spacing.md,
+    color: BCH2Colors.textPrimary,
+    fontSize: BCH2Typography.fontSize.base,
+    fontFamily: 'monospace',
+  },
+  inputMultiline: {
+    minHeight: 80,
+    textAlignVertical: 'top',
+  },
+  helperText: {
+    fontSize: BCH2Typography.fontSize.xs,
+    color: BCH2Colors.textMuted,
+    marginTop: BCH2Spacing.xs,
+  },
+
+  // Mode Selector
   modeSelector: {
     flexDirection: 'row',
     backgroundColor: BCH2Colors.backgroundCard,
@@ -551,55 +1188,77 @@ const styles = StyleSheet.create({
     backgroundColor: BCH2Colors.primary,
   },
   modeButtonText: {
-    fontSize: BCH2Typography.fontSize.base,
+    fontSize: BCH2Typography.fontSize.sm,
     color: BCH2Colors.textMuted,
     fontWeight: BCH2Typography.fontWeight.medium,
   },
   modeButtonTextActive: {
     color: BCH2Colors.textPrimary,
   },
-  inputContainer: {
-    marginBottom: BCH2Spacing.lg,
-  },
-  inputLabel: {
-    fontSize: BCH2Typography.fontSize.sm,
-    color: BCH2Colors.textSecondary,
-    marginBottom: BCH2Spacing.sm,
-  },
-  input: {
-    backgroundColor: BCH2Colors.backgroundCard,
-    borderRadius: BCH2BorderRadius.md,
-    borderWidth: 1,
-    borderColor: BCH2Colors.border,
-    padding: BCH2Spacing.md,
-    color: BCH2Colors.textPrimary,
-    fontSize: BCH2Typography.fontSize.base,
-    fontFamily: 'monospace',
-  },
-  claimButton: {
+
+  // Buttons
+  primaryButton: {
     backgroundColor: BCH2Colors.primary,
     borderRadius: BCH2BorderRadius.md,
     paddingVertical: BCH2Spacing.md,
     alignItems: 'center',
+    marginTop: BCH2Spacing.md,
     ...BCH2Shadows.glow,
   },
-  claimButtonDisabled: {
-    opacity: 0.7,
-  },
-  claimButtonText: {
+  primaryButtonText: {
     color: BCH2Colors.textPrimary,
     fontSize: BCH2Typography.fontSize.lg,
     fontWeight: BCH2Typography.fontWeight.bold,
   },
-  resultsContainer: {
-    marginTop: BCH2Spacing.xl,
+  buttonDisabled: {
+    opacity: 0.5,
   },
-  resultsTitle: {
-    fontSize: BCH2Typography.fontSize.lg,
-    fontWeight: BCH2Typography.fontWeight.semibold,
-    color: BCH2Colors.textPrimary,
+  backButton: {
+    paddingVertical: BCH2Spacing.md,
+    alignItems: 'center',
+    marginTop: BCH2Spacing.sm,
+  },
+  backButtonText: {
+    color: BCH2Colors.textSecondary,
+    fontSize: BCH2Typography.fontSize.base,
+  },
+
+  // Error
+  errorCard: {
+    backgroundColor: 'rgba(252, 129, 129, 0.1)',
+    borderRadius: BCH2BorderRadius.md,
+    padding: BCH2Spacing.md,
     marginBottom: BCH2Spacing.md,
+    borderLeftWidth: 3,
+    borderLeftColor: BCH2Colors.error,
   },
+  errorText: {
+    fontSize: BCH2Typography.fontSize.sm,
+    color: BCH2Colors.error,
+    lineHeight: 20,
+  },
+
+  // Scanning
+  scanContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: BCH2Spacing.xxl,
+  },
+  scanSpinner: {
+    marginBottom: BCH2Spacing.lg,
+  },
+  scanTitle: {
+    fontSize: BCH2Typography.fontSize.xl,
+    fontWeight: BCH2Typography.fontWeight.bold,
+    color: BCH2Colors.textPrimary,
+    marginBottom: BCH2Spacing.sm,
+  },
+  scanProgressText: {
+    fontSize: BCH2Typography.fontSize.sm,
+    color: BCH2Colors.textMuted,
+  },
+
+  // Results
   totalCard: {
     backgroundColor: BCH2Colors.primaryGlow,
     borderRadius: BCH2BorderRadius.lg,
@@ -626,18 +1285,30 @@ const styles = StyleSheet.create({
     padding: BCH2Spacing.md,
     marginBottom: BCH2Spacing.sm,
   },
+  addressTypeBadge: {
+    backgroundColor: BCH2Colors.primaryGlow,
+    borderRadius: BCH2BorderRadius.sm,
+    paddingHorizontal: BCH2Spacing.sm,
+    paddingVertical: 2,
+    alignSelf: 'flex-start',
+    marginBottom: BCH2Spacing.sm,
+  },
+  addressTypeBadgeText: {
+    fontSize: BCH2Typography.fontSize.xs,
+    color: BCH2Colors.primary,
+    fontWeight: BCH2Typography.fontWeight.medium,
+  },
   warningBadge: {
-    backgroundColor: '#FFA500',
+    backgroundColor: 'rgba(246, 173, 85, 0.15)',
     borderRadius: BCH2BorderRadius.sm,
     paddingHorizontal: BCH2Spacing.sm,
     paddingVertical: BCH2Spacing.xs,
     marginBottom: BCH2Spacing.sm,
   },
   warningBadgeText: {
-    color: '#000',
+    color: BCH2Colors.warning,
     fontSize: BCH2Typography.fontSize.xs,
     fontWeight: BCH2Typography.fontWeight.medium,
-    textAlign: 'center',
   },
   resultRow: {
     flexDirection: 'row',
@@ -661,24 +1332,33 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
     maxWidth: '60%',
   },
+  resultValueMono: {
+    fontSize: BCH2Typography.fontSize.xs,
+    color: BCH2Colors.textMuted,
+    fontFamily: 'monospace',
+    maxWidth: '60%',
+  },
   resultBalance: {
     fontSize: BCH2Typography.fontSize.md,
     fontWeight: BCH2Typography.fontWeight.bold,
     color: BCH2Colors.success,
     fontFamily: 'monospace',
   },
-  importButton: {
-    backgroundColor: BCH2Colors.primary,
+  emptyCard: {
+    backgroundColor: BCH2Colors.backgroundCard,
     borderRadius: BCH2BorderRadius.md,
-    paddingVertical: BCH2Spacing.md,
+    padding: BCH2Spacing.lg,
     alignItems: 'center',
-    marginTop: BCH2Spacing.md,
+    marginBottom: BCH2Spacing.md,
   },
-  importButtonText: {
-    color: BCH2Colors.textPrimary,
-    fontSize: BCH2Typography.fontSize.lg,
-    fontWeight: BCH2Typography.fontWeight.bold,
+  emptyText: {
+    fontSize: BCH2Typography.fontSize.sm,
+    color: BCH2Colors.textMuted,
+    textAlign: 'center',
+    lineHeight: 20,
   },
+
+  // Password Step
   passwordStepCard: {
     backgroundColor: BCH2Colors.backgroundCard,
     borderRadius: BCH2BorderRadius.lg,
@@ -704,100 +1384,33 @@ const styles = StyleSheet.create({
     marginBottom: BCH2Spacing.md,
   },
   passwordError: {
-    color: '#fc8181',
+    color: BCH2Colors.error,
     fontSize: BCH2Typography.fontSize.sm,
     textAlign: 'center',
     marginBottom: BCH2Spacing.md,
   },
-  cancelPasswordButton: {
-    paddingVertical: BCH2Spacing.md,
+
+  // Success
+  successContainer: {
     alignItems: 'center',
+    paddingVertical: BCH2Spacing.xxl,
   },
-  cancelPasswordText: {
-    color: BCH2Colors.textSecondary,
-    fontSize: BCH2Typography.fontSize.base,
+  successLogo: {
+    width: 72,
+    height: 72,
+    marginBottom: BCH2Spacing.lg,
   },
-  helpToggle: {
-    paddingVertical: BCH2Spacing.md,
+  successTitle: {
+    fontSize: BCH2Typography.fontSize.xxl,
+    fontWeight: BCH2Typography.fontWeight.bold,
+    color: BCH2Colors.primary,
     marginBottom: BCH2Spacing.sm,
   },
-  helpToggleText: {
+  successSubtitle: {
     fontSize: BCH2Typography.fontSize.base,
-    color: BCH2Colors.primary,
-    fontWeight: BCH2Typography.fontWeight.medium,
-  },
-  bitcoinCoreHelp: {
-    backgroundColor: BCH2Colors.backgroundCard,
-    borderRadius: BCH2BorderRadius.lg,
-    padding: BCH2Spacing.lg,
-    marginBottom: BCH2Spacing.xl,
-    borderWidth: 1,
-    borderColor: BCH2Colors.border,
-  },
-  helpTitle: {
-    fontSize: BCH2Typography.fontSize.lg,
-    fontWeight: BCH2Typography.fontWeight.bold,
-    color: BCH2Colors.textPrimary,
-    marginBottom: BCH2Spacing.md,
-  },
-  helpText: {
-    fontSize: BCH2Typography.fontSize.sm,
     color: BCH2Colors.textSecondary,
-    lineHeight: 20,
-    marginBottom: BCH2Spacing.md,
-  },
-  helpStep: {
-    flexDirection: 'row',
-    marginBottom: BCH2Spacing.md,
-  },
-  helpStepNumber: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: BCH2Colors.primary,
-    color: BCH2Colors.textPrimary,
     textAlign: 'center',
-    lineHeight: 24,
-    fontSize: BCH2Typography.fontSize.sm,
-    fontWeight: BCH2Typography.fontWeight.bold,
-    marginRight: BCH2Spacing.sm,
-  },
-  helpStepContent: {
-    flex: 1,
-  },
-  helpStepTitle: {
-    fontSize: BCH2Typography.fontSize.sm,
-    fontWeight: BCH2Typography.fontWeight.semibold,
-    color: BCH2Colors.textPrimary,
-    marginBottom: BCH2Spacing.xs,
-  },
-  helpCode: {
-    fontFamily: 'monospace',
-    fontSize: BCH2Typography.fontSize.xs,
-    color: BCH2Colors.primary,
-    backgroundColor: BCH2Colors.background,
-    padding: BCH2Spacing.xs,
-    borderRadius: BCH2BorderRadius.sm,
-    overflow: 'hidden',
-  },
-  helpNote: {
-    fontSize: BCH2Typography.fontSize.xs,
-    color: BCH2Colors.textMuted,
-    marginTop: BCH2Spacing.xs,
-    fontStyle: 'italic',
-  },
-  helpWarning: {
-    backgroundColor: 'rgba(255, 165, 0, 0.1)',
-    borderRadius: BCH2BorderRadius.sm,
-    padding: BCH2Spacing.sm,
-    marginVertical: BCH2Spacing.md,
-    borderLeftWidth: 3,
-    borderLeftColor: '#FFA500',
-  },
-  helpWarningText: {
-    fontSize: BCH2Typography.fontSize.xs,
-    color: BCH2Colors.textSecondary,
-    lineHeight: 18,
+    lineHeight: 22,
   },
 });
 

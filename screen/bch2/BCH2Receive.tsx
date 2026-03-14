@@ -3,7 +3,7 @@
  * Displays QR code and address for receiving BCH2
  */
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -32,19 +32,27 @@ export const BCH2ReceiveScreen: React.FC<BCH2ReceiveProps> = ({
   const [copied, setCopied] = useState(false);
   const primaryColor = isBC2 ? BCH2Colors.bc2Primary : BCH2Colors.primary;
   const coinSymbol = isBC2 ? 'BC2' : 'BCH2';
+  const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+
+  useEffect(() => {
+    return () => {
+      timersRef.current.forEach(t => clearTimeout(t));
+      timersRef.current = [];
+    };
+  }, []);
 
   const handleCopyAddress = useCallback(() => {
     Clipboard.setString(address);
     setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    timersRef.current.push(setTimeout(() => setCopied(false), 2000));
     // Clear clipboard after 60 seconds to prevent other apps from reading the address
-    setTimeout(() => {
+    timersRef.current.push(setTimeout(() => {
       Clipboard.getString().then((current: string) => {
         if (current === address) {
           Clipboard.setString('');
         }
       }).catch(() => {});
-    }, 60000);
+    }, 60000));
   }, [address]);
 
   const handleShare = useCallback(async () => {
@@ -75,7 +83,7 @@ export const BCH2ReceiveScreen: React.FC<BCH2ReceiveProps> = ({
 
       {/* QR Code Card */}
       <View style={[styles.qrCard, { borderColor: primaryColor }]}>
-        <View style={styles.qrContainer}>
+        <View style={styles.qrContainer} accessibilityLabel={`QR code for ${coinSymbol} address`}>
           <QRCode
             value={address}
             size={200}
@@ -100,6 +108,8 @@ export const BCH2ReceiveScreen: React.FC<BCH2ReceiveProps> = ({
           <TouchableOpacity
             style={[styles.actionButton, { borderColor: primaryColor }]}
             onPress={handleCopyAddress}
+            accessibilityLabel={copied ? 'Address copied to clipboard' : `Copy ${coinSymbol} address to clipboard`}
+            accessibilityRole="button"
           >
             <Text style={[styles.actionButtonText, { color: primaryColor }]}>
               {copied ? '✓ Copied!' : 'Copy Address'}
@@ -109,6 +119,8 @@ export const BCH2ReceiveScreen: React.FC<BCH2ReceiveProps> = ({
           <TouchableOpacity
             style={[styles.actionButton, styles.actionButtonFilled, { backgroundColor: primaryColor }]}
             onPress={handleShare}
+            accessibilityLabel={`Share ${coinSymbol} address`}
+            accessibilityRole="button"
           >
             <Text style={styles.actionButtonTextFilled}>
               Share

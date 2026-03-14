@@ -46,16 +46,17 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
   const confirmPasswordInputRef = useRef<PasswordInputHandle>(null);
   const { enableScreenProtect, disableScreenProtect } = useScreenProtect();
 
-  // Enable screenshot protection when mnemonic is displayed, disable on unmount
+  // Enable screenshot protection when mnemonic is displayed or being imported
   useEffect(() => {
     const showsMnemonic = mnemonic && (mode === 'create-bch2' || mode === 'create-bc2');
-    if (showsMnemonic) {
+    const importingMnemonic = importMnemonic && (mode === 'import-bch2' || mode === 'import-bc2');
+    if (showsMnemonic || importingMnemonic) {
       enableScreenProtect();
     } else {
       disableScreenProtect();
     }
     return () => { disableScreenProtect(); };
-  }, [mnemonic, mode]);
+  }, [mnemonic, importMnemonic, mode]);
 
   // Clear sensitive state on unmount
   useEffect(() => {
@@ -82,7 +83,7 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
       setWalletLabel('');
       setMode(walletType === 'bc2' ? 'create-bc2' : 'create-bch2');
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to generate wallet');
+      Alert.alert('Error', 'Failed to generate wallet');
     } finally {
       setLoading(false);
     }
@@ -141,7 +142,7 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
         [{ text: 'OK', onPress: () => navigation.goBack() }]
       );
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to save wallet');
+      Alert.alert('Error', 'Failed to save wallet');
     } finally {
       setLoading(false);
     }
@@ -200,6 +201,8 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
           style={[styles.optionCard, { borderColor: BCH2Colors.primary }]}
           onPress={() => generateNewWallet('bch2')}
           disabled={loading}
+          accessibilityLabel="Create a new BCH2 wallet with recovery phrase"
+          accessibilityRole="button"
         >
           {loading ? (
             <ActivityIndicator color={BCH2Colors.primary} />
@@ -217,6 +220,8 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
         <TouchableOpacity
           style={[styles.optionCard, { borderColor: BCH2Colors.primary }]}
           onPress={() => goToImport('bch2')}
+          accessibilityLabel="Import a BCH2 wallet using recovery phrase"
+          accessibilityRole="button"
         >
           <Text style={styles.optionIcon}>📥</Text>
           <View style={styles.optionText}>
@@ -235,6 +240,8 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
           style={[styles.optionCard, { borderColor: BCH2Colors.bc2Primary }]}
           onPress={() => generateNewWallet('bc2')}
           disabled={loading}
+          accessibilityLabel="Create a new BC2 wallet with recovery phrase"
+          accessibilityRole="button"
         >
           {loading ? (
             <ActivityIndicator color={BCH2Colors.bc2Primary} />
@@ -252,6 +259,8 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
         <TouchableOpacity
           style={[styles.optionCard, { borderColor: BCH2Colors.bc2Primary }]}
           onPress={() => goToImport('bc2')}
+          accessibilityLabel="Import a BC2 wallet using recovery phrase"
+          accessibilityRole="button"
         >
           <Text style={styles.optionIcon}>📥</Text>
           <View style={styles.optionText}>
@@ -295,6 +304,7 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
             onChangeText={setWalletLabel}
             placeholder={`My ${coinName} Wallet`}
             placeholderTextColor={BCH2Colors.textMuted}
+            maxLength={50}
           />
         </View>
 
@@ -402,6 +412,8 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
           numberOfLines={4}
           autoCapitalize="none"
           autoCorrect={false}
+          maxLength={500}
+          accessibilityLabel="Recovery phrase, enter 12 or 24 words separated by spaces"
         />
       </View>
 
@@ -413,6 +425,7 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
           onChangeText={setWalletLabel}
           placeholder={`My ${coinName} Wallet`}
           placeholderTextColor={BCH2Colors.textMuted}
+          maxLength={50}
         />
       </View>
 

@@ -65,7 +65,7 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
   const amountInSats = parseAmount(amount);
   // Estimate tx size: ~148 bytes/input + ~34 bytes/output + ~10 overhead
   // Assume 1 input for display; actual fee computed during signing
-  const feePerByte = Math.max(1, parseInt(fee) || 1);
+  const feePerByte = Math.min(1000, Math.max(1, parseInt(fee) || 1));
   const estimatedSize = 1 * 148 + 2 * 34 + 10; // 226 for single-input
   const feeInSats = feePerByte * estimatedSize;
   const totalInSats = amountInSats + feeInSats;
@@ -146,12 +146,18 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
 
     setLoading(true);
     try {
-      const result = await onSend(toAddress, amountInSats, parseInt(fee));
+      const clampedFee = Math.min(1000, Math.max(1, parseInt(fee) || 1));
+      const result = await onSend(toAddress, amountInSats, clampedFee);
       setTxid(result.txid);
       setStep('success');
     } catch (error: any) {
       if (!error?.__cancelled) {
-        Alert.alert('Transaction Failed', error.message || 'Failed to broadcast transaction');
+        const msg = error?.message || '';
+        const safeMsg = msg.includes('dust') ? 'Transaction amount is too small'
+          : msg.includes('insufficient') ? 'Insufficient funds for this transaction'
+          : msg.includes('mempool') ? 'Transaction rejected by network. Please try again.'
+          : 'Failed to broadcast transaction. Please check your connection and try again.';
+        Alert.alert('Transaction Failed', safeMsg);
       }
     } finally {
       setLoading(false);
@@ -195,6 +201,8 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
             placeholderTextColor={BCH2Colors.textMuted}
             autoCapitalize="none"
             autoCorrect={false}
+            maxLength={120}
+            accessibilityLabel={`Recipient ${coinSymbol} address`}
           />
         </View>
 
@@ -202,7 +210,7 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
         <View style={styles.inputGroup}>
           <View style={styles.inputLabelRow}>
             <Text style={styles.inputLabel}>Amount ({coinSymbol})</Text>
-            <TouchableOpacity onPress={handleMaxAmount}>
+            <TouchableOpacity onPress={handleMaxAmount} accessibilityLabel="Set maximum amount" accessibilityRole="button">
               <Text style={[styles.maxButton, { color: primaryColor }]}>MAX</Text>
             </TouchableOpacity>
           </View>
@@ -213,6 +221,8 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
             placeholder="0.00000000"
             placeholderTextColor={BCH2Colors.textMuted}
             keyboardType="decimal-pad"
+            maxLength={18}
+            accessibilityLabel={`Amount in ${coinSymbol}`}
           />
         </View>
 
@@ -228,6 +238,8 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
                   fee === feeOption && { backgroundColor: primaryColor, borderColor: primaryColor },
                 ]}
                 onPress={() => setFee(feeOption)}
+                accessibilityLabel={`Fee: ${feeOption} satoshi per byte${fee === feeOption ? ', selected' : ''}`}
+                accessibilityRole="button"
               >
                 <Text style={[
                   styles.feeButtonText,
@@ -267,6 +279,8 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
         <TouchableOpacity
           style={[styles.sendButton, { backgroundColor: primaryColor }]}
           onPress={handleContinue}
+          accessibilityLabel="Continue to confirm transaction"
+          accessibilityRole="button"
         >
           <Text style={styles.sendButtonText}>Continue</Text>
         </TouchableOpacity>
@@ -309,6 +323,8 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
               style={styles.cancelButton}
               onPress={() => setStep('input')}
               disabled={loading}
+              accessibilityLabel="Go back to edit transaction"
+              accessibilityRole="button"
             >
               <Text style={styles.cancelButtonText}>Back</Text>
             </TouchableOpacity>
@@ -317,6 +333,8 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
               style={[styles.confirmButton, { backgroundColor: primaryColor }]}
               onPress={handleSend}
               disabled={loading}
+              accessibilityLabel={`Send ${formatBalance(amountInSats)} ${coinSymbol}`}
+              accessibilityRole="button"
             >
               {loading ? (
                 <ActivityIndicator color={BCH2Colors.textPrimary} />
@@ -353,6 +371,8 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
         <TouchableOpacity
           style={[styles.doneButton, { backgroundColor: primaryColor }]}
           onPress={handleDone}
+          accessibilityLabel="Done, return to wallet"
+          accessibilityRole="button"
         >
           <Text style={styles.doneButtonText}>Done</Text>
         </TouchableOpacity>

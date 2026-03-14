@@ -3,7 +3,7 @@
  * Configure Electrum servers for BCH2 and BC2
  */
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -62,6 +62,35 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
   const [bc2Testing, setBc2Testing] = useState(false);
   const [bc2Status, setBc2Status] = useState<'unknown' | 'connected' | 'failed'>('unknown');
 
+  // Load previously saved custom server settings on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const DefaultPreference = require('react-native-default-preference').default;
+        const bch2Host = await DefaultPreference.get('bch2_electrum_host');
+        if (bch2Host) {
+          setBch2CustomHost(bch2Host);
+          setBch2SelectedServer(-1);
+          const bch2Port = await DefaultPreference.get('bch2_electrum_port');
+          if (bch2Port) setBch2CustomPort(bch2Port);
+          const bch2Ssl = await DefaultPreference.get('bch2_electrum_ssl');
+          if (bch2Ssl !== null) setBch2UseSSL(bch2Ssl === '1');
+        }
+        const bc2Host = await DefaultPreference.get('bc2_electrum_host');
+        if (bc2Host) {
+          setBc2CustomHost(bc2Host);
+          setBc2SelectedServer(-1);
+          const bc2Port = await DefaultPreference.get('bc2_electrum_port');
+          if (bc2Port) setBc2CustomPort(bc2Port);
+          const bc2Ssl = await DefaultPreference.get('bc2_electrum_ssl');
+          if (bc2Ssl !== null) setBc2UseSSL(bc2Ssl === '1');
+        }
+      } catch {
+        // Silently ignore load failures — defaults are already set
+      }
+    })();
+  }, []);
+
   const testConnection = useCallback(async (
     server: ElectrumServer,
     setTesting: (v: boolean) => void,
@@ -79,7 +108,8 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
       const tls = require('tls');
 
       client = new ElectrumClient(
-        server.ssl ? tls : net,
+        net,
+        tls,
         server.port,
         server.host,
         server.ssl ? 'tls' : 'tcp',
@@ -110,55 +140,87 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
       }
     } catch (error: any) {
       setStatus('failed');
-      Alert.alert('Error', error.message || 'Connection test failed');
+      const msg = error.message || '';
+      // Only show safe, user-facing messages — suppress raw network/TLS details
+      const safeMsg = msg.includes('timeout') ? 'Connection timed out'
+        : msg.includes('ECONNREFUSED') ? 'Connection refused'
+        : msg.includes('ENOTFOUND') ? 'Server not found'
+        : 'Connection test failed';
+      Alert.alert('Error', safeMsg);
     } finally {
       if (client) { try { client.close(); } catch {} }
       setTesting(false);
     }
   }, []);
 
+  const validateHostname = (host: string): boolean => {
+    // Allow hostnames (letters, digits, dots, hyphens) and IPv4 addresses
+    return /^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/.test(host) && host.length <= 253;
+  };
+
+  const validatePort = (portStr: string): boolean => {
+    const port = parseInt(portStr);
+    return !isNaN(port) && port >= 1 && port <= 65535;
+  };
+
   const handleTestBCH2 = useCallback(() => {
+    if (bch2SelectedServer === -1) {
+      const host = bch2CustomHost.trim();
+      if (!host) { Alert.alert('Error', 'Please enter a server hostname'); return; }
+      if (!validateHostname(host)) { Alert.alert('Error', 'Invalid hostname format'); return; }
+      if (!validatePort(bch2CustomPort)) { Alert.alert('Error', 'Port must be between 1 and 65535'); return; }
+    }
     const server = bch2SelectedServer === -1
       ? { host: bch2CustomHost.trim(), port: parseInt(bch2CustomPort) || 50002, ssl: bch2UseSSL }
       : BCH2_SERVERS[bch2SelectedServer];
-
-    if (bch2SelectedServer === -1 && !bch2CustomHost.trim()) {
-      Alert.alert('Error', 'Please enter a server hostname');
-      return;
-    }
     testConnection(server, setBch2Testing, setBch2Status, 'BCH2');
   }, [bch2SelectedServer, bch2CustomHost, bch2CustomPort, bch2UseSSL, testConnection]);
 
   const handleTestBC2 = useCallback(() => {
+    if (bc2SelectedServer === -1) {
+      const host = bc2CustomHost.trim();
+      if (!host) { Alert.alert('Error', 'Please enter a server hostname'); return; }
+      if (!validateHostname(host)) { Alert.alert('Error', 'Invalid hostname format'); return; }
+      if (!validatePort(bc2CustomPort)) { Alert.alert('Error', 'Port must be between 1 and 65535'); return; }
+    }
     const server = bc2SelectedServer === -1
       ? { host: bc2CustomHost.trim(), port: parseInt(bc2CustomPort) || 50009, ssl: bc2UseSSL }
       : BC2_SERVERS[bc2SelectedServer];
-
-    if (bc2SelectedServer === -1 && !bc2CustomHost.trim()) {
-      Alert.alert('Error', 'Please enter a server hostname');
-      return;
-    }
     testConnection(server, setBc2Testing, setBc2Status, 'BC2');
   }, [bc2SelectedServer, bc2CustomHost, bc2CustomPort, bc2UseSSL, testConnection]);
 
   const handleSaveSettings = useCallback(async () => {
     try {
+      // Validate custom hostnames before saving
+      if (bch2SelectedServer === -1 && bch2CustomHost.trim() && !validateHostname(bch2CustomHost.trim())) {
+        Alert.alert('Error', 'Invalid BCH2 server hostname'); return;
+      }
+      if (bc2SelectedServer === -1 && bc2CustomHost.trim() && !validateHostname(bc2CustomHost.trim())) {
+        Alert.alert('Error', 'Invalid BC2 server hostname'); return;
+      }
+      // Validate custom ports before saving
+      if (bch2SelectedServer === -1 && bch2CustomPort && !validatePort(bch2CustomPort)) {
+        Alert.alert('Error', 'BCH2 port must be between 1 and 65535'); return;
+      }
+      if (bc2SelectedServer === -1 && bc2CustomPort && !validatePort(bc2CustomPort)) {
+        Alert.alert('Error', 'BC2 port must be between 1 and 65535'); return;
+      }
       const DefaultPreference = require('react-native-default-preference').default;
       // Save BCH2 server settings
       if (bch2SelectedServer === -1 && bch2CustomHost.trim()) {
         await DefaultPreference.set('bch2_electrum_host', bch2CustomHost.trim());
-        await DefaultPreference.set('bch2_electrum_port', bch2UseSSL ? bch2CustomPort : bch2CustomPort);
+        await DefaultPreference.set('bch2_electrum_port', bch2CustomPort);
         await DefaultPreference.set('bch2_electrum_ssl', bch2UseSSL ? '1' : '0');
       }
       // Save BC2 server settings
       if (bc2SelectedServer === -1 && bc2CustomHost.trim()) {
         await DefaultPreference.set('bc2_electrum_host', bc2CustomHost.trim());
-        await DefaultPreference.set('bc2_electrum_port', bc2UseSSL ? bc2CustomPort : bc2CustomPort);
+        await DefaultPreference.set('bc2_electrum_port', bc2CustomPort);
         await DefaultPreference.set('bc2_electrum_ssl', bc2UseSSL ? '1' : '0');
       }
       Alert.alert('Settings Saved', 'Your Electrum server settings have been saved. Restart the app for changes to take effect.');
     } catch (error: any) {
-      Alert.alert('Error', 'Failed to save settings: ' + (error.message || 'Unknown error'));
+      Alert.alert('Error', 'Failed to save settings. Please try again.');
     }
   }, [bch2SelectedServer, bch2CustomHost, bch2CustomPort, bch2UseSSL, bc2SelectedServer, bc2CustomHost, bc2CustomPort, bc2UseSSL]);
 
@@ -198,6 +260,9 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
               selectedServer === index && [styles.serverOptionSelected, { borderColor: primaryColor }],
             ]}
             onPress={() => setSelectedServer(index)}
+          accessibilityLabel={`Server ${server.host} port ${server.port} ${server.ssl ? 'SSL' : 'TCP'}${selectedServer === index ? ', selected' : ''}`}
+          accessibilityRole="radio"
+          accessibilityState={{ selected: selectedServer === index }}
           >
             <View style={[styles.serverRadio, { borderColor: selectedServer === index ? primaryColor : BCH2Colors.textMuted }]}>
               {selectedServer === index && <View style={[styles.serverRadioInner, { backgroundColor: primaryColor }]} />}
@@ -218,6 +283,9 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
             selectedServer === -1 && [styles.serverOptionSelected, { borderColor: primaryColor }],
           ]}
           onPress={() => setSelectedServer(-1)}
+          accessibilityLabel={`Custom server${selectedServer === -1 ? ', selected' : ''}`}
+          accessibilityRole="radio"
+          accessibilityState={{ selected: selectedServer === -1 }}
         >
           <View style={[styles.serverRadio, { borderColor: selectedServer === -1 ? primaryColor : BCH2Colors.textMuted }]}>
             {selectedServer === -1 && <View style={[styles.serverRadioInner, { backgroundColor: primaryColor }]} />}
@@ -239,6 +307,7 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
               placeholderTextColor={BCH2Colors.textMuted}
               autoCapitalize="none"
               autoCorrect={false}
+              maxLength={253}
             />
           </View>
 
@@ -252,6 +321,7 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
                 placeholder="50002"
                 placeholderTextColor={BCH2Colors.textMuted}
                 keyboardType="number-pad"
+                maxLength={5}
               />
             </View>
 
@@ -263,6 +333,7 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
                   onValueChange={setUseSSL}
                   trackColor={{ false: BCH2Colors.border, true: primaryColor + '40' }}
                   thumbColor={useSSL ? primaryColor : BCH2Colors.textMuted}
+                  accessibilityLabel={`Use SSL encryption, currently ${useSSL ? 'enabled' : 'disabled'}`}
                 />
                 <Text style={styles.switchLabel}>{useSSL ? 'Yes' : 'No'}</Text>
               </View>
@@ -276,6 +347,9 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
         style={[styles.testButton, { borderColor: primaryColor }, testing && styles.testButtonDisabled]}
         onPress={onTest}
         disabled={testing}
+        accessibilityLabel={testing ? `Testing ${title} server connection` : `Test ${title} server connection`}
+        accessibilityRole="button"
+        accessibilityState={{ busy: testing }}
       >
         {testing ? (
           <ActivityIndicator color={primaryColor} size="small" />
@@ -351,7 +425,9 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
         <View style={styles.explorerCard}>
           <TouchableOpacity
             style={styles.explorerRow}
-            onPress={() => Linking.openURL('https://explorer.bch2.org')}
+            onPress={() => Linking.openURL('https://explorer.bch2.org').catch(() => {})}
+            accessibilityLabel="Open BCH2 block explorer"
+            accessibilityRole="link"
           >
             <Image source={BCH2_LOGO} style={styles.explorerLogo} resizeMode="contain" />
             <View style={styles.explorerInfo}>
@@ -362,7 +438,9 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.explorerRow}
-            onPress={() => Linking.openURL('https://explorer.bitcoin-ii.org')}
+            onPress={() => Linking.openURL('https://explorer.bitcoin-ii.org').catch(() => {})}
+            accessibilityLabel="Open BC2 block explorer"
+            accessibilityRole="link"
           >
             <Image source={BC2_LOGO} style={styles.explorerLogo} resizeMode="contain" />
             <View style={styles.explorerInfo}>
@@ -415,7 +493,7 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
               `-------------------\n` +
               `Please describe the issue above this line.`
             );
-            Linking.openURL(`mailto:dev@bitcoincashii.org?subject=${subject}&body=${body}`);
+            Linking.openURL(`mailto:dev@bitcoincashii.org?subject=${subject}&body=${body}`).catch(() => {});
           }}
         >
           <Text style={styles.supportIcon}>🐛</Text>
@@ -437,7 +515,7 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
               `-------------------\n` +
               `Please describe your feature request above this line.`
             );
-            Linking.openURL(`mailto:dev@bitcoincashii.org?subject=${subject}&body=${body}`);
+            Linking.openURL(`mailto:dev@bitcoincashii.org?subject=${subject}&body=${body}`).catch(() => {});
           }}
         >
           <Text style={styles.supportIcon}>💡</Text>
@@ -463,13 +541,13 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
           <View style={styles.aboutLinks}>
             <TouchableOpacity
               style={styles.aboutLink}
-              onPress={() => Linking.openURL('https://bch2.org')}
+              onPress={() => Linking.openURL('https://bch2.org').catch(() => {})}
             >
               <Text style={styles.aboutLinkText}>bch2.org</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.aboutLink}
-              onPress={() => Linking.openURL('https://bitcoin-ii.org')}
+              onPress={() => Linking.openURL('https://bitcoin-ii.org').catch(() => {})}
             >
               <Text style={[styles.aboutLinkText, { color: BCH2Colors.bc2Primary }]}>bitcoin-ii.org</Text>
             </TouchableOpacity>
@@ -478,7 +556,7 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
       </View>
 
       {/* Save Button */}
-      <TouchableOpacity style={styles.saveButton} onPress={handleSaveSettings}>
+      <TouchableOpacity style={styles.saveButton} onPress={handleSaveSettings} accessibilityLabel="Save server settings" accessibilityRole="button">
         <Text style={styles.saveButtonText}>Save Settings</Text>
       </TouchableOpacity>
     </ScrollView>

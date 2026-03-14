@@ -11,7 +11,6 @@ import {
   ScrollView,
   TouchableOpacity,
   RefreshControl,
-  FlatList,
   Alert,
   Linking,
 } from 'react-native';
@@ -59,9 +58,21 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
   const [passwordModalVisible, setPasswordModalVisible] = useState(false);
   const passwordModalRef = useRef<PasswordModalHandle>(null);
   const backupPendingRef = useRef(false);
+  const backupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshing = externalRefreshing ?? internalRefreshing;
   const primaryColor = isBC2 ? BCH2Colors.bc2Primary : BCH2Colors.primary;
   const coinSymbol = isBC2 ? 'BC2' : 'BCH2';
+
+  // Clean up backup timer on unmount to prevent mnemonic retention in closure
+  useEffect(() => {
+    return () => {
+      if (backupTimerRef.current) {
+        clearTimeout(backupTimerRef.current);
+        backupTimerRef.current = null;
+      }
+      backupPendingRef.current = false;
+    };
+  }, []);
 
   const onRefresh = useCallback(async () => {
     if (externalRefresh) {
@@ -75,7 +86,7 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
 
   const openTransactionInExplorer = (txid: string) => {
     const url = isBC2 ? getBC2TransactionUrl(txid) : getBCH2TransactionUrl(txid);
-    Linking.openURL(url).catch(err => console.log('Failed to open URL:', err));
+    Linking.openURL(url).catch(() => { /* silently ignore link-open failures */ });
   };
 
   const formatBalance = (sats: number): string => {
@@ -158,7 +169,10 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
       passwordModalRef.current?.showSuccess();
       backupPendingRef.current = true;
 
-      setTimeout(() => {
+      // Clear any previous timer before setting a new one
+      if (backupTimerRef.current) clearTimeout(backupTimerRef.current);
+      backupTimerRef.current = setTimeout(() => {
+        backupTimerRef.current = null;
         if (!backupPendingRef.current) return;
         backupPendingRef.current = false;
         setPasswordModalVisible(false);
@@ -167,7 +181,7 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
     } catch {
       passwordModalRef.current?.showError();
     }
-  }, [walletId]);
+  }, [walletId, enableScreenProtect, disableScreenProtect]);
 
   const formatTxid = (txid: string): string => {
     if (!txid || txid.length <= 16) return txid;
@@ -180,7 +194,7 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
     const hasHeight = item.height && item.height > 0;
 
     return (
-      <TouchableOpacity style={styles.txItem} onPress={() => openTransactionInExplorer(item.txid)}>
+      <TouchableOpacity style={styles.txItem} onPress={() => openTransactionInExplorer(item.txid)} accessibilityLabel={`Transaction ${formatTxid(item.txid)}, ${isReceived ? 'received' : 'sent'} ${formatBalance(absAmount)} ${coinSymbol}, ${hasHeight ? `confirmed at block ${item.height}` : 'pending'}. Tap to view in explorer.`} accessibilityRole="button">
         <View style={styles.txLeft}>
           <View style={[styles.txIcon, { backgroundColor: hasHeight ? BCH2Colors.success : BCH2Colors.warning }]}>
             <Text style={styles.txIconText}>{hasHeight ? '✓' : '⏳'}</Text>
@@ -251,6 +265,8 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
           <TouchableOpacity
             style={[styles.actionButton, { borderColor: primaryColor }]}
             onPress={navigateToReceive}
+            accessibilityLabel={`Receive ${coinSymbol}`}
+            accessibilityRole="button"
           >
             <Text style={[styles.actionIcon, { color: primaryColor }]}>↓</Text>
             <Text style={[styles.actionText, { color: primaryColor }]}>Receive</Text>
@@ -259,6 +275,8 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
           <TouchableOpacity
             style={[styles.actionButton, styles.actionButtonFilled, { backgroundColor: primaryColor }]}
             onPress={navigateToSend}
+            accessibilityLabel={`Send ${coinSymbol}`}
+            accessibilityRole="button"
           >
             <Text style={styles.actionIconFilled}>↑</Text>
             <Text style={styles.actionTextFilled}>Send</Text>
@@ -309,14 +327,14 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
           <View style={styles.infoRow}>
             <Text style={styles.infoLabel}>Derivation Path</Text>
             <Text style={[styles.infoValue, styles.infoValueMono]}>
-              {isBC2 ? "m/44'/0'/0'" : address.toLowerCase().startsWith('bc1') ? "m/84'/0'/0'" : "m/44'/145'/0'"}
+              {isBC2 ? "m/44'/0'/0'" : "m/44'/145'/0'"}
             </Text>
           </View>
         </View>
       </View>
 
       {/* Export/Backup Button */}
-      <TouchableOpacity style={styles.exportButton} onPress={handleBackupWallet}>
+      <TouchableOpacity style={styles.exportButton} onPress={handleBackupWallet} accessibilityLabel="Export wallet backup recovery phrase" accessibilityRole="button">
         <Text style={styles.exportButtonText}>Export Wallet Backup</Text>
       </TouchableOpacity>
     </ScrollView>

@@ -3,7 +3,7 @@
  * Main screen showing BC2 and BCH2 wallets
  */
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -47,7 +47,7 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
       }));
       setWallets(mappedWallets);
     } catch (error) {
-      console.error('Failed to load wallets:', error);
+      __DEV__ && console.error('Failed to load wallets:', error);
     }
   }, []);
 
@@ -56,9 +56,9 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
     useCallback(() => {
       const fetchBalances = async () => {
         await loadWallets();
-        // Fetch balances in background
+        // Fetch balances in parallel for all wallets
         const storedWallets = await getWallets();
-        for (const wallet of storedWallets) {
+        await Promise.all(storedWallets.map(async (wallet) => {
           try {
             let balance;
             if (wallet.type === 'bc2') {
@@ -72,9 +72,9 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
             }
             await updateWalletBalance(wallet.id, balance.confirmed, balance.unconfirmed);
           } catch (error) {
-            console.error(`Failed to fetch balance for ${wallet.label}:`, error);
+            __DEV__ && console.error('Failed to fetch balance:', error);
           }
-        }
+        }));
         // Reload with updated balances
         await loadWallets();
       };
@@ -87,8 +87,8 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
     try {
       const storedWallets = await getWallets();
 
-      // Fetch updated balances from Electrum for each wallet
-      for (const wallet of storedWallets) {
+      // Fetch updated balances in parallel for all wallets
+      await Promise.all(storedWallets.map(async (wallet) => {
         try {
           let balance;
           if (wallet.type === 'bc2') {
@@ -103,14 +103,14 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
 
           await updateWalletBalance(wallet.id, balance.confirmed, balance.unconfirmed);
         } catch (error) {
-          console.error(`Failed to fetch balance for ${wallet.label}:`, error);
+          __DEV__ && console.error('Failed to fetch balance:', error);
         }
-      }
+      }));
 
       // Reload wallets with updated balances
       await loadWallets();
     } catch (error) {
-      console.error('Failed to refresh wallets:', error);
+      __DEV__ && console.error('Failed to refresh wallets:', error);
     }
     setRefreshing(false);
   }, [loadWallets]);
@@ -123,6 +123,10 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
     navigation.navigate('AddWallet');
   };
 
+  const bc2Wallets = useMemo(() => wallets.filter(w => w.type === 'bc2'), [wallets]);
+  const bc1Wallets = useMemo(() => wallets.filter(w => w.type === 'bc1'), [wallets]);
+  const bch2Wallets = useMemo(() => wallets.filter(w => w.type === 'bch2'), [wallets]);
+
   return (
     <View style={styles.container}>
       {/* Header */}
@@ -132,10 +136,15 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
             source={require('../../img/bch2-logo-small.png')}
             style={styles.logoImage}
             resizeMode="contain"
+            accessibilityLabel="BCH2 Wallet logo"
           />
           <Text style={styles.logoSubtext}>Wallet</Text>
         </View>
-        <TouchableOpacity onPress={() => navigation.navigate('BCH2Settings')}>
+        <TouchableOpacity
+          onPress={() => navigation.navigate('BCH2Settings')}
+          accessibilityLabel="Settings"
+          accessibilityRole="button"
+        >
           <Text style={styles.settingsIcon}>⚙️</Text>
         </TouchableOpacity>
       </View>
@@ -152,7 +161,7 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
         }
       >
         {/* Airdrop Banner */}
-        <TouchableOpacity style={styles.airdropBanner} onPress={navigateToClaimAirdrop}>
+        <TouchableOpacity style={styles.airdropBanner} onPress={navigateToClaimAirdrop} accessibilityLabel="Claim your BCH2 airdrop. Import your BC2 wallet to claim your BCH2." accessibilityRole="button">
           <View style={styles.airdropContent}>
             <Text style={styles.airdropTitle}>🎉 Claim Your BCH2 Airdrop</Text>
             <Text style={styles.airdropText}>
@@ -174,12 +183,16 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
               <TouchableOpacity
                 style={styles.createButton}
                 onPress={navigateToAddWallet}
+                accessibilityLabel="Create a new wallet"
+                accessibilityRole="button"
               >
                 <Text style={styles.createButtonText}>Create Wallet</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.importButton}
                 onPress={navigateToClaimAirdrop}
+                accessibilityLabel="Import a BC2 wallet"
+                accessibilityRole="button"
               >
                 <Text style={styles.importButtonText}>Import BC2 Wallet</Text>
               </TouchableOpacity>
@@ -188,10 +201,10 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
         ) : (
           <>
             {/* BC2 Wallets Section */}
-            {wallets.filter(w => w.type === 'bc2').length > 0 && (
+            {bc2Wallets.length > 0 && (
               <View style={styles.section}>
                 <Text style={styles.sectionTitle}>BC2 Wallets</Text>
-                {wallets.filter(w => w.type === 'bc2').map(wallet => (
+                {bc2Wallets.map(wallet => (
                   <BCH2WalletCard
                     key={wallet.id}
                     walletLabel={wallet.label}
@@ -208,10 +221,10 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
             )}
 
             {/* bc1 SegWit Wallets Section (airdrop claims) */}
-            {wallets.filter(w => w.type === 'bc1').length > 0 && (
+            {bc1Wallets.length > 0 && (
               <View style={styles.section}>
                 <Text style={styles.sectionTitle}>SegWit Wallets (Airdrop)</Text>
-                {wallets.filter(w => w.type === 'bc1').map(wallet => (
+                {bc1Wallets.map(wallet => (
                   <BCH2WalletCard
                     key={wallet.id}
                     walletLabel={wallet.label}
@@ -228,10 +241,10 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
             )}
 
             {/* BCH2 Wallets Section */}
-            {wallets.filter(w => w.type === 'bch2').length > 0 && (
+            {bch2Wallets.length > 0 && (
               <View style={styles.section}>
                 <Text style={styles.sectionTitle}>BCH2 Wallets</Text>
-                {wallets.filter(w => w.type === 'bch2').map(wallet => (
+                {bch2Wallets.map(wallet => (
                   <BCH2WalletCard
                     key={wallet.id}
                     walletLabel={wallet.label}
@@ -250,7 +263,7 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
         )}
 
         {/* Network Status */}
-        <View style={styles.networkStatus}>
+        <View style={styles.networkStatus} accessibilityLabel={isElectrumConnected() ? 'Network status: connected to BCH2 network' : 'Network status: disconnected'} accessibilityRole="text">
           <View style={[styles.statusDot, !isElectrumConnected() && { backgroundColor: '#f85149' }]} />
           <Text style={styles.statusText}>{isElectrumConnected() ? 'Connected to BCH2 Network' : 'Disconnected'}</Text>
         </View>
@@ -258,7 +271,7 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
 
       {/* Add Wallet FAB */}
       {wallets.length > 0 && (
-        <TouchableOpacity style={styles.fab} onPress={navigateToAddWallet}>
+        <TouchableOpacity style={styles.fab} onPress={navigateToAddWallet} accessibilityLabel="Add wallet" accessibilityRole="button">
           <Text style={styles.fabText}>+</Text>
         </TouchableOpacity>
       )}
