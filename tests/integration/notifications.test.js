@@ -4,12 +4,17 @@ import { isGroundControlUriValid } from '../../blue_modules/notifications';
 // Notifications.default = new Notifications();
 
 describe('notifications', () => {
-  // yeah, lets rely less on external services...
+  // TODO: Re-enable when BCH2 push notification server is deployed
   // eslint-disable-next-line jest/no-disabled-tests
   it.skip('can check groundcontrol server uri validity', async () => {
-    assert.ok(await isGroundControlUriValid('https://groundcontrol-bluewallet.herokuapp.com'));
+    // TODO: Replace with BCH2 push notification server URL
+    assert.ok(await isGroundControlUriValid('https://groundcontrol.bch2.example.com'));
     assert.ok(!(await isGroundControlUriValid('https://www.google.com')));
     await new Promise(resolve => setTimeout(resolve, 2000));
+  });
+
+  it('returns false for empty uri', async () => {
+    assert.ok(!(await isGroundControlUriValid('')));
   });
 
   // muted because it causes jest to hang waiting indefinitely

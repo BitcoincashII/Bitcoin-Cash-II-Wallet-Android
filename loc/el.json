@@ -306,9 +306,9 @@
     "sort_status": "Κατάσταση"
   },
   "units": {
-    "BTC": "BTC",
+    "BTC": "BCH2",
     "MAX": "Μέγιστο",
-    "sat_vbyte": "sat/vByte",
+    "sat_vbyte": "sat/byte",
     "sats": "sats"
   },
   "addresses": {

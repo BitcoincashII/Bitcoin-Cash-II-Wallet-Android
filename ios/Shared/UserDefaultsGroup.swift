@@ -23,11 +23,8 @@ let hardcodedPeers = DefaultElectrumPeers.map { settings in
 }
 
 let DefaultElectrumPeers = [
- UserDefaultsElectrumSettings(host: "mainnet.foundationdevices.com", port: 50001, sslPort: 50002),
-    // UserDefaultsElectrumSettings(host: "electrum.jochen-hoenicke.de", port: 50001, sslPort: 50006),
-    UserDefaultsElectrumSettings(host: "electrum1.bluewallet.io", port: 50001, sslPort: 443),
-    UserDefaultsElectrumSettings(host: "electrum.acinq.co", port: 50001, sslPort: 50002),
-    UserDefaultsElectrumSettings(host: "electrum.bitaroo.net", port: 50001, sslPort: 50002),
+    UserDefaultsElectrumSettings(host: "electrum.bch2.org", port: 50001, sslPort: 50002),
+    UserDefaultsElectrumSettings(host: "electrum2.bch2.org", port: 50001, sslPort: 50002),
 ]
 
 class UserDefaultsGroup {

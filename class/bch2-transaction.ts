@@ -28,7 +28,8 @@ const bip32 = BIP32Factory(ecc);
 const crypto = require('crypto');
 const bs58check = require('bs58check');
 
-const DEBUG = __DEV__ || false;
+// __DEV__ is false in release builds; && short-circuits so no log evaluation in production
+const DEBUG = typeof __DEV__ !== 'undefined' && __DEV__;
 
 // Bech32 constants
 const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
@@ -59,14 +60,20 @@ export async function sendTransaction(
 ): Promise<TransactionResult> {
   feePerByte = Math.ceil(feePerByte); // Ensure integer sat/byte
   if (!Number.isFinite(feePerByte) || feePerByte < 1) feePerByte = 1;
+  if (feePerByte > 1000) throw new Error('Fee rate too high (max 1000 sat/byte)');
+  if (!Number.isInteger(amountSats) || amountSats < 0) throw new Error('Invalid amount');
   if (amountSats < 546) throw new Error('Amount below dust threshold (546 sats)');
   // Derive private key from mnemonic
   const seed = await bip39.mnemonicToSeed(mnemonic);
   const root = bip32.fromSeed(seed);
+  let child: ReturnType<typeof root.derivePath> | null = null;
+  let privkeyCopy: Buffer | null = null;
+
+  try {
 
   // Different derivation paths for BCH2 vs BC2
   const derivationPath = isBC2 ? "m/44'/0'/0'/0/0" : "m/44'/145'/0'/0/0";
-  const child = root.derivePath(derivationPath);
+  child = root.derivePath(derivationPath);
 
   if (!child.privateKey) {
     throw new Error('Failed to derive private key');
@@ -99,10 +106,18 @@ export async function sendTransaction(
           const altAddress = getLegacyAddress(hash160(Buffer.from(altChild.publicKey)));
           if (altAddress === expectedAddress) {
             DEBUG && console.log(`[TX] Found matching address at path: ${altPath}`);
+            // Extract key material before zeroing
+            const altPrivkey = Buffer.from(altChild.privateKey!);
+            const altPubkey = Buffer.from(altChild.publicKey);
+            // Zero altChild, seed, root, child before early return
+            if (altChild.privateKey) { crypto.randomFillSync(altChild.privateKey); altChild.privateKey.fill(0); }
+            if (seed instanceof Buffer || seed instanceof Uint8Array) { crypto.randomFillSync(seed); seed.fill(0); }
+            if (root.privateKey) { crypto.randomFillSync(root.privateKey); root.privateKey.fill(0); }
+            if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
             // Use this key instead
             return sendTransactionWithKey(
-              Buffer.from(altChild.privateKey!),
-              Buffer.from(altChild.publicKey),
+              altPrivkey,
+              altPubkey,
               altAddress,
               toAddress,
               amountSats,
@@ -110,6 +125,8 @@ export async function sendTransaction(
               isBC2
             );
           }
+          // Zero non-matching altChild private key
+          if (altChild.privateKey) { crypto.randomFillSync(altChild.privateKey); altChild.privateKey.fill(0); }
         }
       }
     }
@@ -131,20 +148,17 @@ export async function sendTransaction(
     throw new Error(`No UTXOs available for ${coinType} address ${fromAddress}. The address may have no confirmed balance, or the coins may have already been spent.`);
   }
 
-  // Validate UTXO txids and deduplicate
+  // Validate UTXO fields, txids, and deduplicate
   const txidRegex = /^[0-9a-fA-F]{64}$/;
   const seenUtxos = new Set<string>();
+  const MAX_UTXO_VALUE = 21_000_000 * 100_000_000;
   for (let i = utxos.length - 1; i >= 0; i--) {
     const u = utxos[i];
-    if (!txidRegex.test(u.txid)) {
-      utxos.splice(i, 1);
-      continue;
-    }
+    if (!txidRegex.test(u.txid)) { utxos.splice(i, 1); continue; }
+    if (!Number.isInteger(u.value) || u.value <= 0 || u.value > MAX_UTXO_VALUE) { utxos.splice(i, 1); continue; }
+    if (!Number.isInteger(u.vout) || u.vout < 0 || u.vout > 0xFFFFFFFF) { utxos.splice(i, 1); continue; }
     const key = `${u.txid}:${u.vout}`;
-    if (seenUtxos.has(key)) {
-      utxos.splice(i, 1);
-      continue;
-    }
+    if (seenUtxos.has(key)) { utxos.splice(i, 1); continue; }
     seenUtxos.add(key);
   }
 
@@ -164,12 +178,13 @@ export async function sendTransaction(
   for (const utxo of utxos) {
     selectedUtxos.push(utxo);
     totalInput += utxo.value;
+    if (totalInput > Number.MAX_SAFE_INTEGER) throw new Error('UTXO total exceeds safe integer range');
 
     // Estimate with 2 outputs (recipient + change) initially
     const estimatedSize = estimateTxSize(selectedUtxos.length, 2);
     const estimatedFee = estimatedSize * feePerByte;
 
-    if (totalInput >= amountSats + estimatedFee) {
+    if (totalInput >= amountSats + estimatedFee || selectedUtxos.length >= 500) {
       break;
     }
   }
@@ -198,29 +213,17 @@ export async function sendTransaction(
   DEBUG && console.log(`[TX]   Inputs: ${selectedUtxos.length}`);
 
   let txHex: string;
-  try {
-    txHex = buildTransaction(
-      selectedUtxos,
-      toAddress,
-      amountSats,
-      hasChange ? fromAddress : null,
-      changeAmount,
-      Buffer.from(child.privateKey),
-      Buffer.from(child.publicKey),
-      isBC2
-    );
-  } finally {
-    // Zero seed and private key material after signing
-    if (seed instanceof Buffer || seed instanceof Uint8Array) {
-      crypto.randomFillSync(seed);
-      seed.fill(0);
-    }
-    if (child.privateKey) {
-      const pk = Buffer.from(child.privateKey);
-      crypto.randomFillSync(pk);
-      pk.fill(0);
-    }
-  }
+  privkeyCopy = Buffer.from(child.privateKey);
+  txHex = buildTransaction(
+    selectedUtxos,
+    toAddress,
+    amountSats,
+    hasChange ? fromAddress : null,
+    changeAmount,
+    privkeyCopy,
+    Buffer.from(child.publicKey),
+    isBC2
+  );
 
   DEBUG && console.log(`[TX] Transaction hex (${txHex.length} chars): ${txHex}`);
 
@@ -232,6 +235,29 @@ export async function sendTransaction(
 
   DEBUG && console.log(`[TX] Broadcast successful, txid: ${txid}`);
   return { txid, hex: txHex };
+
+  } finally {
+    // Zero seed material
+    if (seed instanceof Buffer || seed instanceof Uint8Array) {
+      crypto.randomFillSync(seed);
+      seed.fill(0);
+    }
+    // Zero BIP32 root master key
+    if (root.privateKey) {
+      crypto.randomFillSync(root.privateKey);
+      root.privateKey.fill(0);
+    }
+    // Zero the BIP32 child's privateKey
+    if (child && child.privateKey) {
+      crypto.randomFillSync(child.privateKey);
+      child.privateKey.fill(0);
+    }
+    // Zero the private key copy passed to buildTransaction
+    if (privkeyCopy) {
+      crypto.randomFillSync(privkeyCopy);
+      privkeyCopy.fill(0);
+    }
+  }
 }
 
 /**
@@ -247,6 +273,11 @@ function buildTransaction(
   publicKey: Buffer,
   isBC2: boolean
 ): string {
+  // Sanity checks to prevent malformed transactions
+  if (amount < 0 || changeAmount < 0) throw new Error('Negative amount in transaction');
+  if (utxos.length === 0) throw new Error('No inputs for transaction');
+  if (utxos.length > 500) throw new Error('Too many inputs (max 500) — consolidate UTXOs first');
+
   // Transaction components
   let tx = Buffer.alloc(0);
 
@@ -516,11 +547,26 @@ function signWithPrivateKey(hash: Buffer, privateKey: Buffer): Buffer {
  * Convert address to scriptPubKey
  */
 function addressToScript(address: string, isBC2: boolean): Buffer {
-  // Check for bech32 address (bc1)
+  // Check for bech32/bech32m address (bc1)
   if (isBech32Address(address)) {
+    // BCH2 has no SegWit consensus — sending to bc1/bc1p creates anyone-can-spend outputs
+    if (!isBC2) {
+      throw new Error('Cannot send BCH2 to a SegWit (bc1) address — use a bitcoincashii: CashAddr address instead');
+    }
+    // Try Bech32m first (P2TR, witness version 1+)
+    const decodedM = decodeBech32m(address);
+    if (decodedM && decodedM.version === 1 && decodedM.program.length === 32) {
+      // P2TR: OP_1 PUSH_32 <x-only-pubkey>
+      return Buffer.concat([
+        Buffer.from([0x51, 0x20]),
+        decodedM.program
+      ]);
+    }
+
+    // Try Bech32 (P2WPKH/P2WSH, witness version 0)
     const decoded = decodeBech32(address);
     if (!decoded) {
-      throw new Error('Invalid bech32 address');
+      throw new Error('Invalid bech32/bech32m address');
     }
     if (decoded.version === 0 && decoded.program.length === 20) {
       // P2WPKH: OP_0 PUSH_20 <pubkeyhash>
@@ -560,6 +606,12 @@ function addressToScript(address: string, isBC2: boolean): Buffer {
 
   // BCH2 CashAddr format
   const decoded = decodeCashAddr(address, true);
+  if (decoded.type !== 0 && decoded.type !== 1) {
+    throw new Error(`Unsupported CashAddr type ${decoded.type} — only P2PKH (0) and P2SH (1) are supported`);
+  }
+  if (decoded.hash.length !== 20) {
+    throw new Error(`Invalid CashAddr hash length ${decoded.hash.length} — expected 20 bytes`);
+  }
   if (decoded.type === 1) {
     // P2SH: OP_HASH160 <scripthash> OP_EQUAL
     return Buffer.concat([
@@ -592,6 +644,12 @@ function decodeLegacyAddress(address: string): Buffer {
     // First byte is version, rest is pubkey hash
     if (decoded.length !== 21) {
       throw new Error(`Invalid address length: expected 21 bytes, got ${decoded.length}`);
+    }
+
+    // Validate version byte: 0x00 = P2PKH, 0x05 = P2SH
+    const version = decoded[0];
+    if (version !== 0x00 && version !== 0x05) {
+      throw new Error(`Invalid address version byte: 0x${version.toString(16)}`);
     }
 
     // Return pubkey hash (skip version byte)
@@ -661,19 +719,29 @@ export function decodeCashAddr(address: string, returnType?: boolean): Buffer | 
     if (!versionExtracted && bits >= 8) {
       bits -= 8;
       versionByte = (acc >> bits) & 0xff;
+      acc &= (1 << bits) - 1;
       versionExtracted = true;
     }
 
     while (versionExtracted && bits >= 8) {
       bits -= 8;
       hashBytes.push((acc >> bits) & 0xff);
+      acc &= (1 << bits) - 1;
     }
+  }
+
+  // CashAddr spec: padding bits must be zero
+  if (bits > 0 && acc !== 0) {
+    throw new Error('Invalid CashAddr: non-zero padding bits');
   }
 
   const type = versionByte >> 3;
   const encodedSize = versionByte & 0x07;
   const expectedSizes = [20, 24, 28, 32, 40, 48, 56, 64];
-  const expectedSize = expectedSizes[encodedSize] || 20;
+  if (encodedSize >= expectedSizes.length) {
+    throw new Error(`Invalid CashAddr encoding size: ${encodedSize}`);
+  }
+  const expectedSize = expectedSizes[encodedSize];
   if (hashBytes.length < expectedSize) {
     throw new Error('Invalid CashAddr: insufficient hash data');
   }
@@ -972,6 +1040,8 @@ async function sendTransactionWithKey(
 ): Promise<TransactionResult> {
   feePerByte = Math.ceil(feePerByte); // Ensure integer sat/byte
   if (!Number.isFinite(feePerByte) || feePerByte < 1) feePerByte = 1;
+  if (feePerByte > 1000) throw new Error('Fee rate too high (max 1000 sat/byte)');
+  if (!Number.isInteger(amountSats) || amountSats < 546) throw new Error('Invalid amount');
   // Fetch UTXOs
   DEBUG && console.log(`[TX] Fetching UTXOs for address: ${fromAddress}`);
   const utxos: UTXO[] = isBC2
@@ -985,12 +1055,15 @@ async function sendTransactionWithKey(
     throw new Error(`No UTXOs available for ${coinType} address ${fromAddress}`);
   }
 
-  // Validate UTXO txids and deduplicate
+  // Validate UTXO fields, txids, and deduplicate
   const txidRegex = /^[0-9a-fA-F]{64}$/;
   const seenUtxos = new Set<string>();
+  const MAX_UTXO_VALUE = 21_000_000 * 100_000_000;
   for (let i = utxos.length - 1; i >= 0; i--) {
     const u = utxos[i];
     if (!txidRegex.test(u.txid)) { utxos.splice(i, 1); continue; }
+    if (!Number.isInteger(u.value) || u.value <= 0 || u.value > MAX_UTXO_VALUE) { utxos.splice(i, 1); continue; }
+    if (!Number.isInteger(u.vout) || u.vout < 0 || u.vout > 0xFFFFFFFF) { utxos.splice(i, 1); continue; }
     const key = `${u.txid}:${u.vout}`;
     if (seenUtxos.has(key)) { utxos.splice(i, 1); continue; }
     seenUtxos.add(key);
@@ -1012,6 +1085,7 @@ async function sendTransactionWithKey(
   for (const utxo of utxos) {
     selectedUtxos.push(utxo);
     totalInput += utxo.value;
+    if (totalInput > Number.MAX_SAFE_INTEGER) throw new Error('UTXO total exceeds safe integer range');
 
     const estimatedSize = estimateTxSize(selectedUtxos.length, outputCount);
     const estimatedFee = estimatedSize * feePerByte;
@@ -1077,6 +1151,8 @@ export async function sendFromBech32(
 ): Promise<TransactionResult> {
   feePerByte = Math.ceil(feePerByte); // Ensure integer sat/byte
   if (!Number.isFinite(feePerByte) || feePerByte < 1) feePerByte = 1;
+  if (feePerByte > 1000) throw new Error('Fee rate too high (max 1000 sat/byte)');
+  if (!Number.isInteger(amountSats) || amountSats < 0) throw new Error('Invalid amount');
   if (amountSats < 546) throw new Error('Amount below dust threshold (546 sats)');
   DEBUG && console.log(`[TX] Sending from bech32 address: ${expectedAddress}`);
 
@@ -1090,10 +1166,13 @@ export async function sendFromBech32(
   // Derive from mnemonic and search BIP84 paths
   const seed = await bip39.mnemonicToSeed(mnemonic);
   const root = bip32.fromSeed(seed);
+  let privkeyCopy: Buffer | null = null;
+  let matchedChild: ReturnType<typeof root.derivePath> | null = null;
+
+  try {
 
   // BIP84 paths: m/84'/0'/0'/0/x (receive) and m/84'/0'/0'/1/x (change)
   const basePaths = ["m/84'/0'/0'/0", "m/84'/0'/0'/1"];
-  let matchedChild: ReturnType<typeof root.derivePath> | null = null;
   let matchedPath: string | null = null;
 
   for (const basePath of basePaths) {
@@ -1108,6 +1187,8 @@ export async function sendFromBech32(
         DEBUG && console.log(`[TX] Found matching key at path: ${path}`);
         break;
       }
+      // Zero non-matching child private key
+      if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
     }
     if (matchedChild) break;
   }
@@ -1130,12 +1211,15 @@ export async function sendFromBech32(
     throw new Error(`No UTXOs available for bc1 address ${expectedAddress}`);
   }
 
-  // Validate UTXO txids and deduplicate
+  // Validate UTXO fields, txids, and deduplicate
   const txidRegex2 = /^[0-9a-fA-F]{64}$/;
   const seenUtxos2 = new Set<string>();
+  const MAX_UTXO_VALUE2 = 21_000_000 * 100_000_000;
   for (let i = utxos.length - 1; i >= 0; i--) {
     const u = utxos[i];
     if (!txidRegex2.test(u.txid)) { utxos.splice(i, 1); continue; }
+    if (!Number.isInteger(u.value) || u.value <= 0 || u.value > MAX_UTXO_VALUE2) { utxos.splice(i, 1); continue; }
+    if (!Number.isInteger(u.vout) || u.vout < 0 || u.vout > 0xFFFFFFFF) { utxos.splice(i, 1); continue; }
     const key = `${u.txid}:${u.vout}`;
     if (seenUtxos2.has(key)) { utxos.splice(i, 1); continue; }
     seenUtxos2.add(key);
@@ -1157,11 +1241,12 @@ export async function sendFromBech32(
   for (const utxo of utxos) {
     selectedUtxos.push(utxo);
     totalInput += utxo.value;
+    if (totalInput > Number.MAX_SAFE_INTEGER) throw new Error('UTXO total exceeds safe integer range');
 
     const estimatedSize = estimateTxSize(selectedUtxos.length, outputCount);
     const estimatedFee = estimatedSize * feePerByte;
 
-    if (totalInput >= amountSats + estimatedFee) {
+    if (totalInput >= amountSats + estimatedFee || selectedUtxos.length >= 500) {
       break;
     }
   }
@@ -1194,29 +1279,17 @@ export async function sendFromBech32(
   // NOTE: Change goes to P2PKH (CashAddr) derived from the same pubkey, not back
   // to the bc1 address. The changeAddress param is only used as a flag (non-null = has change).
   let txHex: string;
-  try {
-    txHex = buildSegwitRecoveryTransaction(
-      selectedUtxos,
-      toAddress,
-      amountSats,
-      hasChange ? expectedAddress : null,
-      changeAmount,
-      Buffer.from(matchedChild.privateKey),
-      Buffer.from(matchedChild.publicKey),
-      targetPubkeyHash
-    );
-  } finally {
-    // Zero seed and private key material after signing
-    if (seed instanceof Buffer || seed instanceof Uint8Array) {
-      crypto.randomFillSync(seed);
-      seed.fill(0);
-    }
-    if (matchedChild.privateKey) {
-      const pk = Buffer.from(matchedChild.privateKey);
-      crypto.randomFillSync(pk);
-      pk.fill(0);
-    }
-  }
+  privkeyCopy = Buffer.from(matchedChild.privateKey);
+  txHex = buildSegwitRecoveryTransaction(
+    selectedUtxos,
+    toAddress,
+    amountSats,
+    hasChange ? expectedAddress : null,
+    changeAmount,
+    privkeyCopy,
+    Buffer.from(matchedChild.publicKey),
+    targetPubkeyHash
+  );
 
   DEBUG && console.log(`[TX] Transaction hex (${txHex.length} chars): ${txHex}`);
 
@@ -1225,6 +1298,26 @@ export async function sendFromBech32(
   const txid = await broadcastTransaction(txHex);
 
   return { txid, hex: txHex };
+
+  } finally {
+    // Zero seed and all private key material
+    if (seed instanceof Buffer || seed instanceof Uint8Array) {
+      crypto.randomFillSync(seed);
+      seed.fill(0);
+    }
+    if (root.privateKey) {
+      crypto.randomFillSync(root.privateKey);
+      root.privateKey.fill(0);
+    }
+    if (matchedChild && matchedChild.privateKey) {
+      crypto.randomFillSync(matchedChild.privateKey);
+      matchedChild.privateKey.fill(0);
+    }
+    if (privkeyCopy) {
+      crypto.randomFillSync(privkeyCopy);
+      privkeyCopy.fill(0);
+    }
+  }
 }
 
 /**
@@ -1240,14 +1333,19 @@ export async function sendFromP2SH(
 ): Promise<TransactionResult> {
   feePerByte = Math.ceil(feePerByte); // Ensure integer sat/byte
   if (!Number.isFinite(feePerByte) || feePerByte < 1) feePerByte = 1;
+  if (feePerByte > 1000) throw new Error('Fee rate too high (max 1000 sat/byte)');
+  if (!Number.isInteger(amountSats) || amountSats < 0) throw new Error('Invalid amount');
   if (amountSats < 546) throw new Error('Amount below dust threshold (546 sats)');
   // Derive from mnemonic and search BIP49 paths
   const seed = await bip39.mnemonicToSeed(mnemonic);
   const root = bip32.fromSeed(seed);
+  let privkeyCopy: Buffer | null = null;
+  let matchedChild: ReturnType<typeof root.derivePath> | null = null;
+
+  try {
 
   // BIP49 paths: m/49'/0'/0'/0/x (receive) and m/49'/0'/0'/1/x (change)
   const basePaths = ["m/49'/0'/0'/0", "m/49'/0'/0'/1"];
-  let matchedChild: ReturnType<typeof root.derivePath> | null = null;
 
   // To match a 3xxx address we need to compute P2SH(P2WPKH(pubkey)) for each key
   for (const basePath of basePaths) {
@@ -1268,6 +1366,8 @@ export async function sendFromP2SH(
         matchedChild = child;
         break;
       }
+      // Zero non-matching child private key
+      if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
     }
     if (matchedChild) break;
   }
@@ -1296,12 +1396,15 @@ export async function sendFromP2SH(
     throw new Error(`No UTXOs available for P2SH address ${expectedAddress}`);
   }
 
-  // Validate UTXO txids and deduplicate
+  // Validate UTXO fields, txids, and deduplicate
   const txidRegex3 = /^[0-9a-fA-F]{64}$/;
   const seenUtxos3 = new Set<string>();
+  const MAX_UTXO_VALUE3 = 21_000_000 * 100_000_000;
   for (let i = utxos.length - 1; i >= 0; i--) {
     const u = utxos[i];
     if (!txidRegex3.test(u.txid)) { utxos.splice(i, 1); continue; }
+    if (!Number.isInteger(u.value) || u.value <= 0 || u.value > MAX_UTXO_VALUE3) { utxos.splice(i, 1); continue; }
+    if (!Number.isInteger(u.vout) || u.vout < 0 || u.vout > 0xFFFFFFFF) { utxos.splice(i, 1); continue; }
     const key = `${u.txid}:${u.vout}`;
     if (seenUtxos3.has(key)) { utxos.splice(i, 1); continue; }
     seenUtxos3.add(key);
@@ -1321,11 +1424,12 @@ export async function sendFromP2SH(
   for (const utxo of utxos) {
     selectedUtxos.push(utxo);
     totalInput += utxo.value;
+    if (totalInput > Number.MAX_SAFE_INTEGER) throw new Error('UTXO total exceeds safe integer range');
 
     const estimatedSize = estimateTxSize(selectedUtxos.length, outputCount);
     const estimatedFee = estimatedSize * feePerByte;
 
-    if (totalInput >= amountSats + estimatedFee) {
+    if (totalInput >= amountSats + estimatedFee || selectedUtxos.length >= 500) {
       break;
     }
   }
@@ -1345,33 +1449,41 @@ export async function sendFromP2SH(
   }
 
   let txHex: string;
-  try {
-    txHex = buildSegwitRecoveryTransaction(
-      selectedUtxos,
-      toAddress,
-      amountSats,
-      hasChange ? expectedAddress : null,
-      changeAmount,
-      Buffer.from(matchedChild.privateKey),
-      Buffer.from(matchedChild.publicKey),
-      pubkeyHash,
-      redeemScript  // Pass redeemScript for P2SH-P2WPKH
-    );
+  privkeyCopy = Buffer.from(matchedChild.privateKey);
+  txHex = buildSegwitRecoveryTransaction(
+    selectedUtxos,
+    toAddress,
+    amountSats,
+    hasChange ? expectedAddress : null,
+    changeAmount,
+    privkeyCopy,
+    Buffer.from(matchedChild.publicKey),
+    pubkeyHash,
+    redeemScript  // Pass redeemScript for P2SH-P2WPKH
+  );
+
+  const txid = await broadcastTransaction(txHex);
+  return { txid, hex: txHex };
+
   } finally {
-    // Zero seed and private key material after signing
+    // Zero seed and all private key material
     if (seed instanceof Buffer || seed instanceof Uint8Array) {
       crypto.randomFillSync(seed);
       seed.fill(0);
     }
-    if (matchedChild.privateKey) {
-      const pk = Buffer.from(matchedChild.privateKey);
-      crypto.randomFillSync(pk);
-      pk.fill(0);
+    if (root.privateKey) {
+      crypto.randomFillSync(root.privateKey);
+      root.privateKey.fill(0);
+    }
+    if (matchedChild && matchedChild.privateKey) {
+      crypto.randomFillSync(matchedChild.privateKey);
+      matchedChild.privateKey.fill(0);
+    }
+    if (privkeyCopy) {
+      crypto.randomFillSync(privkeyCopy);
+      privkeyCopy.fill(0);
     }
   }
-
-  const txid = await broadcastTransaction(txHex);
-  return { txid, hex: txHex };
 }
 
 /**
@@ -1562,8 +1674,822 @@ function createBIP143SighashForSegwit(
   return doubleSha256(preimage);
 }
 
+/**
+ * Build and broadcast a P2WSH recovery transaction
+ * P2WSH (witness v0, 32-byte script hash) spending via scriptSig on BCH2
+ *
+ * scriptPubKey: OP_0 PUSH_32 <32-byte-SHA256-of-redeemScript>
+ * scriptSig: <sig+hashtype> <pubkey> <redeemScript>
+ *
+ * The node's VerifyWitnessProgramViaScriptSig checks SHA256(redeemScript) == program,
+ * then executes the redeemScript. Sighash uses BIP143 with hashtype 0x41 (SIGHASH_ALL|SIGHASH_FORKID).
+ * The scriptCode for BIP143 sighash is the redeemScript itself.
+ */
+export async function sendFromP2WSH(
+  mnemonic: string,
+  expectedAddress: string,
+  toAddress: string,
+  amountSats: number,
+  feePerByte: number
+): Promise<TransactionResult> {
+  feePerByte = Math.ceil(feePerByte);
+  if (!Number.isFinite(feePerByte) || feePerByte < 1) feePerByte = 1;
+  if (feePerByte > 1000) throw new Error('Fee rate too high (max 1000 sat/byte)');
+  if (!Number.isInteger(amountSats) || amountSats < 0) throw new Error('Invalid amount');
+  if (amountSats < 546) throw new Error('Amount below dust threshold (546 sats)');
+  DEBUG && console.log(`[TX] Sending from P2WSH address: ${expectedAddress}`);
+
+  // Decode the bc1 address to get the 32-byte script hash (witness program)
+  const decoded = decodeBech32(expectedAddress);
+  if (!decoded || decoded.version !== 0 || decoded.program.length !== 32) {
+    throw new Error('Invalid bc1 P2WSH address (expected witness v0 with 32-byte program)');
+  }
+  const targetScriptHash = decoded.program; // SHA256 of the redeemScript
+
+  // Derive from mnemonic and search BIP84 paths for the key
+  const seed = await bip39.mnemonicToSeed(mnemonic);
+  const root = bip32.fromSeed(seed);
+  let privkeyCopy: Buffer | null = null;
+  let matchedChild: ReturnType<typeof root.derivePath> | null = null;
+
+  try {
+
+  // Search BIP84 paths for a key whose P2PKH-like redeemScript hashes to the target
+  const basePaths = ["m/84'/0'/0'/0", "m/84'/0'/0'/1", "m/44'/0'/0'/0", "m/44'/0'/0'/1", "m/44'/145'/0'/0", "m/44'/145'/0'/1"];
+  let matchedRedeemScript: Buffer | null = null;
+
+  for (const basePath of basePaths) {
+    for (let i = 0; i < 20; i++) {
+      const path = `${basePath}/${i}`;
+      const child = root.derivePath(path);
+      const pubkey = Buffer.from(child.publicKey);
+      const pubkeyHash = hash160(pubkey);
+
+      // Build P2PKH-like redeemScript: OP_DUP OP_HASH160 <pubkeyhash> OP_EQUALVERIFY OP_CHECKSIG
+      const redeemScript = Buffer.concat([
+        Buffer.from([0x76, 0xa9, 0x14]),
+        pubkeyHash,
+        Buffer.from([0x88, 0xac])
+      ]);
+
+      // SHA256 of redeemScript should equal the witness program
+      const scriptHash = crypto.createHash('sha256').update(redeemScript).digest();
+      if (scriptHash.equals(targetScriptHash)) {
+        matchedChild = child;
+        matchedRedeemScript = redeemScript;
+        DEBUG && console.log(`[TX] Found matching P2WSH key at path: ${path}`);
+        break;
+      }
+      // Zero non-matching child private key
+      if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
+    }
+    if (matchedChild) break;
+  }
+
+  if (!matchedChild || !matchedChild.privateKey || !matchedRedeemScript) {
+    throw new Error('Could not find private key for P2WSH address in wallet');
+  }
+
+  // Get scripthash for UTXO lookup
+  // scriptPubKey for P2WSH: OP_0 PUSH_32 <32-byte-hash>
+  const scriptPubKey = Buffer.concat([
+    Buffer.from([0x00, 0x20]),
+    targetScriptHash
+  ]);
+  const sha = crypto.createHash('sha256').update(scriptPubKey).digest();
+  const scripthash = Buffer.from(sha).reverse().toString('hex');
+
+  DEBUG && console.log(`[TX] Scripthash: ${scripthash}`);
+
+  // Fetch UTXOs using scripthash
+  const utxos: UTXO[] = await getUtxosByScripthash(scripthash);
+  DEBUG && console.log(`[TX] Found ${utxos.length} UTXOs`);
+
+  if (utxos.length === 0) {
+    throw new Error(`No UTXOs available for P2WSH address ${expectedAddress}`);
+  }
+
+  // Validate UTXO fields, txids, and deduplicate
+  const txidRegex4 = /^[0-9a-fA-F]{64}$/;
+  const seenUtxos4 = new Set<string>();
+  const MAX_UTXO_VALUE4 = 21_000_000 * 100_000_000;
+  for (let i = utxos.length - 1; i >= 0; i--) {
+    const u = utxos[i];
+    if (!txidRegex4.test(u.txid)) { utxos.splice(i, 1); continue; }
+    if (!Number.isInteger(u.value) || u.value <= 0 || u.value > MAX_UTXO_VALUE4) { utxos.splice(i, 1); continue; }
+    if (!Number.isInteger(u.vout) || u.vout < 0 || u.vout > 0xFFFFFFFF) { utxos.splice(i, 1); continue; }
+    const key = `${u.txid}:${u.vout}`;
+    if (seenUtxos4.has(key)) { utxos.splice(i, 1); continue; }
+    seenUtxos4.add(key);
+  }
+
+  utxos.sort((a, b) => b.value - a.value);
+
+  // P2WSH inputs are larger: sig(~73) + pubkey(33) + redeemScript(25) + overhead
+  const estimateTxSize = (inputCount: number, outputCount: number): number => {
+    return 10 + (180 * inputCount) + (34 * outputCount);
+  };
+
+  let selectedUtxos: UTXO[] = [];
+  let totalInput = 0;
+
+  for (const utxo of utxos) {
+    selectedUtxos.push(utxo);
+    totalInput += utxo.value;
+    if (totalInput > Number.MAX_SAFE_INTEGER) throw new Error('UTXO total exceeds safe integer range');
+    const estimatedSize = estimateTxSize(selectedUtxos.length, 2);
+    const estimatedFee = estimatedSize * feePerByte;
+    if (totalInput >= amountSats + estimatedFee || selectedUtxos.length >= 500) break;
+  }
+
+  const fee2out = estimateTxSize(selectedUtxos.length, 2) * feePerByte;
+  const tentativeChange = totalInput - amountSats - fee2out;
+  const hasChange = tentativeChange > 546;
+  const actualOutputCount = hasChange ? 2 : 1;
+  const fee = estimateTxSize(selectedUtxos.length, actualOutputCount) * feePerByte;
+  const changeAmount = hasChange ? (totalInput - amountSats - fee) : 0;
+
+  if (totalInput < amountSats + fee) {
+    throw new Error(`Insufficient funds. Need ${amountSats + fee} sats, have ${totalInput} sats`);
+  }
+
+  DEBUG && console.log(`[TX] Building P2WSH recovery transaction:`);
+  DEBUG && console.log(`[TX]   To: ${toAddress}`);
+  DEBUG && console.log(`[TX]   Amount: ${amountSats} sats`);
+  DEBUG && console.log(`[TX]   Fee: ${fee} sats (${feePerByte} sat/byte)`);
+  DEBUG && console.log(`[TX]   Change: ${changeAmount} sats`);
+
+  const pubkeyHash = hash160(Buffer.from(matchedChild.publicKey));
+  let txHex: string;
+  privkeyCopy = Buffer.from(matchedChild.privateKey);
+  txHex = buildP2WSHRecoveryTransaction(
+    selectedUtxos,
+    toAddress,
+    amountSats,
+    hasChange ? expectedAddress : null,
+    changeAmount,
+    privkeyCopy,
+    Buffer.from(matchedChild.publicKey),
+    pubkeyHash,
+    matchedRedeemScript
+  );
+
+  DEBUG && console.log(`[TX] Transaction hex (${txHex.length} chars): ${txHex}`);
+
+  const txid = await broadcastTransaction(txHex);
+  return { txid, hex: txHex };
+
+  } finally {
+    if (seed instanceof Buffer || seed instanceof Uint8Array) {
+      crypto.randomFillSync(seed);
+      seed.fill(0);
+    }
+    if (root.privateKey) {
+      crypto.randomFillSync(root.privateKey);
+      root.privateKey.fill(0);
+    }
+    if (matchedChild && matchedChild.privateKey) {
+      crypto.randomFillSync(matchedChild.privateKey);
+      matchedChild.privateKey.fill(0);
+    }
+    if (privkeyCopy) {
+      crypto.randomFillSync(privkeyCopy);
+      privkeyCopy.fill(0);
+    }
+  }
+}
+
+/**
+ * Build a raw transaction spending P2WSH outputs via scriptSig (BCH2 SegWit recovery)
+ *
+ * scriptSig: <sig+hashtype> <pubkey> <redeemScript>
+ * Sighash: BIP143 with the redeemScript as scriptCode and hashtype 0x41
+ */
+function buildP2WSHRecoveryTransaction(
+  utxos: UTXO[],
+  toAddress: string,
+  amount: number,
+  changeAddress: string | null,
+  changeAmount: number,
+  privateKey: Buffer,
+  publicKey: Buffer,
+  pubkeyHash: Buffer,
+  redeemScript: Buffer
+): string {
+  const version = Buffer.alloc(4);
+  version.writeUInt32LE(2, 0);
+
+  // Build outputs
+  let outputs = Buffer.alloc(0);
+  let outputCount = 1;
+
+  const recipientScript = addressToScript(toAddress, false);
+  const amountBytes = Buffer.alloc(8);
+  amountBytes.writeBigUInt64LE(BigInt(amount), 0);
+  outputs = Buffer.concat([outputs, amountBytes, encodeVarInt(recipientScript.length), recipientScript]);
+
+  if (changeAddress && changeAmount > 0) {
+    outputCount++;
+    // Send change to P2PKH (CashAddr), not back to P2WSH
+    const changeScript = Buffer.concat([
+      Buffer.from([0x76, 0xa9, 0x14]),
+      pubkeyHash,
+      Buffer.from([0x88, 0xac]),
+    ]);
+    const changeBytes = Buffer.alloc(8);
+    changeBytes.writeBigUInt64LE(BigInt(changeAmount), 0);
+    outputs = Buffer.concat([outputs, changeBytes, encodeVarInt(changeScript.length), changeScript]);
+  }
+
+  // Sign each input using BIP143 sighash with redeemScript as scriptCode
+  const signedInputs: Buffer[] = [];
+  for (let i = 0; i < utxos.length; i++) {
+    const utxo = utxos[i];
+
+    // BIP143 sighash using redeemScript as scriptCode (NOT P2PKH template)
+    const sighash = createBIP143SighashWithScriptCode(utxos, i, redeemScript, outputCount, outputs, utxo.value);
+
+    const signature = signWithPrivateKey(sighash, privateKey);
+
+    // scriptSig: <sig+hashtype> <pubkey> <redeemScript>
+    const sigWithHashType = Buffer.concat([signature, Buffer.from([0x41])]);
+    const scriptSig = Buffer.concat([
+      encodeVarInt(sigWithHashType.length),
+      sigWithHashType,
+      encodeVarInt(publicKey.length),
+      publicKey,
+      encodeVarInt(redeemScript.length),
+      redeemScript
+    ]);
+
+    const txidBytes = Buffer.from(utxo.txid, 'hex').reverse();
+    const voutBytes = Buffer.alloc(4);
+    voutBytes.writeUInt32LE(utxo.vout, 0);
+    const sequence = Buffer.from('ffffffff', 'hex');
+
+    signedInputs.push(Buffer.concat([
+      txidBytes,
+      voutBytes,
+      encodeVarInt(scriptSig.length),
+      scriptSig,
+      sequence
+    ]));
+  }
+
+  let tx = Buffer.concat([version, encodeVarInt(utxos.length)]);
+  for (const input of signedInputs) {
+    tx = Buffer.concat([tx, input]);
+  }
+  tx = Buffer.concat([tx, encodeVarInt(outputCount), outputs]);
+
+  const locktime = Buffer.alloc(4);
+  locktime.writeUInt32LE(0, 0);
+  tx = Buffer.concat([tx, locktime]);
+
+  return tx.toString('hex');
+}
+
+/**
+ * Create BIP143 sighash using an arbitrary scriptCode (for P2WSH spending)
+ * The scriptCode for P2WSH is the redeemScript itself, not the P2WSH scriptPubKey
+ */
+function createBIP143SighashWithScriptCode(
+  utxos: UTXO[],
+  inputIndex: number,
+  scriptCodeRaw: Buffer,
+  outputCount: number,
+  serializedOutputs: Buffer,
+  inputValue: number
+): Buffer {
+  const utxo = utxos[inputIndex];
+
+  const version = Buffer.alloc(4);
+  version.writeUInt32LE(2, 0);
+
+  let prevouts = Buffer.alloc(0);
+  for (const u of utxos) {
+    const txid = Buffer.from(u.txid, 'hex').reverse();
+    const vout = Buffer.alloc(4);
+    vout.writeUInt32LE(u.vout, 0);
+    prevouts = Buffer.concat([prevouts, txid, vout]);
+  }
+  const hashPrevouts = doubleSha256(prevouts);
+
+  let sequences = Buffer.alloc(0);
+  for (const _ of utxos) {
+    sequences = Buffer.concat([sequences, Buffer.from('ffffffff', 'hex')]);
+  }
+  const hashSequence = doubleSha256(sequences);
+
+  const outpoint = Buffer.concat([
+    Buffer.from(utxo.txid, 'hex').reverse(),
+    (() => { const b = Buffer.alloc(4); b.writeUInt32LE(utxo.vout, 0); return b; })()
+  ]);
+
+  // scriptCode: varint-prefixed redeemScript
+  const scriptCode = Buffer.concat([encodeVarInt(scriptCodeRaw.length), scriptCodeRaw]);
+
+  const value = Buffer.alloc(8);
+  value.writeBigUInt64LE(BigInt(inputValue), 0);
+
+  const nSequence = Buffer.from('ffffffff', 'hex');
+  const hashOutputs = doubleSha256(serializedOutputs);
+
+  const locktime = Buffer.alloc(4);
+  locktime.writeUInt32LE(0, 0);
+
+  const hashType = Buffer.alloc(4);
+  hashType.writeUInt32LE(0x41, 0);
+
+  const preimage = Buffer.concat([
+    version,
+    hashPrevouts,
+    hashSequence,
+    outpoint,
+    scriptCode,
+    value,
+    nSequence,
+    hashOutputs,
+    locktime,
+    hashType
+  ]);
+
+  return doubleSha256(preimage);
+}
+
+/**
+ * Build and broadcast a P2TR (Taproot) recovery transaction
+ * P2TR key-path spending via scriptSig on BCH2
+ *
+ * scriptSig: <64-byte-schnorr-sig> (single push, no pubkey, no hashtype byte for SIGHASH_DEFAULT)
+ * Sighash: BIP341 Taproot sighash
+ * Signing: BIP340 Schnorr with tweaked private key
+ */
+export async function sendFromP2TR(
+  mnemonic: string,
+  expectedAddress: string,
+  toAddress: string,
+  amountSats: number,
+  feePerByte: number
+): Promise<TransactionResult> {
+  feePerByte = Math.ceil(feePerByte);
+  if (!Number.isFinite(feePerByte) || feePerByte < 1) feePerByte = 1;
+  if (feePerByte > 1000) throw new Error('Fee rate too high (max 1000 sat/byte)');
+  if (!Number.isInteger(amountSats) || amountSats < 0) throw new Error('Invalid amount');
+  if (amountSats < 546) throw new Error('Amount below dust threshold (546 sats)');
+  DEBUG && console.log(`[TX] Sending from P2TR address: ${expectedAddress}`);
+
+  // Decode the bc1p address (Bech32m, witness version 1, 32-byte program)
+  const decoded = decodeBech32m(expectedAddress);
+  if (!decoded || decoded.version !== 1 || decoded.program.length !== 32) {
+    throw new Error('Invalid bc1p P2TR address (expected witness v1 with 32-byte x-only pubkey)');
+  }
+  const targetTweakedXonly = decoded.program;
+
+  // Derive from mnemonic and search BIP86 paths
+  const seed = await bip39.mnemonicToSeed(mnemonic);
+  const root = bip32.fromSeed(seed);
+  let matchedChild: ReturnType<typeof root.derivePath> | null = null;
+  let matchedTweakedPrivkey: Buffer | null = null;
+
+  try {
+
+  const basePaths = ["m/86'/0'/0'/0", "m/86'/0'/0'/1"];
+
+  for (const basePath of basePaths) {
+    for (let i = 0; i < 20; i++) {
+      const path = `${basePath}/${i}`;
+      const child = root.derivePath(path);
+      const pubkey = Buffer.from(child.publicKey);
+      const xonly = pubkey.subarray(1, 33);
+
+      // Compute TapTweak
+      const tweak = taggedHashBuf('TapTweak', xonly);
+
+      // Use ecc.xOnlyPointAddTweak to get the tweaked x-only pubkey
+      const tweakResult = ecc.xOnlyPointAddTweak(xonly, tweak);
+      if (!tweakResult) {
+        if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
+        continue;
+      }
+
+      const tweakedXonly = Buffer.from(tweakResult.xOnlyPubkey);
+
+      if (tweakedXonly.equals(targetTweakedXonly)) {
+        matchedChild = child;
+
+        // Compute tweaked private key
+        const privkey = Buffer.from(child.privateKey!);
+        // Determine if pubkey has even or odd y
+        const hasEvenY = pubkey[0] === 0x02;
+        // If odd y, negate the private key first
+        let effectivePrivkey: Buffer;
+        if (hasEvenY) {
+          effectivePrivkey = privkey;
+        } else {
+          effectivePrivkey = Buffer.from(ecc.privateNegate(privkey));
+        }
+        // tweakedPrivKey = effectivePrivkey + tweak (mod n)
+        const added = ecc.privateAdd(effectivePrivkey, tweak);
+        if (!added) {
+          // Zero intermediate key material before continuing
+          crypto.randomFillSync(privkey); privkey.fill(0);
+          if (effectivePrivkey !== privkey) { crypto.randomFillSync(effectivePrivkey); effectivePrivkey.fill(0); }
+          if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
+          matchedChild = null;
+          continue;
+        }
+        matchedTweakedPrivkey = Buffer.from(added);
+
+        // Zero intermediate private key copies
+        crypto.randomFillSync(privkey); privkey.fill(0);
+        if (effectivePrivkey !== privkey) { crypto.randomFillSync(effectivePrivkey); effectivePrivkey.fill(0); }
+
+        DEBUG && console.log(`[TX] Found matching P2TR key at path: ${path}`);
+        break;
+      }
+      // Zero non-matching child private key
+      if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
+    }
+    if (matchedChild) break;
+  }
+
+  if (!matchedChild || !matchedChild.privateKey || !matchedTweakedPrivkey) {
+    throw new Error('Could not find private key for P2TR address in wallet');
+  }
+
+  // Get scripthash for UTXO lookup
+  // scriptPubKey for P2TR: OP_1 PUSH_32 <32-byte-x-only-tweaked-pubkey>
+  const scriptPubKey = Buffer.concat([
+    Buffer.from([0x51, 0x20]), // OP_1 PUSH_32
+    targetTweakedXonly
+  ]);
+  const sha = crypto.createHash('sha256').update(scriptPubKey).digest();
+  const scripthash = Buffer.from(sha).reverse().toString('hex');
+
+  DEBUG && console.log(`[TX] Scripthash: ${scripthash}`);
+
+  const utxos: UTXO[] = await getUtxosByScripthash(scripthash);
+  DEBUG && console.log(`[TX] Found ${utxos.length} UTXOs`);
+
+  if (utxos.length === 0) {
+    throw new Error(`No UTXOs available for P2TR address ${expectedAddress}`);
+  }
+
+  // Validate UTXO fields and deduplicate
+  const txidRegex5 = /^[0-9a-fA-F]{64}$/;
+  const seenUtxos5 = new Set<string>();
+  const MAX_UTXO_VALUE5 = 21_000_000 * 100_000_000;
+  for (let i = utxos.length - 1; i >= 0; i--) {
+    const u = utxos[i];
+    if (!txidRegex5.test(u.txid)) { utxos.splice(i, 1); continue; }
+    if (!Number.isInteger(u.value) || u.value <= 0 || u.value > MAX_UTXO_VALUE5) { utxos.splice(i, 1); continue; }
+    if (!Number.isInteger(u.vout) || u.vout < 0 || u.vout > 0xFFFFFFFF) { utxos.splice(i, 1); continue; }
+    const key = `${u.txid}:${u.vout}`;
+    if (seenUtxos5.has(key)) { utxos.splice(i, 1); continue; }
+    seenUtxos5.add(key);
+  }
+
+  utxos.sort((a, b) => b.value - a.value);
+
+  // P2TR scriptSig input: 64-byte sig push = ~66 bytes + outpoint(36) + sequence(4) + varint overhead
+  const estimateTxSize = (inputCount: number, outputCount: number): number => {
+    return 10 + (110 * inputCount) + (34 * outputCount);
+  };
+
+  let selectedUtxos: UTXO[] = [];
+  let totalInput = 0;
+
+  for (const utxo of utxos) {
+    selectedUtxos.push(utxo);
+    totalInput += utxo.value;
+    if (totalInput > Number.MAX_SAFE_INTEGER) throw new Error('UTXO total exceeds safe integer range');
+    const estimatedSize = estimateTxSize(selectedUtxos.length, 2);
+    const estimatedFee = estimatedSize * feePerByte;
+    if (totalInput >= amountSats + estimatedFee || selectedUtxos.length >= 500) break;
+  }
+
+  const fee2out = estimateTxSize(selectedUtxos.length, 2) * feePerByte;
+  const tentativeChange = totalInput - amountSats - fee2out;
+  const hasChange = tentativeChange > 546;
+  const actualOutputCount = hasChange ? 2 : 1;
+  const fee = estimateTxSize(selectedUtxos.length, actualOutputCount) * feePerByte;
+  const changeAmount = hasChange ? (totalInput - amountSats - fee) : 0;
+
+  if (totalInput < amountSats + fee) {
+    throw new Error(`Insufficient funds. Need ${amountSats + fee} sats, have ${totalInput} sats`);
+  }
+
+  DEBUG && console.log(`[TX] Building P2TR recovery transaction:`);
+  DEBUG && console.log(`[TX]   To: ${toAddress}`);
+  DEBUG && console.log(`[TX]   Amount: ${amountSats} sats`);
+  DEBUG && console.log(`[TX]   Fee: ${fee} sats (${feePerByte} sat/byte)`);
+  DEBUG && console.log(`[TX]   Change: ${changeAmount} sats`);
+
+  // Build all input scriptPubKeys for sighash computation
+  const inputScriptPubKeys: Buffer[] = selectedUtxos.map(() => scriptPubKey);
+
+  let txHex: string;
+  txHex = buildP2TRRecoveryTransaction(
+    selectedUtxos,
+    toAddress,
+    amountSats,
+    hasChange ? expectedAddress : null,
+    changeAmount,
+    matchedTweakedPrivkey,
+    targetTweakedXonly,
+    inputScriptPubKeys,
+    Buffer.from(matchedChild.publicKey) // Original untweaked pubkey for change address
+  );
+
+  DEBUG && console.log(`[TX] Transaction hex (${txHex.length} chars): ${txHex}`);
+
+  const txid = await broadcastTransaction(txHex);
+  return { txid, hex: txHex };
+
+  } finally {
+    if (seed instanceof Buffer || seed instanceof Uint8Array) {
+      crypto.randomFillSync(seed);
+      seed.fill(0);
+    }
+    if (root.privateKey) {
+      crypto.randomFillSync(root.privateKey);
+      root.privateKey.fill(0);
+    }
+    if (matchedChild && matchedChild.privateKey) {
+      crypto.randomFillSync(matchedChild.privateKey);
+      matchedChild.privateKey.fill(0);
+    }
+    if (matchedTweakedPrivkey) {
+      crypto.randomFillSync(matchedTweakedPrivkey);
+      matchedTweakedPrivkey.fill(0);
+    }
+  }
+}
+
+/**
+ * Build a raw transaction spending P2TR outputs via scriptSig (BCH2 Taproot recovery)
+ *
+ * Key-path spend:
+ * - scriptSig: <64-byte-schnorr-sig> (single push)
+ * - Sighash: BIP341 Taproot sighash with SIGHASH_DEFAULT (0x00)
+ */
+function buildP2TRRecoveryTransaction(
+  utxos: UTXO[],
+  toAddress: string,
+  amount: number,
+  changeAddress: string | null,
+  changeAmount: number,
+  tweakedPrivkey: Buffer,
+  tweakedXonly: Buffer,
+  inputScriptPubKeys: Buffer[],
+  originalPublicKey?: Buffer
+): string {
+  const version = Buffer.alloc(4);
+  version.writeUInt32LE(2, 0);
+
+  // Build outputs
+  let outputs = Buffer.alloc(0);
+  let outputCount = 1;
+
+  const recipientScript = addressToScript(toAddress, false);
+  const amountBytes = Buffer.alloc(8);
+  amountBytes.writeBigUInt64LE(BigInt(amount), 0);
+  outputs = Buffer.concat([outputs, amountBytes, encodeVarInt(recipientScript.length), recipientScript]);
+
+  if (changeAddress && changeAmount > 0) {
+    outputCount++;
+    // Send change to P2PKH (CashAddr) using the ORIGINAL (untweaked) public key.
+    // Using tweakedXonly here would create an unspendable output since the wallet
+    // only knows the untweaked key for derivation path lookups.
+    if (!originalPublicKey) {
+      throw new Error('originalPublicKey is required for P2TR change output');
+    }
+    const changePubkeyHash = hash160(originalPublicKey);
+    const changeScript = Buffer.concat([
+      Buffer.from([0x76, 0xa9, 0x14]),
+      changePubkeyHash,
+      Buffer.from([0x88, 0xac]),
+    ]);
+    const changeBytes = Buffer.alloc(8);
+    changeBytes.writeBigUInt64LE(BigInt(changeAmount), 0);
+    outputs = Buffer.concat([outputs, changeBytes, encodeVarInt(changeScript.length), changeScript]);
+  }
+
+  // Sign each input using BIP341 Taproot sighash
+  const signedInputs: Buffer[] = [];
+  for (let i = 0; i < utxos.length; i++) {
+    const sighash = createBIP341Sighash(
+      utxos,
+      i,
+      inputScriptPubKeys,
+      outputCount,
+      outputs
+    );
+
+    // BIP340 Schnorr sign with tweaked private key
+    const signature = Buffer.from(ecc.signSchnorr(sighash, tweakedPrivkey));
+
+    // scriptSig: just the 64-byte signature (SIGHASH_DEFAULT = no hashtype byte appended)
+    const scriptSig = Buffer.concat([
+      encodeVarInt(signature.length),
+      signature
+    ]);
+
+    const txidBytes = Buffer.from(utxos[i].txid, 'hex').reverse();
+    const voutBytes = Buffer.alloc(4);
+    voutBytes.writeUInt32LE(utxos[i].vout, 0);
+    const sequence = Buffer.from('ffffffff', 'hex');
+
+    signedInputs.push(Buffer.concat([
+      txidBytes,
+      voutBytes,
+      encodeVarInt(scriptSig.length),
+      scriptSig,
+      sequence
+    ]));
+  }
+
+  let tx = Buffer.concat([version, encodeVarInt(utxos.length)]);
+  for (const input of signedInputs) {
+    tx = Buffer.concat([tx, input]);
+  }
+  tx = Buffer.concat([tx, encodeVarInt(outputCount), outputs]);
+
+  const locktime = Buffer.alloc(4);
+  locktime.writeUInt32LE(0, 0);
+  tx = Buffer.concat([tx, locktime]);
+
+  return tx.toString('hex');
+}
+
+/**
+ * Create BIP341 Taproot sighash for key-path spend
+ *
+ * sighash = TaggedHash("TapSighash",
+ *   0x00,           // epoch
+ *   0x00,           // hash_type (SIGHASH_DEFAULT)
+ *   nVersion (4 LE),
+ *   nLockTime (4 LE),
+ *   SHA256(all prevouts),
+ *   SHA256(all input amounts as uint64LE),
+ *   SHA256(all input scriptPubKeys with varint length prefix),
+ *   SHA256(all sequences),
+ *   SHA256(all outputs),
+ *   0x00,           // spend_type (key-path, no annex)
+ *   input_index (4 LE)
+ * )
+ */
+function createBIP341Sighash(
+  utxos: UTXO[],
+  inputIndex: number,
+  inputScriptPubKeys: Buffer[],
+  outputCount: number,
+  serializedOutputs: Buffer
+): Buffer {
+  const version = Buffer.alloc(4);
+  version.writeUInt32LE(2, 0);
+
+  const locktime = Buffer.alloc(4);
+  locktime.writeUInt32LE(0, 0);
+
+  // SHA256(all prevouts)
+  let prevouts = Buffer.alloc(0);
+  for (const u of utxos) {
+    const txid = Buffer.from(u.txid, 'hex').reverse();
+    const vout = Buffer.alloc(4);
+    vout.writeUInt32LE(u.vout, 0);
+    prevouts = Buffer.concat([prevouts, txid, vout]);
+  }
+  const hashPrevouts = singleSha256(prevouts);
+
+  // SHA256(all input amounts as uint64LE)
+  let amounts = Buffer.alloc(0);
+  for (const u of utxos) {
+    const amt = Buffer.alloc(8);
+    amt.writeBigUInt64LE(BigInt(u.value), 0);
+    amounts = Buffer.concat([amounts, amt]);
+  }
+  const hashAmounts = singleSha256(amounts);
+
+  // SHA256(all input scriptPubKeys with varint length prefix)
+  let scriptPubKeysData = Buffer.alloc(0);
+  for (const spk of inputScriptPubKeys) {
+    scriptPubKeysData = Buffer.concat([scriptPubKeysData, encodeVarInt(spk.length), spk]);
+  }
+  const hashScriptPubKeys = singleSha256(scriptPubKeysData);
+
+  // SHA256(all sequences)
+  let sequences = Buffer.alloc(0);
+  for (const _ of utxos) {
+    sequences = Buffer.concat([sequences, Buffer.from('ffffffff', 'hex')]);
+  }
+  const hashSequences = singleSha256(sequences);
+
+  // SHA256(all outputs) - serializedOutputs already contains amounts + scripts
+  const hashOutputs = singleSha256(serializedOutputs);
+
+  // input_index
+  const inputIdx = Buffer.alloc(4);
+  inputIdx.writeUInt32LE(inputIndex, 0);
+
+  // Build the message to hash
+  const sigMsg = Buffer.concat([
+    Buffer.from([0x00]),      // epoch
+    Buffer.from([0x00]),      // hash_type (SIGHASH_DEFAULT)
+    version,                  // nVersion
+    locktime,                 // nLockTime
+    hashPrevouts,
+    hashAmounts,
+    hashScriptPubKeys,
+    hashSequences,
+    hashOutputs,
+    Buffer.from([0x00]),      // spend_type (key-path, no annex)
+    inputIdx                  // input_index
+  ]);
+
+  return taggedHashBuf('TapSighash', sigMsg);
+}
+
+/**
+ * Single SHA256 hash (used by BIP341, unlike BIP143 which uses double SHA256)
+ */
+function singleSha256(data: Buffer): Buffer {
+  return crypto.createHash('sha256').update(data).digest();
+}
+
+/**
+ * Tagged hash: SHA256(SHA256(tag) || SHA256(tag) || data)
+ * Used by BIP340/BIP341 (Taproot)
+ */
+function taggedHashBuf(tag: string, data: Buffer): Buffer {
+  const tagHash = crypto.createHash('sha256').update(Buffer.from(tag, 'utf8')).digest();
+  const combined = Buffer.concat([tagHash, tagHash, data]);
+  return crypto.createHash('sha256').update(combined).digest();
+}
+
+/**
+ * Decode Bech32m address (BIP350) for P2TR (witness version 1+)
+ * Bech32m uses checksum XOR 0x2bc830a3 instead of XOR 1
+ */
+function decodeBech32m(address: string): { version: number; program: Buffer } | null {
+  const addr = address.toLowerCase();
+
+  const sepPos = addr.lastIndexOf('1');
+  if (sepPos < 1 || sepPos + 7 > addr.length) return null;
+
+  const hrp = addr.slice(0, sepPos);
+  const dataStr = addr.slice(sepPos + 1);
+
+  const data: number[] = [];
+  for (const c of dataStr) {
+    const idx = BECH32_CHARSET.indexOf(c);
+    if (idx === -1) return null;
+    data.push(idx);
+  }
+
+  // Verify Bech32m checksum (polymod XOR 0x2bc830a3)
+  const hrpExpanded = bech32HrpExpand(hrp);
+  if (bech32Polymod([...hrpExpanded, ...data]) !== 0x2bc830a3) {
+    return null;
+  }
+
+  const payload = data.slice(0, -6);
+  if (payload.length < 1) return null;
+
+  const version = payload[0];
+  if (version < 1 || version > 16) return null; // Bech32m is for witness version 1+
+
+  // Convert 5-bit to 8-bit
+  const programData = payload.slice(1);
+  let acc = 0;
+  let bits = 0;
+  const program: number[] = [];
+
+  for (const value of programData) {
+    acc = (acc << 5) | value;
+    bits += 5;
+    while (bits >= 8) {
+      bits -= 8;
+      program.push((acc >> bits) & 0xff);
+    }
+  }
+
+  if (bits > 0 && (acc & ((1 << bits) - 1)) !== 0) return null;
+
+  if (version === 1 && program.length !== 32) return null;
+  if (version !== 1 && (program.length < 2 || program.length > 40)) return null;
+
+  return {
+    version,
+    program: Buffer.from(program)
+  };
+}
+
 export default {
   sendTransaction,
   sendFromBech32,
   sendFromP2SH,
+  sendFromP2WSH,
+  sendFromP2TR,
 };

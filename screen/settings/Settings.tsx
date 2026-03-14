@@ -15,7 +15,7 @@ const Settings = () => {
   }, [setOptions, language, colors]); // Include language to trigger re-render when language changes
 
   const handleDonatePress = useCallback(() => {
-    Linking.openURL('https://donate.bluewallet.io/');
+    Linking.openURL('https://bitcoincashii.org/donate/');
   }, []);
 
   const donateIcon = useMemo(

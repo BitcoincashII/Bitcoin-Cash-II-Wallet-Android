@@ -131,7 +131,7 @@ const SendCreate = () => {
           <Text style={[styles.transactionDetailsSubtitle, styleHooks.transactionDetailsSubtitle]}>{item.address}</Text>
           <Text style={[styles.transactionDetailsTitle, styleHooks.transactionDetailsTitle]}>{loc.send.create_amount}</Text>
           <Text style={[styles.transactionDetailsSubtitle, styleHooks.transactionDetailsSubtitle]}>
-            {item.value != null ? `${satoshiToBTC(item.value)} ${BitcoinUnit.BTC}` : '-'}
+            {item.value != null ? `${satoshiToBTC(item.value)} ${loc.units[BitcoinUnit.BTC]}` : '-'}
           </Text>
           {recipients.length > 1 && (
             <BlueText style={styles.itemOf}>{loc.formatString(loc._.of, { number: index + 1, total: recipients.length })}</BlueText>
@@ -160,13 +160,7 @@ const SendCreate = () => {
       <TouchableOpacity accessibilityRole="button" style={styles.actionTouch} onPress={() => Clipboard.setString(tx)}>
         <Text style={styles.actionText}>{loc.send.create_copy}</Text>
       </TouchableOpacity>
-      <TouchableOpacity
-        accessibilityRole="button"
-        style={styles.actionTouch}
-        onPress={() => Linking.openURL('https://coinb.in/?verify=' + tx)}
-      >
-        <Text style={styles.actionText}>{loc.send.create_verify}</Text>
-      </TouchableOpacity>
+      {/* coinb.in verification removed — BTC-specific, not compatible with BCH2 */}
     </View>
   );
 
@@ -174,12 +168,12 @@ const SendCreate = () => {
     <View>
       <Text style={[styles.transactionDetailsTitle, styleHooks.transactionDetailsTitle]}>{loc.send.create_fee}</Text>
       <Text style={[styles.transactionDetailsSubtitle, styleHooks.transactionDetailsSubtitle]}>
-        {new BigNumber(fee).toFixed()} {BitcoinUnit.BTC}
+        {new BigNumber(fee).toFixed()} {loc.units[BitcoinUnit.BTC]}
       </Text>
       <Text style={[styles.transactionDetailsTitle, styleHooks.transactionDetailsTitle]}>{loc.send.create_tx_size}</Text>
-      <Text style={[styles.transactionDetailsSubtitle, styleHooks.transactionDetailsSubtitle]}>{size} vbytes</Text>
+      <Text style={[styles.transactionDetailsSubtitle, styleHooks.transactionDetailsSubtitle]}>{size} bytes</Text>
       <Text style={[styles.transactionDetailsTitle, styleHooks.transactionDetailsTitle]}>{loc.send.create_satoshi_per_vbyte}</Text>
-      <Text style={[styles.transactionDetailsSubtitle, styleHooks.transactionDetailsSubtitle]}>{satoshiPerByte} Sat/vB</Text>
+      <Text style={[styles.transactionDetailsSubtitle, styleHooks.transactionDetailsSubtitle]}>{satoshiPerByte} sat/byte</Text>
       {memo?.length > 0 && (
         <>
           <Text style={[styles.transactionDetailsTitle, styleHooks.transactionDetailsTitle]}>{loc.send.create_memo}</Text>

@@ -1,6 +1,6 @@
 {
   "name": "bch2-wallet",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Bitcoin Cash II (BCH2) Wallet - Fork of BlueWallet with BC2 and BCH2 support",
   "license": "MIT",
   "repository": {
@@ -58,10 +58,10 @@
     "branch2json": "./scripts/current-branch.sh > current-branch.json",
     "start": "react-native start",
     "android": "react-native run-android",
-    "android:relaunch": "adb shell am force-stop io.bluewallet.bluewallet; adb shell monkey -p io.bluewallet.bluewallet -c android.intent.category.LAUNCHER 1",
+    "android:relaunch": "adb shell am force-stop org.bch2.wallet; adb shell monkey -p org.bch2.wallet -c android.intent.category.LAUNCHER 1",
     "adb": "adb reverse tcp:8081 tcp:8081",
     "android:clean": "cd android;  ./gradlew clean ; cd .. ; npm run android",
-    "android:restart": "adb shell am force-stop io.bluewallet.bluewallet; adb shell monkey -p io.bluewallet.bluewallet -c android.intent.category.LAUNCHER 1",
+    "android:restart": "adb shell am force-stop org.bch2.wallet; adb shell monkey -p org.bch2.wallet -c android.intent.category.LAUNCHER 1",
     "ios": "react-native run-ios",
     "postinstall": "npm run releasenotes2json; npm run branch2json; npm run patches",
     "patches": "",
@@ -142,7 +142,6 @@
     "react-localization": "github:BlueWallet/react-localization#ae7969a",
     "react-native": "0.78.2",
     "react-native-biometrics": "3.0.1",
-    "react-native-blue-crypto": "github:BlueWallet/react-native-blue-crypto#3cb5442",
     "react-native-camera-kit-no-google": "16.2.0",
     "react-native-capture-protection": "github:BlueWallet/react-native-capture-protection#d299992",
     "react-native-default-preference": "https://github.com/BlueWallet/react-native-default-preference.git#6338a1f1235e4130b8cfc2dd3b53015eeff2870c",

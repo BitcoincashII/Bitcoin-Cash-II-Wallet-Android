@@ -304,7 +304,7 @@ class AppDelegate: RCTAppDelegate, UNUserNotificationCenterDelegate {
 
         userDefaultsGroup?.setValue(userActivityData, forKey: "onUserActivityOpen")
 
-        if ["io.bluewallet.bluewallet.receiveonchain", "io.bluewallet.bluewallet.xpub", "io.bluewallet.bluewallet.blockexplorer"].contains(activityType) {
+        if ["org.bch2.wallet.receiveonchain", "org.bch2.wallet.xpub", "org.bch2.wallet.blockexplorer"].contains(activityType) {
           EventEmitter.shared().sendUserActivity(userActivityData)
             return true
         }
@@ -337,7 +337,7 @@ class AppDelegate: RCTAppDelegate, UNUserNotificationCenterDelegate {
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
         let userInfo = response.notification.request.content.userInfo
-        let blockExplorer = userDefaultsGroup?.string(forKey: "blockExplorer") ?? "https://www.mempool.space"
+        let blockExplorer = userDefaultsGroup?.string(forKey: "blockExplorer") ?? "https://explorer.bch2.org"
 
         if let data = userInfo["data"] as? [String: Any] {
             if response.actionIdentifier == "VIEW_ADDRESS_TRANSACTIONS", let address = data["address"] as? String {
@@ -462,7 +462,7 @@ class AppDelegate: RCTAppDelegate, UNUserNotificationCenterDelegate {
     }
     
     @objc func showHelp(_ sender: Any) {
-        if let url = URL(string: "https://bluewallet.io/docs") {
+        if let url = URL(string: "https://bitcoincashii.org/docs") {
             UIApplication.shared.open(url, options: [:], completionHandler: nil)
         }
     }

@@ -23,7 +23,8 @@ function withStorageLock<T>(fn: () => Promise<T>): Promise<T> {
   const prev = _storageLock;
   let release: () => void;
   _storageLock = new Promise<void>(r => { release = r; });
-  return prev.then(fn).finally(() => release!());
+  // Catch prev rejection so a failed holder doesn't permanently block the lock
+  return prev.catch(() => {}).then(fn).finally(() => release!());
 }
 
 export interface StoredWallet {
@@ -46,12 +47,16 @@ export interface StoredWallet {
 function encryptMnemonic(mnemonic: string, password: string): string {
   const salt = crypto.randomBytes(16);
   const key = crypto.pbkdf2Sync(password, salt, KEY_DERIVATION_ITERATIONS, 32, 'sha256');
-  const iv = crypto.randomBytes(12); // 96-bit IV recommended for GCM
-  const cipher = crypto.createCipheriv(ENCRYPTION_ALGO_GCM, key, iv);
-  let encrypted = cipher.update(mnemonic, 'utf8', 'hex');
-  encrypted += cipher.final('hex');
-  const authTag = cipher.getAuthTag().toString('hex');
-  return 'gcm:' + salt.toString('hex') + ':' + iv.toString('hex') + ':' + authTag + ':' + encrypted;
+  try {
+    const iv = crypto.randomBytes(12); // 96-bit IV recommended for GCM
+    const cipher = crypto.createCipheriv(ENCRYPTION_ALGO_GCM, key, iv);
+    let encrypted = cipher.update(mnemonic, 'utf8', 'hex');
+    encrypted += cipher.final('hex');
+    const authTag = cipher.getAuthTag().toString('hex');
+    return 'gcm:' + salt.toString('hex') + ':' + iv.toString('hex') + ':' + authTag + ':' + encrypted;
+  } finally {
+    crypto.randomFillSync(key);
+  }
 }
 
 /**
@@ -68,27 +73,46 @@ function decryptMnemonic(encryptedData: string, password: string): string {
     const iv = Buffer.from(parts[2], 'hex');
     const authTag = Buffer.from(parts[3], 'hex');
     const ciphertext = parts[4];
+    // Validate component lengths — reject truncated/oversized values that could
+    // weaken crypto (e.g. short authTag reduces authentication strength)
+    if (salt.length !== 16) throw new Error('Decryption failed: invalid GCM salt length');
+    if (iv.length !== 12) throw new Error('Decryption failed: invalid GCM IV length');
+    if (authTag.length !== 16) throw new Error('Decryption failed: invalid GCM authTag length');
     const key = crypto.pbkdf2Sync(password, salt, KEY_DERIVATION_ITERATIONS, 32, 'sha256');
-    const decipher = crypto.createDecipheriv(ENCRYPTION_ALGO_GCM, key, iv);
-    decipher.setAuthTag(authTag);
-    let decrypted = decipher.update(ciphertext, 'hex', 'utf8');
-    decrypted += decipher.final('utf8');
-    return decrypted;
+    try {
+      const decipher = crypto.createDecipheriv(ENCRYPTION_ALGO_GCM, key, iv);
+      decipher.setAuthTag(authTag);
+      let decrypted = decipher.update(ciphertext, 'hex', 'utf8');
+      decrypted += decipher.final('utf8');
+      return decrypted;
+    } finally {
+      crypto.randomFillSync(key);
+    }
   }
 
   // Legacy CBC format: salt:iv:ciphertext (3 parts)
   if (parts.length === 3) {
     const salt = Buffer.from(parts[0], 'hex');
     const iv = Buffer.from(parts[1], 'hex');
+    if (salt.length !== 16) throw new Error('Decryption failed: invalid salt length');
+    if (iv.length !== 16) throw new Error('Decryption failed: invalid IV length');
     const ciphertext = parts[2];
     const key = crypto.pbkdf2Sync(password, salt, KEY_DERIVATION_ITERATIONS, 32, 'sha256');
-    const decipher = crypto.createDecipheriv(ENCRYPTION_ALGO_CBC, key, iv);
-    let decrypted = decipher.update(ciphertext, 'hex', 'utf8');
-    decrypted += decipher.final('utf8');
-    return decrypted;
+    try {
+      const decipher = crypto.createDecipheriv(ENCRYPTION_ALGO_CBC, key, iv);
+      let decrypted = decipher.update(ciphertext, 'hex', 'utf8');
+      decrypted += decipher.final('utf8');
+      return decrypted;
+    } finally {
+      crypto.randomFillSync(key);
+    }
   }
 
-  // Legacy unencrypted mnemonic — return as-is
+  // Legacy unencrypted mnemonic — validate it looks like a real mnemonic
+  // to prevent malformed encrypted blobs from silently bypassing decryption
+  if (!bip39.validateMnemonic(encryptedData)) {
+    throw new Error('Decryption failed: unrecognized format');
+  }
   return encryptedData;
 }
 
@@ -108,6 +132,12 @@ export async function saveWallet(
 
   // Trim mnemonic once — must use same value for address derivation and encryption
   const trimmedMnemonic = mnemonic.trim();
+
+  // Validate mnemonic before saving — an invalid mnemonic would be permanently
+  // inaccessible because getWalletMnemonic validates after decryption
+  if (!bip39.validateMnemonic(trimmedMnemonic)) {
+    throw new Error('Invalid mnemonic phrase');
+  }
 
   // Derive address from mnemonic (before encrypting)
   const address = await deriveAddress(trimmedMnemonic, walletType);
@@ -190,14 +220,13 @@ export async function updateWalletBalance(
 export async function deleteWallet(id: string): Promise<void> {
   await withStorageLock(async () => {
     const wallets = await getWallets();
-    // Overwrite the deleted wallet's mnemonic before removing, so SQLite page is overwritten
     const target = wallets.find(w => w.id === id);
     if (target) {
-      // Overwrite with random data of the same string length (best-effort secure erasure)
+      // Phase 1: Overwrite mnemonic with random data and persist (overwrites ciphertext in storage)
       target.mnemonic = crypto.randomBytes(Math.ceil(target.mnemonic.length / 2)).toString('hex').slice(0, target.mnemonic.length);
       await AsyncStorage.setItem(WALLETS_KEY, JSON.stringify(wallets));
     }
-    // Now remove and write final state
+    // Phase 2: Remove wallet entry entirely
     const filtered = wallets.filter(w => w.id !== id);
     await AsyncStorage.setItem(WALLETS_KEY, JSON.stringify(filtered));
   });
@@ -255,6 +284,7 @@ function doubleHash(data: Buffer): Buffer {
 }
 
 function base58Encode(data: Buffer): string {
+  if (data.length === 0) return '';
   const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
   let num = BigInt('0x' + data.toString('hex'));
   let result = '';
@@ -298,7 +328,10 @@ export async function getWalletMnemonic(id: string, password: string = ''): Prom
     return decrypted;
   }
 
-  // Legacy unencrypted wallet — return as-is
+  // Legacy unencrypted wallet — validate before returning
+  if (!bip39.validateMnemonic(wallet.mnemonic)) {
+    throw new Error('Invalid mnemonic in legacy wallet');
+  }
   return wallet.mnemonic;
 }
 
@@ -341,9 +374,11 @@ function hash160(data: Buffer): Buffer {
 }
 
 function encodeCashAddr(prefix: string, type: number, hash: Buffer): string {
+  if (type !== 0 && type !== 1) throw new Error(`Invalid CashAddr type: ${type}`);
   // Determine size code from hash length
   const sizeMap: Record<number, number> = { 20: 0, 24: 1, 28: 2, 32: 3, 40: 4, 48: 5, 56: 6, 64: 7 };
-  const sizeCode = sizeMap[hash.length] ?? 0;
+  if (!(hash.length in sizeMap)) throw new Error(`Invalid hash length for CashAddr: ${hash.length}`);
+  const sizeCode = sizeMap[hash.length];
 
   // Pack version byte (type << 3 | size_code) with hash into 5-bit groups
   const versionByte = (type << 3) | sizeCode;

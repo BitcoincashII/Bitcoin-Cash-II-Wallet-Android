@@ -621,9 +621,9 @@
     "sort_by": "Seřadit podle"
   },
   "units": {
-    "BTC": "BTC",
+    "BTC": "BCH2",
     "MAX": "Max.",
-    "sat_vbyte": "sat/vByte",
+    "sat_vbyte": "sat/byte",
     "sats": "sats"
   },
   "addresses": {

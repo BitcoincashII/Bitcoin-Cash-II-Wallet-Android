@@ -4,8 +4,6 @@ import * as bip39 from 'bip39';
 import * as bitcoin from 'bitcoinjs-lib';
 import React, { Component } from 'react';
 import { Linking, StyleSheet, View } from 'react-native';
-// @ts-ignore theres no type declaration for this
-import BlueCrypto from 'react-native-blue-crypto';
 import wif from 'wif';
 
 import * as BlueElectrum from '../../blue_modules/BlueElectrum';
@@ -306,28 +304,17 @@ export default class SelfTest extends Component {
         // skipping RN-specific test
       }
 
-      // BlueCrypto test
+      // bip38 test (uses pure JS scryptsy fallback since react-native-blue-crypto was removed)
       if (typeof navigator !== 'undefined' && navigator.product === 'ReactNative') {
-        const hex = await BlueCrypto.scrypt('717765727479', '4749345a22b23cf3', 64, 8, 8, 32); // using non-default parameters to speed it up (not-bip38 compliant)
-        if (hex.toUpperCase() !== 'F36AB2DC12377C788D61E6770126D8A01028C8F6D8FE01871CE0489A1F696A90')
-          throw new Error('react-native-blue-crypto is not ok');
-      }
-
-      // bip38 test
-      if (typeof navigator !== 'undefined' && navigator.product === 'ReactNative') {
-        let callbackWasCalled = false;
         const decryptedKey = await bip38.decryptAsync(
           '6PnU5voARjBBykwSddwCdcn6Eu9EcsK24Gs5zWxbJbPZYW7eiYQP8XgKbN',
           'qwerty',
-          () => (callbackWasCalled = true),
         );
         assertStrictEqual(
           wif.encode(0x80, decryptedKey.privateKey, decryptedKey.compressed),
           'KxqRtpd9vFju297ACPKHrGkgXuberTveZPXbRDiQ3MXZycSQYtjc',
           'bip38 failed',
         );
-        // bip38 with BlueCrypto doesn't support progress callback
-        assertStrictEqual(callbackWasCalled, false, "bip38 doesn't use BlueCrypto");
       }
 
       // slip39 test
@@ -343,7 +330,7 @@ export default class SelfTest extends Component {
       //
 
       if (typeof navigator !== 'undefined' && navigator.product === 'ReactNative') {
-        assertStrictEqual(await Linking.canOpenURL('https://bluewallet.io/'), true, 'Linking can not open https url');
+        assertStrictEqual(await Linking.canOpenURL('https://bitcoincashii.org/'), true, 'Linking can not open https url');
       } else {
         // skipping RN-specific test'
       }
@@ -403,7 +390,7 @@ const SelfTestContent: React.FC<{ state: TState; onPressImportDocument: () => vo
           })()
         )}
         <BlueSpacing20 />
-        <SaveFileButton fileName="bluewallet-selftest.txt" fileContent={'Success on ' + new Date().toUTCString()}>
+        <SaveFileButton fileName="bch2-selftest.txt" fileContent={'Success on ' + new Date().toUTCString()}>
           <Button title="Test Save to Storage" />
         </SaveFileButton>
         <BlueSpacing20 />

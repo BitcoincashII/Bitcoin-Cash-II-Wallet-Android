@@ -28,7 +28,7 @@
         android:allowBackup="false"
         android:largeHeap="true"
         android:extractNativeLibs="true"
-        android:usesCleartextTraffic="true"
+        android:usesCleartextTraffic="false"
         android:supportsRtl="true"
         android:theme="@style/AppTheme"
         android:networkSecurityConfig="@xml/network_security_config"
@@ -36,7 +36,7 @@
 
         <meta-data
             android:name="com.dieam.reactnativepushnotification.notification_channel_name"
-            android:value="BlueWallet notifications" />
+            android:value="Bitcoin Cash II Wallet notifications" />
         <meta-data
             android:name="com.dieam.reactnativepushnotification.notification_channel_description"
             android:value="Notifications about incoming payments" />
@@ -121,7 +121,7 @@
         <!-- Settings Activity alias for System Settings -->
         <activity-alias
             android:name=".SettingsActivityAlias"
-            android:label="BlueWallet Settings"
+            android:label="Bitcoin Cash II Wallet Settings"
             android:exported="true"
             android:targetActivity=".SettingsActivity">
             <intent-filter>
@@ -199,8 +199,8 @@
             </intent-filter>
         </activity>
 
-        <!-- TODO: Replace with BCH2 project Bugsnag API key before production release -->
-        <!-- <meta-data android:name="com.bugsnag.android.API_KEY" android:value="YOUR_BCH2_API_KEY_HERE" /> -->
+        <!-- Bugsnag: set a valid API key here to enable error reporting, or leave empty to disable -->
+        <meta-data android:name="com.bugsnag.android.ENABLED" android:value="false" />
     </application>
 
     <queries>

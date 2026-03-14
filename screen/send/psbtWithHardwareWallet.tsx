@@ -182,7 +182,11 @@ const PsbtWithHardwareWallet = () => {
   };
 
   const handleOnVerifyPressed = () => {
-    Linking.openURL('https://coinb.in/?verify=' + txHex);
+    // coinb.in is BTC-specific. BCH2 has no equivalent online tx verification tool yet.
+    // Copy hex to clipboard instead so user can verify manually.
+    if (txHex) {
+      Clipboard.setString(txHex);
+    }
   };
 
   const copyHexToClipboard = () => {

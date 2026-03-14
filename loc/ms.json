@@ -416,7 +416,7 @@
     "sort_status": "Keadaan"
   },
   "units": {
-    "BTC": "BTC",
+    "BTC": "BCH2",
     "MAX": "Maks",
     "sat_vbyte": "sat/vBait",
     "sats": "sat"

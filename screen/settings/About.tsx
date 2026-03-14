@@ -57,21 +57,21 @@ const About: React.FC = () => {
   }, [navigate]);
 
   const handleOnXPress = useCallback(() => {
-    Linking.openURL('https://x.com/bluewalletio');
+    Linking.openURL('https://x.com/bitcoincashii');
   }, []);
 
   const handleOnTelegramPress = useCallback(() => {
-    Linking.openURL('https://t.me/bluewallethat');
+    Linking.openURL('https://t.me/bitcoincashii');
   }, []);
 
   const handleOnGithubPress = useCallback(() => {
-    Linking.openURL('https://github.com/BlueWallet/BlueWallet');
+    Linking.openURL('https://github.com/Bitcoin-Cash-II/Bitcoin-Cash-II-Wallet-Android');
   }, []);
 
   const handleOnRatePress = useCallback(async () => {
     const storeOptions = {
       iOSAppId: '1376878040',
-      androidPackageName: 'io.bluewallet.bluewallet',
+      androidPackageName: 'org.bch2.wallet',
       androidMarket: AndroidMarket.GOOGLE,
     };
 
@@ -133,7 +133,7 @@ const About: React.FC = () => {
       },
       {
         id: 'x',
-        title: '@bluewalletio',
+        title: '@bitcoincashii',
         leftIcon: <Text style={[styles.xIcon, { color: colors.foregroundColor }]}>𝕏</Text>,
         onPress: handleOnXPress,
         section: 2,

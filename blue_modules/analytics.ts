@@ -5,28 +5,26 @@ import { BlueApp as BlueAppClass } from '../class';
 
 const BlueApp = BlueAppClass.getInstance();
 
-/**
- * in case Bugsnag was started, but user decided to opt out while using the app, we have this
- * flag `userHasOptedOut` and we forbid logging in `onError` handler
- * @type {boolean}
- */
 let userHasOptedOut: boolean = false;
+let bugsnagAvailable: boolean = false;
 
 (async () => {
-  // Don't try to start Bugsnag again as it's already initialized in native code
-  // Just configure the existing instance if tracking is allowed
-  const uniqueID = await getUniqueId();
-  const doNotTrack = await BlueApp.isDoNotTrackEnabled();
+  try {
+    bugsnagAvailable = Bugsnag.isStarted();
+  } catch {
+    bugsnagAvailable = false;
+  }
 
+  if (!bugsnagAvailable) return;
+
+  const doNotTrack = await BlueApp.isDoNotTrackEnabled();
   if (doNotTrack) {
     userHasOptedOut = true;
     return;
   }
 
-  // Configure the existing Bugsnag instance instead of starting a new one
+  const uniqueID = await getUniqueId();
   Bugsnag.setUser(uniqueID);
-
-  // Add additional configuration if needed
   Bugsnag.addOnError(function (event) {
     return !userHasOptedOut;
   });
@@ -40,7 +38,11 @@ A.setOptOut = (value: boolean) => {
 
 A.logError = (errorString: string) => {
   console.error(errorString);
-  Bugsnag.notify(new Error(String(errorString)));
+  if (bugsnagAvailable && !userHasOptedOut) {
+    try {
+      Bugsnag.notify(new Error(String(errorString)));
+    } catch {}
+  }
 };
 
 export default A;

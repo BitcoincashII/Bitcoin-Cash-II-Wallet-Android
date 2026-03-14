@@ -5,7 +5,7 @@ import { getApplicationName, getSystemName, getSystemVersion, getVersion, hasGms
 import { checkNotifications, requestNotifications, RESULTS } from 'react-native-permissions';
 import PushNotification, { ReceivedNotification } from 'react-native-push-notification';
 import loc from '../loc';
-import { groundControlUri } from './constants';
+import { groundControlUri, isGroundControlConfigured } from './constants';
 import { fetch } from '../util/fetch';
 
 const PUSH_TOKEN = 'PUSH_TOKEN';
@@ -14,6 +14,10 @@ const NOTIFICATIONS_STORAGE = 'NOTIFICATIONS_STORAGE';
 export const NOTIFICATIONS_NO_AND_DONT_ASK_FLAG = 'NOTIFICATIONS_NO_AND_DONT_ASK_FLAG';
 let alreadyConfigured = false;
 let baseURI = groundControlUri;
+
+// TODO: BCH2 push notification server is not yet available.
+// All GroundControl network calls are disabled until a BCH2-compatible
+// push notification server is deployed and its URL is set in constants.ts.
 
 type TPushToken = {
   token: string;
@@ -137,6 +141,11 @@ export const tryToObtainPermissions = async () => {
  * @returns {Promise<object>} Response object from API rest call
  */
 export const majorTomToGroundControl = async (addresses: string[], hashes: string[], txids: string[]) => {
+  if (!isGroundControlConfigured) {
+    console.debug('majorTomToGroundControl: Skipped - no BCH2 push notification server configured');
+    return;
+  }
+
   console.debug('majorTomToGroundControl: Starting notification registration', {
     addressCount: addresses?.length,
     hashCount: hashes?.length,
@@ -230,6 +239,17 @@ export const checkPermissions = async () => {
  * @returns {Promise<*>}
  */
 export const setLevels = async (levelAll: boolean) => {
+  if (!isGroundControlConfigured) {
+    console.debug('setLevels: Skipped - no BCH2 push notification server configured');
+    if (!levelAll) {
+      PushNotification.removeAllDeliveredNotifications();
+      PushNotification.setApplicationIconBadgeNumber(0);
+      PushNotification.cancelAllLocalNotifications();
+      await AsyncStorage.setItem(NOTIFICATIONS_NO_AND_DONT_ASK_FLAG, 'true');
+    }
+    return;
+  }
+
   const pushToken = await getPushToken();
   if (!pushToken || !pushToken.token || !pushToken.os) return;
 
@@ -282,6 +302,11 @@ export const addNotification = async (notification: TPayload) => {
 };
 
 const postTokenConfig = async () => {
+  if (!isGroundControlConfigured) {
+    console.debug('postTokenConfig: Skipped - no BCH2 push notification server configured');
+    return;
+  }
+
   console.debug('postTokenConfig: Starting token configuration');
   const pushToken = await getPushToken();
   console.debug('postTokenConfig: Retrieved push token:', !!pushToken);
@@ -415,6 +440,10 @@ export const configureNotifications = async (onProcessNotifications?: () => void
  * @returns {Promise<boolean>} TRUE if valid, FALSE otherwise
  */
 export const isGroundControlUriValid = async (uri: string) => {
+  if (!uri) {
+    return false;
+  }
+
   try {
     const response = await fetch(`${uri}/ping`, { headers: _getHeaders() });
     const json = await response.json();
@@ -443,6 +472,10 @@ export const getPushToken = async (): Promise<TPushToken> => {
  * @returns {Promise<{}|*>}
  */
 const getLevels = async () => {
+  if (!isGroundControlConfigured) {
+    return {};
+  }
+
   const pushToken = await getPushToken();
   if (!pushToken || !pushToken.token || !pushToken.os) return;
 
@@ -472,6 +505,11 @@ const getLevels = async () => {
  * @returns {Promise<object>} Response object from API rest call
  */
 export const unsubscribe = async (addresses: string[], hashes: string[], txids: string[]) => {
+  if (!isGroundControlConfigured) {
+    console.debug('unsubscribe: Skipped - no BCH2 push notification server configured');
+    return;
+  }
+
   if (!Array.isArray(addresses) || !Array.isArray(hashes) || !Array.isArray(txids)) {
     throw new Error('No addresses, hashes, or txids provided');
   }

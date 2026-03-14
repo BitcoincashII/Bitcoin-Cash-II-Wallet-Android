@@ -455,9 +455,9 @@
     "sort_status": " Trạng thái"
   },
   "units": {
-    "BTC": "BTC",
+    "BTC": "BCH2",
     "MAX": "Tối đa",
-    "sat_vbyte": "sat/vByte",
+    "sat_vbyte": "sat/byte",
     "sats": "sats"
   },
   "addresses": {

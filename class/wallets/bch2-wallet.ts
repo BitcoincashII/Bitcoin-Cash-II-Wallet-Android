@@ -169,7 +169,8 @@ export class BCH2Wallet extends AbstractWallet {
 
     // Normalize: only strip the BCH2 prefix for comparison
     const normalize = (addr: string) => {
-      return addr.toLowerCase().replace('bitcoincashii:', '');
+      const lower = addr.toLowerCase();
+      return lower.startsWith('bitcoincashii:') ? lower.slice('bitcoincashii:'.length) : lower;
     };
 
     return normalize(ourAddress) === normalize(address);
@@ -214,6 +215,17 @@ export class BCH2Wallet extends AbstractWallet {
     }
   }
 
+  /**
+   * Strip sensitive key material (WIF) from UTXOs before serialization
+   * to prevent private keys from leaking into logs, state dumps, or error reports.
+   */
+  prepareForSerialization(): void {
+    this._utxo = this._utxo.map(u => {
+      const { wif: _wif, ...rest } = u as any;
+      return rest;
+    });
+  }
+
   isSegwit(): boolean {
     return false; // BCH2 doesn't support SegWit
   }
@@ -236,9 +248,11 @@ function hash160(data: Buffer): Buffer {
  * Encode pubkey hash to CashAddr format
  */
 function encodeCashAddr(prefix: string, type: number, hash: Buffer): string {
+  if (type !== 0 && type !== 1) throw new Error(`Invalid CashAddr type: ${type}`);
   // Determine size code from hash length
   const sizeMap: Record<number, number> = { 20: 0, 24: 1, 28: 2, 32: 3, 40: 4, 48: 5, 56: 6, 64: 7 };
-  const sizeCode = sizeMap[hash.length] ?? 0;
+  if (!(hash.length in sizeMap)) throw new Error(`Invalid hash length for CashAddr: ${hash.length}`);
+  const sizeCode = sizeMap[hash.length];
 
   // Pack version byte (type << 3 | sizeCode) as 8 bits with hash into 5-bit groups
   const versionByte = (type << 3) | sizeCode;

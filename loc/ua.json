@@ -304,9 +304,9 @@
     "sort_status": "Статус"
   },
   "units": {
-    "BTC": "BTC",
+    "BTC": "BCH2",
     "MAX": "Макс",
-    "sat_vbyte": "sat/vByte"
+    "sat_vbyte": "sat/byte"
   },
   "addresses": {
     "sign_sign": "Підписати",

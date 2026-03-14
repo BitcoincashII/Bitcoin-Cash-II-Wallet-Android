@@ -155,6 +155,7 @@ export const PasswordInput = forwardRef<PasswordInputHandle, PasswordInputProps>
           onSubmitEditing={handleSubmit}
           returnKeyType="done"
           enablesReturnKeyAutomatically={true}
+          maxLength={256}
         />
 
         {isSuccess && (

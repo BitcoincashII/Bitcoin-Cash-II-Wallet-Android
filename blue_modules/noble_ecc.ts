@@ -24,6 +24,10 @@ export interface TinySecp256k1InterfaceExtended {
   privateNegate(d: Uint8Array): Uint8Array;
 
   signDER(h: Uint8Array, d: Uint8Array, e?: Uint8Array): Uint8Array;
+
+  signSchnorr(h: Uint8Array, d: Uint8Array, e?: Uint8Array): Uint8Array;
+
+  verifySchnorr(h: Uint8Array, Q: Uint8Array, signature: Uint8Array): boolean;
 }
 
 necc.utils.sha256Sync = (...messages: Uint8Array[]): Uint8Array => {
