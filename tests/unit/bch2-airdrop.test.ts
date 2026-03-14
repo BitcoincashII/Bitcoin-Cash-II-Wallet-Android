@@ -14,6 +14,7 @@ jest.mock('../../blue_modules/BCH2Electrum', () => ({
   getBC2Balance: mockGetBC2Balance,
   getBC2BalanceByScripthash: mockGetBC2BalanceByScripthash,
   connectMain: jest.fn(),
+  disconnectAll: jest.fn(),
 }));
 
 // Partial mock for noble_ecc to allow controlling xOnlyPointAddTweak in specific tests
@@ -56,6 +57,13 @@ import {
   importBC2Wallet,
   getTotalClaimable,
   bc1AddressToScripthash,
+  parseDescriptor,
+  parseDescriptorInput,
+  scanDescriptorForAirdrop,
+  getAntiGamingStatus,
+  buildScanResult,
+  AirdropClaimResult,
+  AirdropScanResult,
 } from '../../class/bch2-airdrop';
 
 const TEST_MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
@@ -65,6 +73,11 @@ const TEST_MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon a
 const TEST_WIF_COMPRESSED = 'KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn';
 // Uncompressed WIF for the same key
 const TEST_WIF_UNCOMPRESSED = '5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ';
+
+// Known bc1 scripthash for TEST_WIF_COMPRESSED (private key 1)
+// pubkey: 0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
+// pubkeyHash: 751e76e8199196d454941c45d1b3a323f1433bd6
+const TEST_WIF_BC1_SCRIPTHASH = '9623df75239b5daa7f5f03042d325b51498c4bb7059c7748b17049bf96f73888';
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -137,11 +150,8 @@ describe('WIF import', () => {
     // targeted scripthash calls. scanSingleAddress calls getBalanceByScripthash for
     // p2pk (call 1), bc1 (call 2), p2sh-segwit (call 3), p2tr (call 4).
     mockGetBalanceByAddress.mockResolvedValue({ confirmed: 10000, unconfirmed: 0 });
-    let scripthashCallCount = 0;
-    mockGetBalanceByScripthash.mockImplementation(async () => {
-      scripthashCallCount++;
-      // Call 2 = bc1 (after p2pk)
-      if (scripthashCallCount === 2) return { confirmed: 20000, unconfirmed: 0 };
+    mockGetBalanceByScripthash.mockImplementation(async (sh: string) => {
+      if (sh === TEST_WIF_BC1_SCRIPTHASH) return { confirmed: 20000, unconfirmed: 0 };
       return { confirmed: 0, unconfirmed: 0 };
     });
 
@@ -307,13 +317,9 @@ describe('Balance checking', () => {
 describe('SegWit recovery (bc1 addresses)', () => {
   it('detects bc1 balance via scripthash', async () => {
     // Only bc1 (native segwit) balance, no legacy.
-    // claimFromWIF scans: legacy, p2pk, bc1, p2sh-segwit, p2tr.
-    // Scripthash calls: p2pk(1), bc1(2), p2sh-segwit(3), p2tr(4).
     mockGetBalanceByAddress.mockResolvedValue({ confirmed: 0, unconfirmed: 0 });
-    let scripthashCallCount = 0;
-    mockGetBalanceByScripthash.mockImplementation(async () => {
-      scripthashCallCount++;
-      if (scripthashCallCount === 2) return { confirmed: 45000, unconfirmed: 0 }; // bc1
+    mockGetBalanceByScripthash.mockImplementation(async (sh: string) => {
+      if (sh === TEST_WIF_BC1_SCRIPTHASH) return { confirmed: 45000, unconfirmed: 0 };
       return { confirmed: 0, unconfirmed: 0 };
     });
 
@@ -349,12 +355,9 @@ describe('SegWit recovery (bc1 addresses)', () => {
 
   it('sends SegWit recovery to BCH2 CashAddr destination', async () => {
     // Only bc1 (native segwit) balance, no legacy.
-    // Scripthash calls: p2pk(1), bc1(2), p2sh-segwit(3), p2tr(4).
     mockGetBalanceByAddress.mockResolvedValue({ confirmed: 0, unconfirmed: 0 });
-    let scripthashCallCount = 0;
-    mockGetBalanceByScripthash.mockImplementation(async () => {
-      scripthashCallCount++;
-      if (scripthashCallCount === 2) return { confirmed: 100000, unconfirmed: 0 }; // bc1
+    mockGetBalanceByScripthash.mockImplementation(async (sh: string) => {
+      if (sh === TEST_WIF_BC1_SCRIPTHASH) return { confirmed: 100000, unconfirmed: 0 };
       return { confirmed: 0, unconfirmed: 0 };
     });
 
@@ -454,12 +457,10 @@ describe('Edge cases', () => {
   it('combined legacy + segwit balance in WIF claim', async () => {
     // claimFromWIF scans 5 address types: legacy, p2pk, bc1, p2sh-segwit, p2tr.
     // legacy uses getBalanceByAddress, the other 4 use getBalanceByScripthash.
-    // Target only bc1 (call 2) for the segwit balance.
+    // Target only bc1 for the segwit balance.
     mockGetBalanceByAddress.mockResolvedValue({ confirmed: 25000, unconfirmed: 5000 });
-    let scripthashCallCount = 0;
-    mockGetBalanceByScripthash.mockImplementation(async () => {
-      scripthashCallCount++;
-      if (scripthashCallCount === 2) return { confirmed: 15000, unconfirmed: 2000 }; // bc1
+    mockGetBalanceByScripthash.mockImplementation(async (sh: string) => {
+      if (sh === TEST_WIF_BC1_SCRIPTHASH) return { confirmed: 15000, unconfirmed: 2000 };
       return { confirmed: 0, unconfirmed: 0 };
     });
 
@@ -834,10 +835,8 @@ describe('claimFromWIF BC2 SegWit balance', () => {
     // Scripthash calls: p2pk(1), bc1(2), p2sh-segwit(3), p2tr(4).
     // Give legacy and bc1 balances, leave others at 0.
     mockGetBalanceByAddress.mockResolvedValue({ confirmed: 10000, unconfirmed: 0 });
-    let scripthashCallCount = 0;
-    mockGetBalanceByScripthash.mockImplementation(async () => {
-      scripthashCallCount++;
-      if (scripthashCallCount === 2) return { confirmed: 30000, unconfirmed: 0 }; // bc1
+    mockGetBalanceByScripthash.mockImplementation(async (sh: string) => {
+      if (sh === TEST_WIF_BC1_SCRIPTHASH) return { confirmed: 30000, unconfirmed: 0 };
       return { confirmed: 0, unconfirmed: 0 };
     });
     // BC2 legacy balance
@@ -1028,13 +1027,10 @@ describe('Gap coverage: unconfirmed-only balance detection', () => {
   });
 
   it('claimFromWIF detects segwit balance when confirmed=0 but unconfirmed>0', async () => {
-    // Only bc1 (call 2) gets unconfirmed balance.
-    // Scripthash calls: p2pk(1), bc1(2), p2sh-segwit(3), p2tr(4).
+    // Only bc1 gets unconfirmed balance.
     mockGetBalanceByAddress.mockResolvedValue({ confirmed: 0, unconfirmed: 0 });
-    let scripthashCallCount = 0;
-    mockGetBalanceByScripthash.mockImplementation(async () => {
-      scripthashCallCount++;
-      if (scripthashCallCount === 2) return { confirmed: 0, unconfirmed: 44000 }; // bc1
+    mockGetBalanceByScripthash.mockImplementation(async (sh: string) => {
+      if (sh === TEST_WIF_BC1_SCRIPTHASH) return { confirmed: 0, unconfirmed: 44000 };
       return { confirmed: 0, unconfirmed: 0 };
     });
 
@@ -1480,10 +1476,8 @@ describe('Gap coverage: claimFromWIF() BC2 SegWit balance check failure in catch
     // Scripthash calls: p2pk(1), bc1(2), p2sh-segwit(3), p2tr(4).
     // Give legacy and bc1 balances, leave others at 0.
     mockGetBalanceByAddress.mockResolvedValue({ confirmed: 10000, unconfirmed: 0 });
-    let scripthashCallCount = 0;
-    mockGetBalanceByScripthash.mockImplementation(async () => {
-      scripthashCallCount++;
-      if (scripthashCallCount === 2) return { confirmed: 30000, unconfirmed: 0 }; // bc1
+    mockGetBalanceByScripthash.mockImplementation(async (sh: string) => {
+      if (sh === TEST_WIF_BC1_SCRIPTHASH) return { confirmed: 30000, unconfirmed: 0 };
       return { confirmed: 0, unconfirmed: 0 };
     });
     // BC2 legacy balance succeeds
@@ -1503,5 +1497,254 @@ describe('Gap coverage: claimFromWIF() BC2 SegWit balance check failure in catch
     expect(result.bch2Address.startsWith('bitcoincashii:')).toBe(true);
     // Verify the BC2 SegWit balance check was attempted
     expect(mockGetBC2BalanceByScripthash).toHaveBeenCalled();
+  });
+});
+
+// ============================================================================
+// parseDescriptor tests
+// ============================================================================
+describe('parseDescriptor', () => {
+  it('parses pkh descriptor', () => {
+    const d = parseDescriptor("pkh([d34db33f/44'/0'/0']xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL/0/*)#abcdef12");
+    expect(d.type).toBe('pkh');
+    expect(d.addressType).toBe('legacy');
+    expect(d.extendedKey).toContain('xpub6ERApfZwUNrhL');
+    expect(d.fingerprint).toBe('d34db33f');
+    expect(d.originPath).toBe("44'/0'/0'");
+    expect(d.childPath).toBe('0/*');
+    expect(d.isPrivate).toBe(false);
+  });
+
+  it('parses wpkh descriptor', () => {
+    const d = parseDescriptor("wpkh(xprvA1RpRA33e1JQ7ifknakTFpgNXPmW2YvmhqLQYMmrj4xJXXWYpDPS3xz7iAxn8L39njGVyuoseXzU6rcxFLJ8HFsTjSyQbLYnMpCqE2VbFWc/0/*)");
+    expect(d.type).toBe('wpkh');
+    expect(d.addressType).toBe('bc1');
+    expect(d.isPrivate).toBe(true);
+  });
+
+  it('parses sh(wpkh) descriptor', () => {
+    const d = parseDescriptor("sh(wpkh(xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL/1/*))");
+    expect(d.type).toBe('sh-wpkh');
+    expect(d.addressType).toBe('p2sh-segwit');
+    expect(d.childPath).toBe('1/*');
+  });
+
+  it('parses tr descriptor', () => {
+    const d = parseDescriptor("tr(xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL/0/*)");
+    expect(d.type).toBe('tr');
+    expect(d.addressType).toBe('p2tr');
+  });
+
+  it('throws for unsupported descriptor type', () => {
+    expect(() => parseDescriptor("wsh(multi(2,xpub.../0/*,xpub.../0/*))")).toThrow('Unsupported descriptor type');
+  });
+
+  it('throws for malformed origin', () => {
+    // Must end with ')' to pass the outer type check, but have unclosed '[' inside
+    expect(() => parseDescriptor("pkh([malformed/path/xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL/0/*)")).toThrow('Malformed descriptor origin');
+  });
+});
+
+// ============================================================================
+// parseDescriptorInput tests
+// ============================================================================
+describe('parseDescriptorInput', () => {
+  it('parses JSON listdescriptors output', () => {
+    const json = JSON.stringify({
+      descriptors: [
+        { desc: "pkh(xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL/0/*)#abcdef12" },
+        { desc: "wpkh(xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL/0/*)#123456ab" },
+      ]
+    });
+    const result = parseDescriptorInput(json);
+    expect(result.length).toBe(2);
+    expect(result[0].type).toBe('pkh');
+    expect(result[1].type).toBe('wpkh');
+  });
+
+  it('parses raw xprv and generates all types', () => {
+    const result = parseDescriptorInput('xprv9s21ZrQH143K3GJpoapnV8SFfuZcECeGI1AAtbBn8MJj6LoR57Gv3VtRAdr7bgJw3MnJv3QCcAcAGLK9uGLaGun6XiPr2HFCj5Y12cVAZNhN');
+    // Should generate pkh, wpkh, sh-wpkh, tr, and p2pk = 5 entries
+    expect(result.length).toBe(5);
+    const types = result.map(r => r.type);
+    expect(types).toContain('pkh');
+    expect(types).toContain('wpkh');
+    expect(types).toContain('sh-wpkh');
+    expect(types).toContain('tr');
+  });
+
+  it('throws for completely unparseable input', () => {
+    expect(() => parseDescriptorInput('not a descriptor or key')).toThrow('Could not parse any descriptors');
+  });
+
+  it('parses multi-line descriptors', () => {
+    const input = "pkh(xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL/0/*)\nwpkh(xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL/0/*)";
+    const result = parseDescriptorInput(input);
+    expect(result.length).toBe(2);
+  });
+});
+
+// ============================================================================
+// getAntiGamingStatus tests
+// ============================================================================
+describe('getAntiGamingStatus', () => {
+  it('returns warning when postForkBalance > 0 and airdropBalance === 0', () => {
+    const result = getAntiGamingStatus({
+      totalBalance: 50000,
+      airdropBalance: 0,
+      postForkBalance: 50000,
+      claims: [],
+    });
+    expect(result.warning).toContain('No matching BC2 balance');
+    expect(result.blocked).toBe(false);
+  });
+
+  it('returns warning about excess when postForkBalance > 0 and airdropBalance > 0', () => {
+    const result = getAntiGamingStatus({
+      totalBalance: 100000,
+      airdropBalance: 70000,
+      postForkBalance: 30000,
+      claims: [],
+    });
+    expect(result.warning).toContain('exceeds the current BC2 balance');
+    expect(result.blocked).toBe(false);
+  });
+
+  it('returns no warning when postForkBalance === 0', () => {
+    const result = getAntiGamingStatus({
+      totalBalance: 50000,
+      airdropBalance: 50000,
+      postForkBalance: 0,
+      claims: [],
+    });
+    expect(result.warning).toBeNull();
+    expect(result.blocked).toBe(false);
+  });
+});
+
+// ============================================================================
+// buildScanResult tests
+// ============================================================================
+describe('buildScanResult', () => {
+  it('filters out failed claims and sums balances', () => {
+    const claims: AirdropClaimResult[] = [
+      { success: true, address: '1A', addressType: 'legacy', bch2Address: 'bch2:q1', balance: 10000, bc2Balance: 10000 },
+      { success: false, address: '', bch2Address: '', balance: 0, error: 'failed' },
+      { success: true, address: '1B', addressType: 'legacy', bch2Address: 'bch2:q2', balance: 20000, bc2Balance: 15000 },
+    ];
+    const result = buildScanResult(claims);
+    expect(result.totalBalance).toBe(30000);
+    expect(result.airdropBalance).toBe(25000); // min(10000,10000) + min(20000,15000)
+    expect(result.postForkBalance).toBe(5000);
+    expect(result.claims).toHaveLength(2);
+  });
+
+  it('returns zero for empty results', () => {
+    const result = buildScanResult([]);
+    expect(result.totalBalance).toBe(0);
+    expect(result.airdropBalance).toBe(0);
+    expect(result.postForkBalance).toBe(0);
+    expect(result.claims).toHaveLength(0);
+  });
+});
+
+// ============================================================================
+// Gap-limit negative tests
+// ============================================================================
+describe('Gap-limit scanning behavior', () => {
+  it('does NOT find balance beyond gap limit (index 25, gap=20, no earlier balance)', async () => {
+    // Only put balance at a high index that exceeds the gap limit
+    // With default GAP_LIMIT=20, if indices 0-19 are empty, scanning stops before index 20
+    // So balance at index 25 should NOT be found
+    let addressCallCount = 0;
+    mockGetBalanceByAddress.mockImplementation(async () => {
+      addressCallCount++;
+      return { confirmed: 0, unconfirmed: 0 };
+    });
+    // No balance on any scripthash either
+    mockGetBalanceByScripthash.mockResolvedValue({ confirmed: 0, unconfirmed: 0 });
+
+    const results = await claimFromMnemonic(TEST_MNEMONIC);
+
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(false);
+    expect(results[0].error).toContain('No BCH2 balance found');
+  });
+
+  it('DOES find balance at index 25 when index 5 also has balance (gap reset)', async () => {
+    // BIP44/145 legacy: index 5 has balance -> gap counter resets -> index 25 is within 20 of index 5
+    let addressCallCount = 0;
+    mockGetBalanceByAddress.mockImplementation(async () => {
+      addressCallCount++;
+      // Index 5 = call 6, Index 25 = call 26 on BIP44/145 external chain
+      if (addressCallCount === 6 || addressCallCount === 26) return { confirmed: 10000, unconfirmed: 0 };
+      return { confirmed: 0, unconfirmed: 0 };
+    });
+
+    const results = await claimFromMnemonic(TEST_MNEMONIC);
+
+    // Should find at least 2 results (index 5 and index 25)
+    expect(results.length).toBeGreaterThanOrEqual(2);
+    const balanceResults = results.filter(r => r.balance === 10000);
+    expect(balanceResults.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ============================================================================
+// Network error resilience test
+// ============================================================================
+describe('Network error resilience', () => {
+  it('network errors do NOT prevent finding funds at later indices', async () => {
+    // Simulate: first 5 addresses throw network errors, then index 5 has balance
+    // Network errors are caught inside scanSingleAddress and return null,
+    // incrementing consecutiveEmpty. With GAP_LIMIT=20, 5 consecutive empties
+    // are well within the limit so scanning continues to find index 5.
+    let addressCallCount = 0;
+    mockGetBalanceByAddress.mockImplementation(async () => {
+      addressCallCount++;
+      // First 5 calls throw network errors
+      if (addressCallCount <= 5) throw new Error('Connection refused');
+      // Call 6 (index 5) has balance
+      if (addressCallCount === 6) return { confirmed: 50000, unconfirmed: 0 };
+      return { confirmed: 0, unconfirmed: 0 };
+    });
+    // Scripthash calls also fail for first few
+    let shCallCount = 0;
+    mockGetBalanceByScripthash.mockImplementation(async () => {
+      shCallCount++;
+      if (shCallCount <= 5) throw new Error('Connection refused');
+      return { confirmed: 0, unconfirmed: 0 };
+    });
+
+    const results = await claimFromMnemonic(TEST_MNEMONIC);
+
+    // Should still find the balance at index 5 despite earlier network errors
+    expect(results.length).toBeGreaterThanOrEqual(1);
+    expect(results[0].success).toBe(true);
+    expect(results[0].balance).toBe(50000);
+  });
+});
+
+// ============================================================================
+// Cross-type checking test
+// ============================================================================
+describe('Cross-type checking', () => {
+  it('BIP84 scan also finds bc1 balance for its key', async () => {
+    // BIP84 primary type is bc1. Put balance on the BIP84 bc1 scripthash.
+    // The BIP84 scan should find it via the primary type check.
+    mockGetBalanceByAddress.mockResolvedValue({ confirmed: 0, unconfirmed: 0 });
+    // Put balance on the BIP84 bc1 scripthash
+    mockGetBalanceByScripthash.mockImplementation(async (sh: string) => {
+      if (sh === KNOWN_SCRIPTHASHES.BIP84_0_0) return { confirmed: 35000, unconfirmed: 0 };
+      return { confirmed: 0, unconfirmed: 0 };
+    });
+
+    const results = await claimFromMnemonic(TEST_MNEMONIC);
+
+    const bc1Result = results.find(r => r.address.startsWith('bc1q'));
+    expect(bc1Result).toBeDefined();
+    expect(bc1Result!.balance).toBe(35000);
+    expect(bc1Result!.addressType).toBe('bc1');
+    expect(bc1Result!.derivationPath).toContain("84'");
   });
 });

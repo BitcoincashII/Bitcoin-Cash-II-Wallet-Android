@@ -21,6 +21,18 @@ const ECPair: ECPairAPI = ECPairFactory(ecc);
 const bip32 = BIP32Factory(ecc);
 const crypto = require('crypto');
 
+/**
+ * Distinguishes network/Electrum failures from confirmed-zero-balance responses.
+ * scanChainWithGapLimit does NOT increment the gap counter for network errors,
+ * preventing intermittent Electrum outages from causing missed funds.
+ */
+export class ElectrumNetworkError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ElectrumNetworkError';
+  }
+}
+
 // CashAddr character set
 const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 
@@ -186,6 +198,7 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
     const MAX_INDEX = 200; // Hard cap to prevent infinite scanning
     const MAX_ACCOUNTS = 5; // Scan accounts 0-4
     const BATCH_SIZE = 5;   // Parallel queries per batch
+    const MAX_CONSECUTIVE_NET_ERRORS = 10; // Give up chain after this many consecutive network errors
 
     /**
      * Scan a derivation chain using gap-limit logic.
@@ -199,12 +212,13 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
       primaryType: 'legacy' | 'bc1' | 'p2sh-segwit' | 'p2tr',
     ): Promise<void> {
       let consecutiveEmpty = 0;
+      let consecutiveNetErrors = 0;
       let index = 0;
 
-      while (consecutiveEmpty < GAP_LIMIT && index < MAX_INDEX) {
+      while (consecutiveEmpty < GAP_LIMIT && index < MAX_INDEX && consecutiveNetErrors < MAX_CONSECUTIVE_NET_ERRORS) {
         // Batch BATCH_SIZE addresses at a time for performance
         const batchEnd = Math.min(index + BATCH_SIZE, MAX_INDEX);
-        const batchPromises: Promise<{ idx: number; claims: AirdropClaimResult[] }>[] = [];
+        const batchPromises: Promise<{ idx: number; claims: AirdropClaimResult[]; networkError: boolean }>[] = [];
 
         for (let i = index; i < batchEnd; i++) {
           const idx = i;
@@ -214,6 +228,7 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
             const publicKey = Buffer.from(child.publicKey);
             const derivPath = `${pathPrefix}/${chain}/${idx}`;
             const foundClaims: AirdropClaimResult[] = [];
+            let hadNetworkError = false;
 
             // Check all address types for this key
             const typesToCheck: Array<AirdropClaimResult['addressType']> = [primaryType];
@@ -232,22 +247,33 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
                     foundClaims.push(claim);
                   }
                 }
-              } catch {
-                // Skip failed type
+              } catch (err) {
+                // Network errors should NOT count toward gap limit
+                if (err instanceof ElectrumNetworkError) {
+                  hadNetworkError = true;
+                }
+                // Other errors (e.g. invalid key) are silently skipped
               }
             }
-            return { idx, claims: foundClaims };
+            return { idx, claims: foundClaims, networkError: hadNetworkError && foundClaims.length === 0 };
           })());
         }
 
         const batchResults = await Promise.all(batchPromises);
 
-        for (const { claims: foundClaims } of batchResults) {
+        for (const { claims: foundClaims, networkError } of batchResults) {
           if (foundClaims.length > 0) {
             results.push(...foundClaims);
             consecutiveEmpty = 0;
+            consecutiveNetErrors = 0;
+          } else if (networkError) {
+            // Network errors don't count toward gap limit (address may have funds)
+            // but we cap consecutive network errors to avoid infinite scanning
+            consecutiveNetErrors++;
           } else {
+            // Confirmed empty address
             consecutiveEmpty++;
+            consecutiveNetErrors = 0;
           }
         }
 
@@ -256,19 +282,21 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
     }
 
     // All derivation path configs: [BIP standard, coin types, address type]
+    // Include coin type 145 (BCH) for BIP49/84/86 — some BCH wallets used these paths
     const pathConfigs: Array<{
       bip: number;
       coinTypes: number[];
       addressType: 'legacy' | 'bc1' | 'p2sh-segwit' | 'p2tr';
     }> = [
       { bip: 44, coinTypes: [0, 145], addressType: 'legacy' },
-      { bip: 49, coinTypes: [0], addressType: 'p2sh-segwit' },
-      { bip: 84, coinTypes: [0], addressType: 'bc1' },
-      { bip: 86, coinTypes: [0], addressType: 'p2tr' },
+      { bip: 49, coinTypes: [0, 145], addressType: 'p2sh-segwit' },
+      { bip: 84, coinTypes: [0, 145], addressType: 'bc1' },
+      { bip: 86, coinTypes: [0, 145], addressType: 'p2tr' },
     ];
 
     for (const config of pathConfigs) {
       for (const coinType of config.coinTypes) {
+        let emptyAccountStreak = 0;
         for (let account = 0; account < MAX_ACCOUNTS; account++) {
           const accountPath = `m/${config.bip}'/${coinType}'/${account}'`;
           let accountNode: BIP32Interface;
@@ -283,13 +311,20 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
             await scanChainWithGapLimit(accountNode, chain, accountPath, config.addressType);
           }
 
-          // If no results found on account > 0 for this path, skip higher accounts
+          // Account gap tolerance of 2: skip higher accounts only after
+          // 2 consecutive empty accounts (handles non-sequential account usage)
           if (account > 0 && !results.some(r => r.derivationPath?.startsWith(accountPath))) {
-            break;
+            emptyAccountStreak++;
+            if (emptyAccountStreak >= 2) break;
+          } else {
+            emptyAccountStreak = 0;
           }
         }
       }
     }
+
+    // Clean up: disconnect Electrum clients after scan
+    try { BCH2Electrum.disconnectAll(); } catch {}
 
     if (results.length === 0) {
       return [{
@@ -1082,9 +1117,9 @@ export function parseDescriptorInput(input: string): ParsedDescriptor[] {
 const DESCRIPTOR_ACCOUNT_PATHS: Record<string, string[]> = {
   legacy: ["m/44'/0'/0'", "m/44'/145'/0'"],
   p2pk: ["m/44'/0'/0'", "m/44'/145'/0'"],
-  bc1: ["m/84'/0'/0'"],
-  'p2sh-segwit': ["m/49'/0'/0'"],
-  p2tr: ["m/86'/0'/0'"],
+  bc1: ["m/84'/0'/0'", "m/84'/145'/0'"],
+  'p2sh-segwit': ["m/49'/0'/0'", "m/49'/145'/0'"],
+  p2tr: ["m/86'/0'/0'", "m/86'/145'/0'"],
 };
 
 const DESCRIPTOR_GAP_LIMIT = 20;
@@ -1100,6 +1135,8 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
   const claims: AirdropClaimResult[] = [];
   const seenKeys = new Set<string>();
 
+  const DESCRIPTOR_MAX_NET_ERRORS = 10;
+
   async function scanChainGapLimit(
     parentNode: BIP32Interface,
     chain: number,
@@ -1107,11 +1144,12 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
     primaryType: NonNullable<AirdropClaimResult['addressType']>,
   ): Promise<void> {
     let consecutiveEmpty = 0;
+    let consecutiveNetErrors = 0;
     let index = 0;
 
-    while (consecutiveEmpty < DESCRIPTOR_GAP_LIMIT && index < DESCRIPTOR_MAX_INDEX) {
+    while (consecutiveEmpty < DESCRIPTOR_GAP_LIMIT && index < DESCRIPTOR_MAX_INDEX && consecutiveNetErrors < DESCRIPTOR_MAX_NET_ERRORS) {
       const batchEnd = Math.min(index + DESCRIPTOR_BATCH_SIZE, DESCRIPTOR_MAX_INDEX);
-      const batchPromises: Promise<AirdropClaimResult[]>[] = [];
+      const batchPromises: Promise<{ found: AirdropClaimResult[]; networkError: boolean }>[] = [];
 
       for (let i = index; i < batchEnd; i++) {
         const idx = i;
@@ -1120,6 +1158,7 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
           const pubkeyHash = hash160(Buffer.from(child.publicKey));
           const derivPath = `${pathPrefix}/${chain}/${idx}`;
           const found: AirdropClaimResult[] = [];
+          let hadNetworkError = false;
           const typesToCheck: Array<NonNullable<AirdropClaimResult['addressType']>> = [primaryType];
           if (primaryType !== 'legacy') typesToCheck.push('legacy');
           typesToCheck.push('p2pk');
@@ -1133,19 +1172,25 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
                   found.push(claim);
                 }
               }
-            } catch { /* skip */ }
+            } catch (err) {
+              if (err instanceof ElectrumNetworkError) hadNetworkError = true;
+            }
           }
-          return found;
+          return { found, networkError: hadNetworkError && found.length === 0 };
         })());
       }
 
       const batchResults = await Promise.all(batchPromises);
-      for (const found of batchResults) {
+      for (const { found, networkError } of batchResults) {
         if (found.length > 0) {
           claims.push(...found);
           consecutiveEmpty = 0;
+          consecutiveNetErrors = 0;
+        } else if (networkError) {
+          consecutiveNetErrors++;
         } else {
           consecutiveEmpty++;
+          consecutiveNetErrors = 0;
         }
       }
       index = batchEnd;
@@ -1181,6 +1226,9 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
     }
   }
 
+  // Clean up: disconnect Electrum clients after scan
+  try { BCH2Electrum.disconnectAll(); } catch {}
+
   const totalBalance = claims.reduce((sum, c) => sum + c.balance, 0);
   const airdropBalance = claims.reduce((sum, c) => {
     const bc2 = c.bc2Balance ?? 0;
@@ -1198,6 +1246,9 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
 /**
  * Scan a single address for BCH2 balance.
  * Handles different address types (legacy, bc1, p2sh-segwit, p2tr).
+ * Returns null for confirmed-zero balance.
+ * Throws ElectrumNetworkError for network failures (callers should not
+ * count these toward the gap limit).
  */
 async function scanSingleAddress(
   pubkeyHash: Buffer,
@@ -1238,8 +1289,10 @@ async function scanSingleAddress(
     }
   }
 
+  // Query BCH2 balance — throw ElectrumNetworkError on failure so callers
+  // can distinguish "confirmed zero" from "network error" for gap-limit logic
+  let total: number;
   try {
-    let total: number;
     if (addressType === 'legacy') {
       const balance = await BCH2Electrum.getBalanceByAddress(bch2Address);
       total = balance.confirmed + balance.unconfirmed;
@@ -1247,36 +1300,34 @@ async function scanSingleAddress(
       const balance = await BCH2Electrum.getBalanceByScripthash(scripthash);
       total = balance.confirmed + balance.unconfirmed;
     }
-
-    if (total > 0) {
-      let bc2Total = 0;
-      try {
-        if (addressType === 'legacy') {
-          const bc2Result = await BCH2Electrum.getBC2Balance(address);
-          bc2Total = bc2Result.confirmed + bc2Result.unconfirmed;
-        } else {
-          const bc2Result = await BCH2Electrum.getBC2BalanceByScripthash(scripthash);
-          bc2Total = bc2Result.confirmed + bc2Result.unconfirmed;
-        }
-      } catch {
-        // BC2 check failed
-      }
-
-      return {
-        success: true,
-        address,
-        addressType,
-        bch2Address,
-        balance: total,
-        bc2Balance: bc2Total,
-        derivationPath,
-      };
-    }
-  } catch {
-    // Skip failed address checks
+  } catch (err: any) {
+    throw new ElectrumNetworkError(err.message || 'Electrum query failed');
   }
 
-  return null;
+  if (total <= 0) return null; // Confirmed zero balance
+
+  let bc2Total = 0;
+  try {
+    if (addressType === 'legacy') {
+      const bc2Result = await BCH2Electrum.getBC2Balance(address);
+      bc2Total = bc2Result.confirmed + bc2Result.unconfirmed;
+    } else {
+      const bc2Result = await BCH2Electrum.getBC2BalanceByScripthash(scripthash);
+      bc2Total = bc2Result.confirmed + bc2Result.unconfirmed;
+    }
+  } catch {
+    // BC2 check failed — non-critical, continue with bc2Total=0
+  }
+
+  return {
+    success: true,
+    address,
+    addressType,
+    bch2Address,
+    balance: total,
+    bc2Balance: bc2Total,
+    derivationPath,
+  };
 }
 
 /**

@@ -963,6 +963,23 @@ export async function getBalanceByAddressRpc(address: string): Promise<{ confirm
   }
 }
 
+/**
+ * Disconnect Electrum clients and clean up resources.
+ * Call after airdrop scan or when shutting down.
+ */
+export function disconnectAll(): void {
+  if (mainClient) {
+    try { mainClient.close(); } catch {}
+    mainClient = undefined;
+    mainConnected = false;
+  }
+  if (bc2Client) {
+    try { bc2Client.close(); } catch {}
+    bc2Client = undefined;
+    bc2Connected = false;
+  }
+}
+
 export default {
   // BCH2 functions
   getBalanceByAddress,
@@ -988,4 +1005,6 @@ export default {
   setRpcConfig,
   enableRpcFallback,
   getBalanceByAddressRpc,
+  // Cleanup
+  disconnectAll,
 };
