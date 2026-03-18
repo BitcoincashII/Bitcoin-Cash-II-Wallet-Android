@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.WindowManager
 import androidx.appcompat.app.AlertDialog
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
@@ -25,6 +26,8 @@ class MainActivity : ReactActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Prevent screenshots and screen recording of wallet content
+        window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         // react-native-screens override
         supportFragmentManager.fragmentFactory = RNScreensFragmentFactory()
         super.onCreate(null)
@@ -35,7 +38,7 @@ class MainActivity : ReactActivity() {
 
     override fun onResume() {
         super.onResume()
-        Log.d("MainActivity", "MainActivity resumed. Confirming single instance is active.")
+        if (BuildConfig.DEBUG) Log.d("MainActivity", "MainActivity resumed. Confirming single instance is active.")
         
         // Check if we should show cache cleared alert
         checkAndShowCacheClearedAlert()

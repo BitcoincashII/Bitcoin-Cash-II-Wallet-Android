@@ -10,8 +10,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.CAMERA" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.USE_FINGERPRINT" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -107,15 +107,12 @@
             </intent-filter>
         </activity>
 
-        <!-- Settings Activity - accessible from System Settings -->
+        <!-- Settings Activity - accessible via SettingsActivityAlias only -->
         <activity
             android:name=".SettingsActivity"
             android:label="@string/settings_title"
-            android:exported="true"
+            android:exported="false"
             android:theme="@style/Theme.AppCompat.DayNight.DarkActionBar">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-            </intent-filter>
         </activity>
 
         <!-- Settings Activity alias for System Settings -->
@@ -169,8 +166,6 @@
                 <data android:scheme="bluewallet" />
                 <data android:scheme="lapp" />
                 <data android:scheme="blue" />
-                <data android:scheme="http" />
-                <data android:scheme="https" />
             </intent-filter>
 
             <!-- Intent filter for importing other file types (but not launching the app) -->

@@ -2,6 +2,7 @@ package org.bch2.wallet
 
 import android.os.Bundle
 import android.util.Log
+import android.view.WindowManager
 import androidx.appcompat.app.AppCompatActivity
 import androidx.preference.PreferenceFragmentCompat
 
@@ -12,9 +13,10 @@ class SettingsActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         setContentView(R.layout.settings_activity)
         
-        Log.d("SettingsActivity", "Settings activity created")
+        if (BuildConfig.DEBUG) Log.d("SettingsActivity", "Settings activity created")
         
         // Enable back button in action bar
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
@@ -40,7 +42,7 @@ class SettingsActivity : AppCompatActivity() {
             // Load preferences from XML
             setPreferencesFromResource(R.xml.settings_preferences, rootKey)
             
-            Log.d("SettingsFragment", "Preferences loaded from XML")
+            if (BuildConfig.DEBUG) Log.d("SettingsFragment", "Preferences loaded from XML")
             
             // Set up click listener for deviceUIDCopy to copy to clipboard
             val deviceUIDPref = findPreference<androidx.preference.Preference>("deviceUIDCopy")
@@ -74,7 +76,7 @@ class SettingsActivity : AppCompatActivity() {
                                 android.widget.Toast.LENGTH_SHORT
                             ).show()
                             
-                            Log.d("SettingsFragment", "Device UID copied to clipboard: $deviceUID")
+                            if (BuildConfig.DEBUG) Log.d("SettingsFragment", "Device UID copied to clipboard: $deviceUID")
                         }
                         true
                     }

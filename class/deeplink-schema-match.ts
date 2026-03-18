@@ -115,7 +115,7 @@ class DeeplinkSchemaMatch {
             ]);
           }
         })
-        .catch(e => console.warn(e));
+        .catch(e => __DEV__ && console.warn(e));
       return;
     } else if (DeeplinkSchemaMatch.isPossiblyCosignerFile(event.url)) {
       readFileOutsideSandbox(decodeURI(event.url))
@@ -127,13 +127,13 @@ class DeeplinkSchemaMatch {
           }
           context.setSharedCosigner(file);
         })
-        .catch(e => console.warn(e));
+        .catch(e => __DEV__ && console.warn(e));
     }
     let isBothBitcoinAndLightning: TBothBitcoinAndLightning;
     try {
       isBothBitcoinAndLightning = DeeplinkSchemaMatch.isBothBitcoinAndLightning(event.url);
     } catch (e) {
-      console.log(e);
+      __DEV__ && console.log(e);
     }
     if (isBothBitcoinAndLightning) {
       completionHandler([
@@ -146,16 +146,9 @@ class DeeplinkSchemaMatch {
         },
       ]);
     } else if (event.url.toLowerCase().startsWith('bitcoincashii:')) {
-      // BCH2 CashAddr payment URI — route to BCH2Send screen
-      completionHandler([
-        'BCH2SendRoot',
-        {
-          screen: 'BCH2Send',
-          params: {
-            uri: event.url,
-          },
-        },
-      ]);
+      // BCH2 CashAddr payment URI — not yet wired up
+      // TODO: Implement proper URI parsing (address, amount, label) and route to BCH2Send
+      return;
     } else if (DeeplinkSchemaMatch.isBitcoinAddress(event.url)) {
       completionHandler([
         'SendDetailsRoot',
@@ -382,7 +375,7 @@ class DeeplinkSchemaMatch {
             }
           }
         } catch (e) {
-          console.log(e);
+          __DEV__ && console.log(e);
         }
         if (btc && lndInvoice) break;
       }

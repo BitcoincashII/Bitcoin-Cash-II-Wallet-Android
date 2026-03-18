@@ -10,10 +10,7 @@ import android.util.Log
 import android.view.View
 import android.widget.RemoteViews
 import androidx.work.WorkManager
-import kotlinx.coroutines.delay
 import org.json.JSONObject
-import java.util.concurrent.TimeUnit
-import org.bch2.wallet.ElectrumClient.ElectrumServer
 
 class MarketWidget : AppWidgetProvider() {
 
@@ -23,31 +20,7 @@ class MarketWidget : AppWidgetProvider() {
         private const val DEFAULT_CURRENCY = "USD"
         private const val KEY_LAST_ONLINE_STATUS = "market_widget_last_online_status"
 
-        private val hardcodedPeers = listOf(
-            ElectrumServer("electrum.bch2.org", 50002, true),
-            ElectrumServer("electrum2.bch2.org", 50002, true),
-            ElectrumServer("electrum.bch2.org", 50001, false),
-            ElectrumServer("electrum2.bch2.org", 50001, false)
-        )
-
-        private suspend fun connectToElectrumServer(): Boolean {
-            for (peer in hardcodedPeers) {
-                repeat(3) { attempt ->
-                    Log.d(TAG, "Attempting to connect to Electrum server: ${peer.host}:${peer.port}, Attempt: ${attempt + 1}")
-                    // Use validateCertificates=false because electrum.bch2.org uses a self-signed SSL cert
-                    val success = ElectrumClient().connect(peer, validateCertificates = false)
-                    if (success) {
-                        Log.i(TAG, "Successfully connected to Electrum server: ${peer.host}:${peer.port}")
-                        return true
-                    } else {
-                        Log.w(TAG, "Failed to connect to Electrum server: ${peer.host}:${peer.port}, Attempt: ${attempt + 1}")
-                    }
-                }
-            }
-            Log.e(TAG, "Failed to connect to any Electrum server from the hardcoded list after 3 attempts each. Waiting 10 minutes before retrying.")
-            delay(10 * 60 * 1000) // Wait for 10 minutes
-            return false
-        }
+        private val hardcodedPeers = ElectrumClient.hardcodedPeers
 
         fun updateWidget(context: Context, appWidgetId: Int) {
             val appWidgetManager = AppWidgetManager.getInstance(context)
@@ -71,7 +44,7 @@ class MarketWidget : AppWidgetProvider() {
                 
                 MarketWidgetUpdateWorker.scheduleMarketUpdate(context, forceUpdate = true)
                 
-                Log.d(TAG, "Scheduled immediate market widget update")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Scheduled immediate market widget update")
             }
         }
         
@@ -82,7 +55,7 @@ class MarketWidget : AppWidgetProvider() {
         }
 
         private fun updateAppWidget(context: Context, appWidgetManager: AppWidgetManager, appWidgetId: Int) {
-            Log.d(TAG, "Updating widget: $appWidgetId")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Updating widget: $appWidgetId")
             
             // Check network connectivity
             val isNetworkAvailable = NetworkUtils.isNetworkAvailable(context)
@@ -92,7 +65,7 @@ class MarketWidget : AppWidgetProvider() {
             
             // Get market data from shared preferences
             val marketData = getStoredMarketData(context)
-            Log.d(TAG, "Retrieved market data for widget: $marketData")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Retrieved market data for widget: $marketData")
             
             // Create RemoteViews to update the widget
             val views = RemoteViews(context.packageName, R.layout.widget_market)
@@ -118,7 +91,7 @@ class MarketWidget : AppWidgetProvider() {
             
             // Set the text for each view
             val formattedNextBlock = marketData.formattedNextBlock
-            Log.d(TAG, "Setting next block value to: '$formattedNextBlock'")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Setting next block value to: '$formattedNextBlock'")
             
             val displayText = when (formattedNextBlock) {
                 "..." -> context.getString(R.string.loading_placeholder, "...")
@@ -155,13 +128,13 @@ class MarketWidget : AppWidgetProvider() {
             val sharedPrefs = context.getSharedPreferences(SHARED_PREF_NAME, Context.MODE_PRIVATE)
             val marketDataJson = sharedPrefs.getString(MarketData.PREF_KEY, null)
             
-            Log.d(TAG, "Reading market data from preferences: $marketDataJson")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Reading market data from preferences: $marketDataJson")
             
             return if (marketDataJson != null) {
                 try {
                     val json = JSONObject(marketDataJson)
                     val nextBlock = json.optString("nextBlock", "...")
-                    Log.d(TAG, "Retrieved nextBlock from storage: $nextBlock")
+                    if (BuildConfig.DEBUG) Log.d(TAG, "Retrieved nextBlock from storage: $nextBlock")
                     
                     MarketData(
                         nextBlock = nextBlock,
@@ -175,7 +148,7 @@ class MarketWidget : AppWidgetProvider() {
                     MarketData()
                 }
             } else {
-                Log.d(TAG, "No market data found in preferences")
+                if (BuildConfig.DEBUG) Log.d(TAG, "No market data found in preferences")
                 MarketData()
             }
         }
@@ -189,7 +162,7 @@ class MarketWidget : AppWidgetProvider() {
 
     override fun onUpdate(context: Context, appWidgetManager: AppWidgetManager, appWidgetIds: IntArray) {
         super.onUpdate(context, appWidgetManager, appWidgetIds)
-        Log.d(TAG, "MarketWidget onUpdate called. Widget IDs: ${appWidgetIds.joinToString()}")
+        if (BuildConfig.DEBUG) Log.d(TAG, "MarketWidget onUpdate called. Widget IDs: ${appWidgetIds.joinToString()}")
         
         for (appWidgetId in appWidgetIds) {
             updateAppWidget(context, appWidgetManager, appWidgetId)
@@ -200,7 +173,7 @@ class MarketWidget : AppWidgetProvider() {
 
     override fun onEnabled(context: Context) {
         super.onEnabled(context)
-        Log.d(TAG, "MarketWidget enabled - First widget added")
+        if (BuildConfig.DEBUG) Log.d(TAG, "MarketWidget enabled - First widget added")
         val widgetIds = getAllWidgetIds(context)
         if (widgetIds.isNotEmpty()) {
             MarketWidgetUpdateWorker.scheduleMarketUpdate(context, forceUpdate = true)
@@ -209,7 +182,7 @@ class MarketWidget : AppWidgetProvider() {
 
     override fun onDisabled(context: Context) {
         super.onDisabled(context)
-        Log.d(TAG, "MarketWidget disabled - Last widget removed")
+        if (BuildConfig.DEBUG) Log.d(TAG, "MarketWidget disabled - Last widget removed")
         // Cancel all scheduled work when last widget is removed
         val workManager = WorkManager.getInstance(context)
         workManager.cancelUniqueWork(MarketWidgetUpdateWorker.WORK_NAME)
@@ -225,6 +198,6 @@ class MarketWidget : AppWidgetProvider() {
             .remove(MarketData.PREF_KEY)
             .remove(KEY_LAST_ONLINE_STATUS)
             .apply()
-        Log.d(TAG, "Market widget data cleared")
+        if (BuildConfig.DEBUG) Log.d(TAG, "Market widget data cleared")
     }
 }

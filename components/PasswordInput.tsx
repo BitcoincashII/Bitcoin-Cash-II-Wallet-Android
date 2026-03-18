@@ -151,6 +151,9 @@ export const PasswordInput = forwardRef<PasswordInputHandle, PasswordInputProps>
           secureTextEntry
           autoCapitalize="none"
           autoCorrect={false}
+          autoComplete="off"
+          importantForAutofill="no"
+          spellCheck={false}
           editable={!isSuccess}
           onSubmitEditing={handleSubmit}
           returnKeyType="done"

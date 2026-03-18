@@ -44,7 +44,7 @@ class SettingsModule(reactContext: ReactApplicationContext) : ReactContextBaseJa
                     sharedPref.edit()
                         .putString(DEVICE_UID_COPY_KEY, "Disabled")
                         .apply()
-                    Log.d(TAG, "Do Not Track enabled - set deviceUIDCopy to 'Disabled'")
+                    if (BuildConfig.DEBUG) Log.d(TAG, "Do Not Track enabled - set deviceUIDCopy to 'Disabled'")
                 }
                 promise.resolve("Disabled")
                 return
@@ -72,7 +72,7 @@ class SettingsModule(reactContext: ReactApplicationContext) : ReactContextBaseJa
                 sharedPref.edit()
                     .putString(DEVICE_UID_COPY_KEY, deviceUID)
                     .apply()
-                Log.d(TAG, "Synced deviceUID to deviceUIDCopy: $deviceUID")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Synced deviceUID to deviceUIDCopy: $deviceUID")
             }
             
             promise.resolve(deviceUID)
@@ -126,7 +126,7 @@ class SettingsModule(reactContext: ReactApplicationContext) : ReactContextBaseJa
             sharedPref.edit()
                 .putBoolean(CLEAR_FILES_ON_LAUNCH_KEY, value)
                 .apply()
-            Log.d(TAG, "Set clearFilesOnLaunch to: $value")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Set clearFilesOnLaunch to: $value")
             promise.resolve(value)
         } catch (e: Exception) {
             Log.e(TAG, "Error setting clearFilesOnLaunch", e)
@@ -159,14 +159,14 @@ class SettingsModule(reactContext: ReactApplicationContext) : ReactContextBaseJa
                 .putString(DO_NOT_TRACK_KEY, value)
                 .apply()
             
-            Log.d(TAG, "Set donottrack to: $value")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Set donottrack to: $value")
             
             // Update deviceUIDCopy based on Do Not Track setting
             if (enabled) {
                 sharedPref.edit()
                     .putString(DEVICE_UID_COPY_KEY, "Disabled")
                     .apply()
-                Log.d(TAG, "Do Not Track enabled - set deviceUIDCopy to 'Disabled'")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Do Not Track enabled - set deviceUIDCopy to 'Disabled'")
             } else {
                 // Re-initialize device UID
                 initializeDeviceUID(promise)

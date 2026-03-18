@@ -162,6 +162,11 @@ export async function sendTransaction(
     seenUtxos.add(key);
   }
 
+  if (utxos.length === 0) {
+    const coinType = isBC2 ? 'BC2' : 'BCH2';
+    throw new Error(`No valid UTXOs for ${coinType} address ${fromAddress} after validation`);
+  }
+
   // Sort UTXOs by value (largest first for efficiency)
   utxos.sort((a, b) => b.value - a.value);
 
@@ -201,6 +206,9 @@ export async function sendTransaction(
   const changeAmount = hasChange ? (totalInput - amountSats - fee) : 0;
 
   if (totalInput < amountSats + fee) {
+    if (selectedUtxos.length >= 500) {
+      throw new Error('Too many UTXOs required. Please consolidate UTXOs first.');
+    }
     throw new Error(`Insufficient funds. Need ${amountSats + fee} sats, have ${totalInput} sats`);
   }
 
@@ -275,6 +283,7 @@ function buildTransaction(
 ): string {
   // Sanity checks to prevent malformed transactions
   if (amount < 0 || changeAmount < 0) throw new Error('Negative amount in transaction');
+  if (amount > Number.MAX_SAFE_INTEGER || changeAmount > Number.MAX_SAFE_INTEGER) throw new Error('Amount exceeds safe integer range');
   if (utxos.length === 0) throw new Error('No inputs for transaction');
   if (utxos.length > 500) throw new Error('Too many inputs (max 500) — consolidate UTXOs first');
 
@@ -324,6 +333,25 @@ function buildTransaction(
     outputs = Buffer.concat([outputs, changeBytes, encodeVarInt(changeScript.length), changeScript]);
   }
 
+  // Precompute BIP143 common hashes (same for all inputs in SIGHASH_ALL mode)
+  let bip143HashPrevouts: Buffer | null = null;
+  let bip143HashSequence: Buffer | null = null;
+  let bip143HashOutputs: Buffer | null = null;
+  if (!isBC2) {
+    let prevoutsData = Buffer.alloc(0);
+    let sequencesData = Buffer.alloc(0);
+    for (const u of utxos) {
+      const txid = Buffer.from(u.txid, 'hex').reverse();
+      const vout = Buffer.alloc(4);
+      vout.writeUInt32LE(u.vout, 0);
+      prevoutsData = Buffer.concat([prevoutsData, txid, vout]);
+      sequencesData = Buffer.concat([sequencesData, Buffer.from('ffffffff', 'hex')]);
+    }
+    bip143HashPrevouts = doubleSha256(prevoutsData);
+    bip143HashSequence = doubleSha256(sequencesData);
+    bip143HashOutputs = doubleSha256(outputs);
+  }
+
   // Now sign each input
   const signedInputs: Buffer[] = [];
   for (let i = 0; i < utxos.length; i++) {
@@ -334,7 +362,7 @@ function buildTransaction(
     // For BC2, we use legacy sighash
     const sighash = isBC2
       ? createLegacySighash(utxos, i, publicKey, outputCount, outputs, utxo.value)
-      : createBIP143Sighash(utxos, i, publicKey, outputCount, outputs, utxo.value);
+      : createBIP143Sighash(utxos, i, publicKey, outputCount, outputs, utxo.value, bip143HashPrevouts!, bip143HashSequence!, bip143HashOutputs!);
 
     // Sign
     const signature = signWithPrivateKey(sighash, privateKey);
@@ -382,6 +410,8 @@ function buildTransaction(
 
 /**
  * Create BIP143 sighash for BCH2 (with FORKID)
+ * hashPrevouts, hashSequence, hashOutputs are precomputed and passed in to avoid
+ * redundant per-input computation (they're the same for all inputs in SIGHASH_ALL mode).
  */
 function createBIP143Sighash(
   utxos: UTXO[],
@@ -389,30 +419,16 @@ function createBIP143Sighash(
   publicKey: Buffer,
   outputCount: number,
   serializedOutputs: Buffer,
-  inputValue: number
+  inputValue: number,
+  hashPrevouts: Buffer,
+  hashSequence: Buffer,
+  hashOutputs: Buffer
 ): Buffer {
   const utxo = utxos[inputIndex];
 
   // 1. nVersion
   const version = Buffer.alloc(4);
   version.writeUInt32LE(2, 0);
-
-  // 2. hashPrevouts (double SHA256 of all input outpoints)
-  let prevouts = Buffer.alloc(0);
-  for (const u of utxos) {
-    const txid = Buffer.from(u.txid, 'hex').reverse();
-    const vout = Buffer.alloc(4);
-    vout.writeUInt32LE(u.vout, 0);
-    prevouts = Buffer.concat([prevouts, txid, vout]);
-  }
-  const hashPrevouts = doubleSha256(prevouts);
-
-  // 3. hashSequence (double SHA256 of all input sequences)
-  let sequences = Buffer.alloc(0);
-  for (const _ of utxos) {
-    sequences = Buffer.concat([sequences, Buffer.from('ffffffff', 'hex')]);
-  }
-  const hashSequence = doubleSha256(sequences);
 
   // 4. outpoint (txid + vout of this input)
   const outpoint = Buffer.concat([
@@ -421,14 +437,12 @@ function createBIP143Sighash(
   ]);
 
   // 5. scriptCode (P2PKH script for this input)
-  // For BCH/BCH2, scriptCode is the script itself with a varint length prefix
   const pubkeyHash = hash160(publicKey);
   const script = Buffer.concat([
     Buffer.from([0x76, 0xa9, 0x14]), // OP_DUP OP_HASH160 PUSH20
     pubkeyHash,
     Buffer.from([0x88, 0xac]) // OP_EQUALVERIFY OP_CHECKSIG
   ]);
-  // Prefix with length (25 bytes = 0x19)
   const scriptCode = Buffer.concat([encodeVarInt(script.length), script]);
 
   // 6. value (8 bytes)
@@ -437,9 +451,6 @@ function createBIP143Sighash(
 
   // 7. nSequence
   const nSequence = Buffer.from('ffffffff', 'hex');
-
-  // 8. hashOutputs
-  const hashOutputs = doubleSha256(serializedOutputs);
 
   // 9. nLocktime
   const locktime = Buffer.alloc(4);
@@ -849,6 +860,7 @@ function doubleSha256(data: Buffer): Buffer {
 }
 
 function encodeVarInt(n: number): Buffer {
+  if (!Number.isInteger(n) || n < 0) throw new Error(`encodeVarInt: invalid value ${n}`);
   if (n < 0xfd) {
     return Buffer.from([n]);
   } else if (n <= 0xffff) {
@@ -882,10 +894,10 @@ function isBech32Address(address: string): boolean {
 function bech32Polymod(values: number[]): number {
   let chk = 1;
   for (const v of values) {
-    const top = chk >> 25;
+    const top = chk >>> 25; // unsigned right shift — chk can be negative after XOR with generators
     chk = ((chk & 0x1ffffff) << 5) ^ v;
     for (let i = 0; i < 5; i++) {
-      if ((top >> i) & 1) {
+      if ((top >>> i) & 1) {
         chk ^= BECH32_GENERATOR[i];
       }
     }
@@ -990,43 +1002,6 @@ function getSegwitScripthash(pubkeyHash: Buffer): string {
 }
 
 /**
- * Encode bech32 address from witness program
- */
-function encodeBech32(hrp: string, version: number, program: Buffer): string {
-  // Convert 8-bit to 5-bit
-  const data: number[] = [version];
-  let acc = 0;
-  let bits = 0;
-
-  for (const byte of program) {
-    acc = (acc << 8) | byte;
-    bits += 8;
-    while (bits >= 5) {
-      bits -= 5;
-      data.push((acc >> bits) & 0x1f);
-    }
-  }
-  if (bits > 0) {
-    data.push((acc << (5 - bits)) & 0x1f);
-  }
-
-  // Calculate checksum
-  const hrpExpanded = bech32HrpExpand(hrp);
-  const polymod = bech32Polymod([...hrpExpanded, ...data, 0, 0, 0, 0, 0, 0]) ^ 1;
-  const checksum: number[] = [];
-  for (let i = 0; i < 6; i++) {
-    checksum.push((polymod >> (5 * (5 - i))) & 0x1f);
-  }
-
-  // Encode
-  let result = hrp + '1';
-  for (const v of [...data, ...checksum]) {
-    result += BECH32_CHARSET[v];
-  }
-  return result;
-}
-
-/**
  * Send transaction with a specific private key (used for alternate derivation paths)
  */
 async function sendTransactionWithKey(
@@ -1038,6 +1013,7 @@ async function sendTransactionWithKey(
   feePerByte: number,
   isBC2: boolean
 ): Promise<TransactionResult> {
+  try {
   feePerByte = Math.ceil(feePerByte); // Ensure integer sat/byte
   if (!Number.isFinite(feePerByte) || feePerByte < 1) feePerByte = 1;
   if (feePerByte > 1000) throw new Error('Fee rate too high (max 1000 sat/byte)');
@@ -1069,6 +1045,11 @@ async function sendTransactionWithKey(
     seenUtxos.add(key);
   }
 
+  if (utxos.length === 0) {
+    const coinType = isBC2 ? 'BC2' : 'BCH2';
+    throw new Error(`All UTXOs for ${coinType} address ${fromAddress} were invalid after validation`);
+  }
+
   // Sort UTXOs by value (largest first for efficiency)
   utxos.sort((a, b) => b.value - a.value);
 
@@ -1090,7 +1071,7 @@ async function sendTransactionWithKey(
     const estimatedSize = estimateTxSize(selectedUtxos.length, outputCount);
     const estimatedFee = estimatedSize * feePerByte;
 
-    if (totalInput >= amountSats + estimatedFee) {
+    if (totalInput >= amountSats + estimatedFee || selectedUtxos.length >= 500) {
       break;
     }
   }
@@ -1106,29 +1087,23 @@ async function sendTransactionWithKey(
   const changeAmount = hasChange ? (totalInput - amountSats - fee) : 0;
 
   if (totalInput < amountSats + fee) {
+    if (selectedUtxos.length >= 500) {
+      throw new Error('Too many UTXOs required. Please consolidate UTXOs first.');
+    }
     throw new Error(`Insufficient funds. Need ${amountSats + fee} sats, have ${totalInput} sats`);
   }
 
   // Build raw transaction
-  let txHex: string;
-  try {
-    txHex = buildTransaction(
-      selectedUtxos,
-      toAddress,
-      amountSats,
-      hasChange ? fromAddress : null,
-      changeAmount,
-      privateKey,
-      publicKey,
-      isBC2
-    );
-  } finally {
-    // Zero private key material after signing
-    if (privateKey instanceof Buffer || privateKey instanceof Uint8Array) {
-      crypto.randomFillSync(privateKey);
-      privateKey.fill(0);
-    }
-  }
+  const txHex = buildTransaction(
+    selectedUtxos,
+    toAddress,
+    amountSats,
+    hasChange ? fromAddress : null,
+    changeAmount,
+    privateKey,
+    publicKey,
+    isBC2
+  );
 
   // Broadcast
   const txid = isBC2
@@ -1136,6 +1111,13 @@ async function sendTransactionWithKey(
     : await broadcastTransaction(txHex);
 
   return { txid, hex: txHex };
+  } finally {
+    // Zero private key material after signing (covers all exit paths)
+    if (privateKey instanceof Buffer || privateKey instanceof Uint8Array) {
+      crypto.randomFillSync(privateKey);
+      privateKey.fill(0);
+    }
+  }
 }
 
 /**
@@ -1176,7 +1158,7 @@ export async function sendFromBech32(
   let matchedPath: string | null = null;
 
   for (const basePath of basePaths) {
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 100; i++) {
       const path = `${basePath}/${i}`;
       const child = root.derivePath(path);
       const pubkeyHash = hash160(Buffer.from(child.publicKey));
@@ -1225,6 +1207,10 @@ export async function sendFromBech32(
     seenUtxos2.add(key);
   }
 
+  if (utxos.length === 0) {
+    throw new Error(`All UTXOs for bc1 address ${expectedAddress} were invalid after validation`);
+  }
+
   // Sort UTXOs by value (largest first)
   utxos.sort((a, b) => b.value - a.value);
 
@@ -1262,6 +1248,9 @@ export async function sendFromBech32(
   const changeAmount = hasChange ? (totalInput - amountSats - fee) : 0;
 
   if (totalInput < amountSats + fee) {
+    if (selectedUtxos.length >= 500) {
+      throw new Error('Too many UTXOs required. Please consolidate UTXOs first.');
+    }
     throw new Error(`Insufficient funds. Need ${amountSats + fee} sats, have ${totalInput} sats`);
   }
 
@@ -1349,7 +1338,7 @@ export async function sendFromP2SH(
 
   // To match a 3xxx address we need to compute P2SH(P2WPKH(pubkey)) for each key
   for (const basePath of basePaths) {
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 100; i++) {
       const path = `${basePath}/${i}`;
       const child = root.derivePath(path);
       const pubkeyHash = hash160(Buffer.from(child.publicKey));
@@ -1410,6 +1399,10 @@ export async function sendFromP2SH(
     seenUtxos3.add(key);
   }
 
+  if (utxos.length === 0) {
+    throw new Error(`All UTXOs for P2SH address ${expectedAddress} were invalid after validation`);
+  }
+
   utxos.sort((a, b) => b.value - a.value);
 
   const estimateTxSize = (inputCount: number, outputCount: number): number => {
@@ -1445,6 +1438,9 @@ export async function sendFromP2SH(
   const changeAmount = hasChange ? (totalInput - amountSats - fee) : 0;
 
   if (totalInput < amountSats + fee) {
+    if (selectedUtxos.length >= 500) {
+      throw new Error('Too many UTXOs required. Please consolidate UTXOs first.');
+    }
     throw new Error(`Insufficient funds. Need ${amountSats + fee} sats, have ${totalInput} sats`);
   }
 
@@ -1503,6 +1499,10 @@ function buildSegwitRecoveryTransaction(
   pubkeyHash: Buffer,
   redeemScript?: Buffer  // For P2SH-P2WPKH: 0x0014<pubkeyhash>
 ): string {
+  if (amount < 0 || changeAmount < 0) throw new Error('Negative amount in transaction');
+  if (amount > Number.MAX_SAFE_INTEGER || changeAmount > Number.MAX_SAFE_INTEGER) throw new Error('Amount exceeds safe integer range');
+  if (utxos.length === 0) throw new Error('No inputs for transaction');
+  if (utxos.length > 500) throw new Error('Too many inputs (max 500) — consolidate UTXOs first');
   // Transaction version
   const version = Buffer.alloc(4);
   version.writeUInt32LE(2, 0);
@@ -1534,6 +1534,20 @@ function buildSegwitRecoveryTransaction(
     outputs = Buffer.concat([outputs, changeBytes, encodeVarInt(changeScript.length), changeScript]);
   }
 
+  // Precompute BIP143 common hashes (same for all inputs)
+  let prevoutsData = Buffer.alloc(0);
+  let sequencesData = Buffer.alloc(0);
+  for (const u of utxos) {
+    const txid = Buffer.from(u.txid, 'hex').reverse();
+    const vout = Buffer.alloc(4);
+    vout.writeUInt32LE(u.vout, 0);
+    prevoutsData = Buffer.concat([prevoutsData, txid, vout]);
+    sequencesData = Buffer.concat([sequencesData, Buffer.from('ffffffff', 'hex')]);
+  }
+  const preHashPrevouts = doubleSha256(prevoutsData);
+  const preHashSequence = doubleSha256(sequencesData);
+  const preHashOutputs = doubleSha256(outputs);
+
   // Sign each input using BIP143 sighash
   const signedInputs: Buffer[] = [];
   for (let i = 0; i < utxos.length; i++) {
@@ -1541,7 +1555,7 @@ function buildSegwitRecoveryTransaction(
 
     // Create BIP143 sighash for P2WPKH spending
     // scriptCode is the P2PKH script corresponding to the pubkey hash
-    const sighash = createBIP143SighashForSegwit(utxos, i, pubkeyHash, outputCount, outputs, utxo.value);
+    const sighash = createBIP143SighashForSegwit(utxos, i, pubkeyHash, outputCount, outputs, utxo.value, preHashPrevouts, preHashSequence, preHashOutputs);
 
     // Sign
     const signature = signWithPrivateKey(sighash, privateKey);
@@ -1592,7 +1606,7 @@ function buildSegwitRecoveryTransaction(
 
 /**
  * Create BIP143 sighash for SegWit spending (P2WPKH)
- * This is similar to regular BIP143 but uses the pubkey hash directly
+ * Precomputed hashes passed in to avoid redundant per-input computation.
  */
 function createBIP143SighashForSegwit(
   utxos: UTXO[],
@@ -1600,64 +1614,39 @@ function createBIP143SighashForSegwit(
   pubkeyHash: Buffer,
   outputCount: number,
   serializedOutputs: Buffer,
-  inputValue: number
+  inputValue: number,
+  hashPrevouts: Buffer,
+  hashSequence: Buffer,
+  hashOutputs: Buffer
 ): Buffer {
   const utxo = utxos[inputIndex];
 
-  // 1. nVersion
   const version = Buffer.alloc(4);
   version.writeUInt32LE(2, 0);
 
-  // 2. hashPrevouts
-  let prevouts = Buffer.alloc(0);
-  for (const u of utxos) {
-    const txid = Buffer.from(u.txid, 'hex').reverse();
-    const vout = Buffer.alloc(4);
-    vout.writeUInt32LE(u.vout, 0);
-    prevouts = Buffer.concat([prevouts, txid, vout]);
-  }
-  const hashPrevouts = doubleSha256(prevouts);
-
-  // 3. hashSequence
-  let sequences = Buffer.alloc(0);
-  for (const _ of utxos) {
-    sequences = Buffer.concat([sequences, Buffer.from('ffffffff', 'hex')]);
-  }
-  const hashSequence = doubleSha256(sequences);
-
-  // 4. outpoint
   const outpoint = Buffer.concat([
     Buffer.from(utxo.txid, 'hex').reverse(),
     (() => { const b = Buffer.alloc(4); b.writeUInt32LE(utxo.vout, 0); return b; })()
   ]);
 
-  // 5. scriptCode (P2PKH script for this pubkey hash)
   const script = Buffer.concat([
-    Buffer.from([0x76, 0xa9, 0x14]), // OP_DUP OP_HASH160 PUSH20
+    Buffer.from([0x76, 0xa9, 0x14]),
     pubkeyHash,
-    Buffer.from([0x88, 0xac]) // OP_EQUALVERIFY OP_CHECKSIG
+    Buffer.from([0x88, 0xac])
   ]);
   const scriptCode = Buffer.concat([encodeVarInt(script.length), script]);
 
-  // 6. value
   const value = Buffer.alloc(8);
   value.writeBigUInt64LE(BigInt(inputValue), 0);
 
-  // 7. nSequence
   const nSequence = Buffer.from('ffffffff', 'hex');
 
-  // 8. hashOutputs
-  const hashOutputs = doubleSha256(serializedOutputs);
-
-  // 9. nLocktime
   const locktime = Buffer.alloc(4);
   locktime.writeUInt32LE(0, 0);
 
-  // 10. sighash type (SIGHASH_ALL | FORKID = 0x41)
   const hashType = Buffer.alloc(4);
   hashType.writeUInt32LE(0x41, 0);
 
-  // Combine all parts
   const preimage = Buffer.concat([
     version,
     hashPrevouts,
@@ -1719,7 +1708,7 @@ export async function sendFromP2WSH(
   let matchedRedeemScript: Buffer | null = null;
 
   for (const basePath of basePaths) {
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 100; i++) {
       const path = `${basePath}/${i}`;
       const child = root.derivePath(path);
       const pubkey = Buffer.from(child.publicKey);
@@ -1783,6 +1772,10 @@ export async function sendFromP2WSH(
     seenUtxos4.add(key);
   }
 
+  if (utxos.length === 0) {
+    throw new Error(`All UTXOs for P2WSH address ${expectedAddress} were invalid after validation`);
+  }
+
   utxos.sort((a, b) => b.value - a.value);
 
   // P2WSH inputs are larger: sig(~73) + pubkey(33) + redeemScript(25) + overhead
@@ -1810,6 +1803,9 @@ export async function sendFromP2WSH(
   const changeAmount = hasChange ? (totalInput - amountSats - fee) : 0;
 
   if (totalInput < amountSats + fee) {
+    if (selectedUtxos.length >= 500) {
+      throw new Error('Too many UTXOs required. Please consolidate UTXOs first.');
+    }
     throw new Error(`Insufficient funds. Need ${amountSats + fee} sats, have ${totalInput} sats`);
   }
 
@@ -1876,6 +1872,10 @@ function buildP2WSHRecoveryTransaction(
   pubkeyHash: Buffer,
   redeemScript: Buffer
 ): string {
+  if (amount < 0 || changeAmount < 0) throw new Error('Negative amount in transaction');
+  if (amount > Number.MAX_SAFE_INTEGER || changeAmount > Number.MAX_SAFE_INTEGER) throw new Error('Amount exceeds safe integer range');
+  if (utxos.length === 0) throw new Error('No inputs for transaction');
+  if (utxos.length > 500) throw new Error('Too many inputs (max 500) — consolidate UTXOs first');
   const version = Buffer.alloc(4);
   version.writeUInt32LE(2, 0);
 
@@ -1901,13 +1901,27 @@ function buildP2WSHRecoveryTransaction(
     outputs = Buffer.concat([outputs, changeBytes, encodeVarInt(changeScript.length), changeScript]);
   }
 
+  // Precompute BIP143 common hashes
+  let wshPrevoutsData = Buffer.alloc(0);
+  let wshSequencesData = Buffer.alloc(0);
+  for (const u of utxos) {
+    const txid = Buffer.from(u.txid, 'hex').reverse();
+    const vout = Buffer.alloc(4);
+    vout.writeUInt32LE(u.vout, 0);
+    wshPrevoutsData = Buffer.concat([wshPrevoutsData, txid, vout]);
+    wshSequencesData = Buffer.concat([wshSequencesData, Buffer.from('ffffffff', 'hex')]);
+  }
+  const wshHashPrevouts = doubleSha256(wshPrevoutsData);
+  const wshHashSequence = doubleSha256(wshSequencesData);
+  const wshHashOutputs = doubleSha256(outputs);
+
   // Sign each input using BIP143 sighash with redeemScript as scriptCode
   const signedInputs: Buffer[] = [];
   for (let i = 0; i < utxos.length; i++) {
     const utxo = utxos[i];
 
     // BIP143 sighash using redeemScript as scriptCode (NOT P2PKH template)
-    const sighash = createBIP143SighashWithScriptCode(utxos, i, redeemScript, outputCount, outputs, utxo.value);
+    const sighash = createBIP143SighashWithScriptCode(utxos, i, redeemScript, outputCount, outputs, utxo.value, wshHashPrevouts, wshHashSequence, wshHashOutputs);
 
     const signature = signWithPrivateKey(sighash, privateKey);
 
@@ -1951,7 +1965,7 @@ function buildP2WSHRecoveryTransaction(
 
 /**
  * Create BIP143 sighash using an arbitrary scriptCode (for P2WSH spending)
- * The scriptCode for P2WSH is the redeemScript itself, not the P2WSH scriptPubKey
+ * Precomputed hashes passed in to avoid redundant per-input computation.
  */
 function createBIP143SighashWithScriptCode(
   utxos: UTXO[],
@@ -1959,27 +1973,15 @@ function createBIP143SighashWithScriptCode(
   scriptCodeRaw: Buffer,
   outputCount: number,
   serializedOutputs: Buffer,
-  inputValue: number
+  inputValue: number,
+  hashPrevouts: Buffer,
+  hashSequence: Buffer,
+  hashOutputs: Buffer
 ): Buffer {
   const utxo = utxos[inputIndex];
 
   const version = Buffer.alloc(4);
   version.writeUInt32LE(2, 0);
-
-  let prevouts = Buffer.alloc(0);
-  for (const u of utxos) {
-    const txid = Buffer.from(u.txid, 'hex').reverse();
-    const vout = Buffer.alloc(4);
-    vout.writeUInt32LE(u.vout, 0);
-    prevouts = Buffer.concat([prevouts, txid, vout]);
-  }
-  const hashPrevouts = doubleSha256(prevouts);
-
-  let sequences = Buffer.alloc(0);
-  for (const _ of utxos) {
-    sequences = Buffer.concat([sequences, Buffer.from('ffffffff', 'hex')]);
-  }
-  const hashSequence = doubleSha256(sequences);
 
   const outpoint = Buffer.concat([
     Buffer.from(utxo.txid, 'hex').reverse(),
@@ -1993,7 +1995,6 @@ function createBIP143SighashWithScriptCode(
   value.writeBigUInt64LE(BigInt(inputValue), 0);
 
   const nSequence = Buffer.from('ffffffff', 'hex');
-  const hashOutputs = doubleSha256(serializedOutputs);
 
   const locktime = Buffer.alloc(4);
   locktime.writeUInt32LE(0, 0);
@@ -2057,7 +2058,7 @@ export async function sendFromP2TR(
   const basePaths = ["m/86'/0'/0'/0", "m/86'/0'/0'/1"];
 
   for (const basePath of basePaths) {
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 100; i++) {
       const path = `${basePath}/${i}`;
       const child = root.derivePath(path);
       const pubkey = Buffer.from(child.publicKey);
@@ -2087,7 +2088,9 @@ export async function sendFromP2TR(
         if (hasEvenY) {
           effectivePrivkey = privkey;
         } else {
-          effectivePrivkey = Buffer.from(ecc.privateNegate(privkey));
+          const negated = ecc.privateNegate(privkey);
+          effectivePrivkey = Buffer.from(negated);
+          if (negated instanceof Uint8Array) negated.fill(0);
         }
         // tweakedPrivKey = effectivePrivkey + tweak (mod n)
         const added = ecc.privateAdd(effectivePrivkey, tweak);
@@ -2100,6 +2103,7 @@ export async function sendFromP2TR(
           continue;
         }
         matchedTweakedPrivkey = Buffer.from(added);
+        if (added instanceof Uint8Array) added.fill(0);
 
         // Zero intermediate private key copies
         crypto.randomFillSync(privkey); privkey.fill(0);
@@ -2150,6 +2154,10 @@ export async function sendFromP2TR(
     seenUtxos5.add(key);
   }
 
+  if (utxos.length === 0) {
+    throw new Error(`All UTXOs for P2TR address ${expectedAddress} were invalid after validation`);
+  }
+
   utxos.sort((a, b) => b.value - a.value);
 
   // P2TR scriptSig input: 64-byte sig push = ~66 bytes + outpoint(36) + sequence(4) + varint overhead
@@ -2177,6 +2185,9 @@ export async function sendFromP2TR(
   const changeAmount = hasChange ? (totalInput - amountSats - fee) : 0;
 
   if (totalInput < amountSats + fee) {
+    if (selectedUtxos.length >= 500) {
+      throw new Error('Too many UTXOs required. Please consolidate UTXOs first.');
+    }
     throw new Error(`Insufficient funds. Need ${amountSats + fee} sats, have ${totalInput} sats`);
   }
 
@@ -2245,6 +2256,10 @@ function buildP2TRRecoveryTransaction(
   inputScriptPubKeys: Buffer[],
   originalPublicKey?: Buffer
 ): string {
+  if (amount < 0 || changeAmount < 0) throw new Error('Negative amount in transaction');
+  if (amount > Number.MAX_SAFE_INTEGER || changeAmount > Number.MAX_SAFE_INTEGER) throw new Error('Amount exceeds safe integer range');
+  if (utxos.length === 0) throw new Error('No inputs for transaction');
+  if (utxos.length > 500) throw new Error('Too many inputs (max 500) — consolidate UTXOs first');
   const version = Buffer.alloc(4);
   version.writeUInt32LE(2, 0);
 
@@ -2276,6 +2291,30 @@ function buildP2TRRecoveryTransaction(
     outputs = Buffer.concat([outputs, changeBytes, encodeVarInt(changeScript.length), changeScript]);
   }
 
+  // Precompute BIP341 common hashes (same for all inputs in SIGHASH_DEFAULT)
+  let trPrevoutsData = Buffer.alloc(0);
+  let trAmountsData = Buffer.alloc(0);
+  let trScriptPubKeysData = Buffer.alloc(0);
+  let trSequencesData = Buffer.alloc(0);
+  for (let j = 0; j < utxos.length; j++) {
+    const u = utxos[j];
+    const txid = Buffer.from(u.txid, 'hex').reverse();
+    const vout = Buffer.alloc(4);
+    vout.writeUInt32LE(u.vout, 0);
+    trPrevoutsData = Buffer.concat([trPrevoutsData, txid, vout]);
+    const amt = Buffer.alloc(8);
+    amt.writeBigUInt64LE(BigInt(u.value), 0);
+    trAmountsData = Buffer.concat([trAmountsData, amt]);
+    const spk = inputScriptPubKeys[j];
+    trScriptPubKeysData = Buffer.concat([trScriptPubKeysData, encodeVarInt(spk.length), spk]);
+    trSequencesData = Buffer.concat([trSequencesData, Buffer.from('ffffffff', 'hex')]);
+  }
+  const trHashPrevouts = singleSha256(trPrevoutsData);
+  const trHashAmounts = singleSha256(trAmountsData);
+  const trHashScriptPubKeys = singleSha256(trScriptPubKeysData);
+  const trHashSequences = singleSha256(trSequencesData);
+  const trHashOutputs = singleSha256(outputs);
+
   // Sign each input using BIP341 Taproot sighash
   const signedInputs: Buffer[] = [];
   for (let i = 0; i < utxos.length; i++) {
@@ -2284,7 +2323,12 @@ function buildP2TRRecoveryTransaction(
       i,
       inputScriptPubKeys,
       outputCount,
-      outputs
+      outputs,
+      trHashPrevouts,
+      trHashAmounts,
+      trHashScriptPubKeys,
+      trHashSequences,
+      trHashOutputs
     );
 
     // BIP340 Schnorr sign with tweaked private key
@@ -2345,49 +2389,18 @@ function createBIP341Sighash(
   inputIndex: number,
   inputScriptPubKeys: Buffer[],
   outputCount: number,
-  serializedOutputs: Buffer
+  serializedOutputs: Buffer,
+  hashPrevouts: Buffer,
+  hashAmounts: Buffer,
+  hashScriptPubKeys: Buffer,
+  hashSequences: Buffer,
+  hashOutputs: Buffer
 ): Buffer {
   const version = Buffer.alloc(4);
   version.writeUInt32LE(2, 0);
 
   const locktime = Buffer.alloc(4);
   locktime.writeUInt32LE(0, 0);
-
-  // SHA256(all prevouts)
-  let prevouts = Buffer.alloc(0);
-  for (const u of utxos) {
-    const txid = Buffer.from(u.txid, 'hex').reverse();
-    const vout = Buffer.alloc(4);
-    vout.writeUInt32LE(u.vout, 0);
-    prevouts = Buffer.concat([prevouts, txid, vout]);
-  }
-  const hashPrevouts = singleSha256(prevouts);
-
-  // SHA256(all input amounts as uint64LE)
-  let amounts = Buffer.alloc(0);
-  for (const u of utxos) {
-    const amt = Buffer.alloc(8);
-    amt.writeBigUInt64LE(BigInt(u.value), 0);
-    amounts = Buffer.concat([amounts, amt]);
-  }
-  const hashAmounts = singleSha256(amounts);
-
-  // SHA256(all input scriptPubKeys with varint length prefix)
-  let scriptPubKeysData = Buffer.alloc(0);
-  for (const spk of inputScriptPubKeys) {
-    scriptPubKeysData = Buffer.concat([scriptPubKeysData, encodeVarInt(spk.length), spk]);
-  }
-  const hashScriptPubKeys = singleSha256(scriptPubKeysData);
-
-  // SHA256(all sequences)
-  let sequences = Buffer.alloc(0);
-  for (const _ of utxos) {
-    sequences = Buffer.concat([sequences, Buffer.from('ffffffff', 'hex')]);
-  }
-  const hashSequences = singleSha256(sequences);
-
-  // SHA256(all outputs) - serializedOutputs already contains amounts + scripts
-  const hashOutputs = singleSha256(serializedOutputs);
 
   // input_index
   const inputIdx = Buffer.alloc(4);

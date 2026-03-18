@@ -47,6 +47,8 @@ export const PasswordModalWithRef = React.forwardRef<PasswordModalHandle, Passwo
           passwordRef.current?.reset();
           passwordRef.current?.focus();
         }, 300);
+      } else {
+        passwordRef.current?.reset();
       }
     }, [props.visible]);
 

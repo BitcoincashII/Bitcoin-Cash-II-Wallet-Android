@@ -97,9 +97,10 @@ export interface WalletImportResult {
  * Claim BCH2 airdrop from BC2 WIF private key
  * Checks both legacy (P2PKH) and SegWit (P2WPKH) addresses
  */
-export async function claimFromWIF(wif: string, checkBC2Balance: boolean = false): Promise<AirdropClaimResult> {
+export async function claimFromWIF(wif: string): Promise<AirdropClaimResult> {
+  let keyPair: ReturnType<ECPairAPI['fromWIF']> | null = null;
   try {
-    const keyPair = ECPair.fromWIF(wif);
+    keyPair = ECPair.fromWIF(wif);
     const pubkeyHash = hash160(Buffer.from(keyPair.publicKey));
 
     // Get BC2 legacy address (for display)
@@ -112,12 +113,14 @@ export async function claimFromWIF(wif: string, checkBC2Balance: boolean = false
     const claims: AirdropClaimResult[] = [];
     const addressTypes: Array<AirdropClaimResult['addressType']> = ['legacy', 'p2pk', 'bc1', 'p2sh-segwit', 'p2tr'];
 
+    let hadNetworkError = false;
     for (const addrType of addressTypes) {
       try {
         const claim = await scanSingleAddress(pubkeyHash, Buffer.from(keyPair.publicKey), addrType!, undefined);
         if (claim) claims.push(claim);
-      } catch {
-        // Skip failed address type checks
+      } catch (err) {
+        if (err instanceof ElectrumNetworkError) hadNetworkError = true;
+        // Other errors (e.g. unsupported address type) are silently skipped
       }
     }
 
@@ -139,8 +142,14 @@ export async function claimFromWIF(wif: string, checkBC2Balance: boolean = false
         address: best.address,
         addressType: best.addressType,
         bch2Address: best.bch2Address,
-        balance: dedupedClaims.reduce((sum, c) => sum + c.balance, 0),
-        bc2Balance: dedupedClaims.reduce((sum, c) => sum + (c.bc2Balance ?? 0), 0),
+        balance: dedupedClaims.reduce((sum, c) => {
+          const newSum = sum + c.balance;
+          return newSum > Number.MAX_SAFE_INTEGER ? sum : newSum;
+        }, 0),
+        bc2Balance: dedupedClaims.reduce((sum, c) => {
+          const newSum = sum + (c.bc2Balance ?? 0);
+          return newSum > Number.MAX_SAFE_INTEGER ? sum : newSum;
+        }, 0),
       };
     }
 
@@ -150,7 +159,9 @@ export async function claimFromWIF(wif: string, checkBC2Balance: boolean = false
       addressType: 'legacy',
       bch2Address: bch2Address,
       balance: 0,
-      error: 'No BCH2 balance found for this key',
+      error: hadNetworkError
+        ? 'Network error — could not reach Electrum server. Please check your connection and try again.'
+        : 'No BCH2 balance found for this key',
     };
   } catch (err: any) {
     return {
@@ -160,6 +171,12 @@ export async function claimFromWIF(wif: string, checkBC2Balance: boolean = false
       balance: 0,
       error: err.message || 'Invalid private key',
     };
+  } finally {
+    // Zero ECPair private key material
+    if (keyPair && keyPair.privateKey) {
+      crypto.randomFillSync(keyPair.privateKey);
+      keyPair.privateKey.fill(0);
+    }
   }
 }
 
@@ -174,7 +191,19 @@ export async function claimFromWIF(wif: string, checkBC2Balance: boolean = false
  * Uses BIP44 gap limit: scans until GAP_LIMIT consecutive empty addresses
  */
 export async function claimFromMnemonic(mnemonic: string, passphrase: string = ''): Promise<AirdropClaimResult[]> {
+  let root: BIP32Interface | null = null;
   try {
+    // Validate mnemonic word count (BIP39: 12, 15, 18, 21, or 24 words)
+    const wordCount = mnemonic.trim().split(/\s+/).length;
+    if (![12, 15, 18, 21, 24].includes(wordCount)) {
+      return [{
+        success: false,
+        address: '',
+        bch2Address: '',
+        balance: 0,
+        error: `Invalid mnemonic: expected 12, 15, 18, 21, or 24 words, got ${wordCount}`,
+      }];
+    }
     if (!bip39.validateMnemonic(mnemonic)) {
       return [{
         success: false,
@@ -186,9 +215,10 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
     }
 
     const seed = await bip39.mnemonicToSeed(mnemonic, passphrase);
-    const root = bip32.fromSeed(seed);
+    root = bip32.fromSeed(seed);
     // Zero seed after BIP32 derivation — root holds master key internally
     if (seed instanceof Buffer || seed instanceof Uint8Array) {
+      crypto.randomFillSync(seed);
       seed.fill(0);
     }
 
@@ -223,37 +253,44 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
         for (let i = index; i < batchEnd; i++) {
           const idx = i;
           batchPromises.push((async () => {
-            const child = accountNode.derive(chain).derive(idx);
+            const chainNode = accountNode.derive(chain);
+            const child = chainNode.derive(idx);
             const pubkeyHash = hash160(Buffer.from(child.publicKey));
             const publicKey = Buffer.from(child.publicKey);
             const derivPath = `${pathPrefix}/${chain}/${idx}`;
             const foundClaims: AirdropClaimResult[] = [];
             let hadNetworkError = false;
 
-            // Check all address types for this key
-            const typesToCheck: Array<AirdropClaimResult['addressType']> = [primaryType];
-            // Also check legacy (P2PKH) and P2PK for every derived key,
-            // since wallets often send between address types within the same HD wallet
-            if (primaryType !== 'legacy') typesToCheck.push('legacy');
-            typesToCheck.push('p2pk');
+            try {
+              // Check all address types for this key
+              const typesToCheck: Array<AirdropClaimResult['addressType']> = [primaryType];
+              // Also check legacy (P2PKH) and P2PK for every derived key,
+              // since wallets often send between address types within the same HD wallet
+              if (primaryType !== 'legacy') typesToCheck.push('legacy');
+              typesToCheck.push('p2pk');
 
-            for (const addrType of typesToCheck) {
-              try {
-                const claim = await scanSingleAddress(pubkeyHash, publicKey, addrType!, derivPath);
-                if (claim) {
-                  const claimKey = `${claim.address}:${claim.addressType}`;
-                  if (!seenClaimKeys.has(claimKey)) {
-                    seenClaimKeys.add(claimKey);
-                    foundClaims.push(claim);
+              for (const addrType of typesToCheck) {
+                try {
+                  const claim = await scanSingleAddress(pubkeyHash, publicKey, addrType!, derivPath);
+                  if (claim) {
+                    const claimKey = `${claim.address}:${claim.addressType}`;
+                    if (!seenClaimKeys.has(claimKey)) {
+                      seenClaimKeys.add(claimKey);
+                      foundClaims.push(claim);
+                    }
                   }
+                } catch (err) {
+                  // Network errors should NOT count toward gap limit
+                  if (err instanceof ElectrumNetworkError) {
+                    hadNetworkError = true;
+                  }
+                  // Other errors (e.g. invalid key) are silently skipped
                 }
-              } catch (err) {
-                // Network errors should NOT count toward gap limit
-                if (err instanceof ElectrumNetworkError) {
-                  hadNetworkError = true;
-                }
-                // Other errors (e.g. invalid key) are silently skipped
               }
+            } finally {
+              // Zero derived child private keys
+              if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
+              if (chainNode.privateKey) { crypto.randomFillSync(chainNode.privateKey); chainNode.privateKey.fill(0); }
             }
             return { idx, claims: foundClaims, networkError: hadNetworkError && foundClaims.length === 0 };
           })());
@@ -345,6 +382,12 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
       balance: 0,
       error: err.message || 'Failed to process mnemonic',
     }];
+  } finally {
+    // Zero BIP32 root private key material
+    if (root && root.privateKey) {
+      crypto.randomFillSync(root.privateKey);
+      root.privateKey.fill(0);
+    }
   }
 }
 
@@ -356,24 +399,32 @@ export async function importBC2Wallet(wif: string): Promise<WalletImportResult> 
   wallet.setSecret(wif);
 
   const keyPair = ECPair.fromWIF(wif);
-  const pubkeyHash = hash160(Buffer.from(keyPair.publicKey));
+  try {
+    const pubkeyHash = hash160(Buffer.from(keyPair.publicKey));
 
-  const bc2Address = getLegacyAddress(pubkeyHash);
-  const bch2Address = wallet.getAddress();
-  if (!bch2Address) throw new Error('Failed to derive BCH2 address from WIF');
+    const bc2Address = getLegacyAddress(pubkeyHash);
+    const bch2Address = wallet.getAddress();
+    if (!bch2Address) throw new Error('Failed to derive BCH2 address from WIF');
 
-  await wallet.fetchBalance();
-  wallet.prepareForSerialization();
+    await wallet.fetchBalance();
+    wallet.prepareForSerialization();
 
-  return {
-    wallet,
-    bc2Address,
-    bch2Address,
-    balance: {
-      confirmed: wallet.balance,
-      unconfirmed: wallet.unconfirmed_balance,
-    },
-  };
+    return {
+      wallet,
+      bc2Address,
+      bch2Address,
+      balance: {
+        confirmed: wallet.balance,
+        unconfirmed: wallet.unconfirmed_balance,
+      },
+    };
+  } finally {
+    // Zero ECPair private key material
+    if (keyPair.privateKey) {
+      crypto.randomFillSync(keyPair.privateKey);
+      keyPair.privateKey.fill(0);
+    }
+  }
 }
 
 /**
@@ -387,7 +438,9 @@ export async function getTotalClaimable(addresses: string[]): Promise<number> {
       // Convert BC2 address to BCH2 CashAddr format
       const bch2Address = convertToCashAddr(address);
       const balance = await BCH2Electrum.getBalanceByAddress(bch2Address);
+      if (!Number.isSafeInteger(balance.confirmed) || !Number.isSafeInteger(balance.unconfirmed)) continue;
       total += balance.confirmed + balance.unconfirmed;
+      if (total > Number.MAX_SAFE_INTEGER) break;
     } catch (err) {
       // Skip invalid addresses
       continue;
@@ -514,6 +567,7 @@ function cashAddrPolymod(values: number[]): bigint {
 }
 
 function convertToCashAddr(legacyAddress: string): string {
+  if (legacyAddress.length > 100) throw new Error('Address too long');
   // Decode base58 address
   const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 
@@ -659,10 +713,10 @@ function bech32Polymod(values: number[]): number {
   let chk = 1;
 
   for (const value of values) {
-    const top = chk >> 25;
+    const top = chk >>> 25; // unsigned right shift — chk can be negative after XOR with generators
     chk = ((chk & 0x1ffffff) << 5) ^ value;
     for (let i = 0; i < 5; i++) {
-      if ((top >> i) & 1) {
+      if ((top >>> i) & 1) {
         chk ^= GENERATOR[i];
       }
     }
@@ -908,6 +962,11 @@ function computeTweakedXonly(pubkey: Buffer): Buffer | null {
   const result = ecc.xOnlyPointAddTweak(xonly, tweak);
   if (!result) return null;
 
+  // BIP341: the tweaked point must have even Y parity.
+  // xOnlyPointAddTweak already returns the x-only coordinate (which is
+  // parity-agnostic), and result.parity indicates if Y is odd. The x-only
+  // pubkey is the same regardless of parity, so no negation needed here —
+  // the parity only matters when signing (handled in bch2-transaction.ts).
   return Buffer.from(result.xOnlyPubkey);
 }
 
@@ -1037,16 +1096,10 @@ export function parseDescriptorInput(input: string): ParsedDescriptor[] {
   const trimmed = input.trim();
   const results: ParsedDescriptor[] = [];
 
-  // Try JSON (listdescriptors output) — also try extracting JSON from within text
+  // Try JSON (listdescriptors output) — only parse if input starts with JSON delimiter
   const jsonCandidate = trimmed.startsWith('{') || trimmed.startsWith('[')
     ? trimmed
-    : (() => {
-        const braceIdx = trimmed.indexOf('{');
-        if (braceIdx >= 0) return trimmed.slice(braceIdx);
-        const bracketIdx = trimmed.indexOf('[');
-        if (bracketIdx >= 0) return trimmed.slice(bracketIdx);
-        return null;
-      })();
+    : null;
 
   if (jsonCandidate) {
     try {
@@ -1154,27 +1207,34 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
       for (let i = index; i < batchEnd; i++) {
         const idx = i;
         batchPromises.push((async () => {
-          const child = parentNode.derive(chain).derive(idx);
+          const chainNode = parentNode.derive(chain);
+          const child = chainNode.derive(idx);
           const pubkeyHash = hash160(Buffer.from(child.publicKey));
           const derivPath = `${pathPrefix}/${chain}/${idx}`;
           const found: AirdropClaimResult[] = [];
           let hadNetworkError = false;
-          const typesToCheck: Array<NonNullable<AirdropClaimResult['addressType']>> = [primaryType];
-          if (primaryType !== 'legacy') typesToCheck.push('legacy');
-          typesToCheck.push('p2pk');
-          for (const addrType of typesToCheck) {
-            try {
-              const claim = await scanSingleAddress(pubkeyHash, Buffer.from(child.publicKey), addrType, derivPath);
-              if (claim) {
-                const key = `${claim.address}:${claim.addressType}`;
-                if (!seenKeys.has(key)) {
-                  seenKeys.add(key);
-                  found.push(claim);
+          try {
+            const typesToCheck: Array<NonNullable<AirdropClaimResult['addressType']>> = [primaryType];
+            if (primaryType !== 'legacy') typesToCheck.push('legacy');
+            typesToCheck.push('p2pk');
+            for (const addrType of typesToCheck) {
+              try {
+                const claim = await scanSingleAddress(pubkeyHash, Buffer.from(child.publicKey), addrType, derivPath);
+                if (claim) {
+                  const key = `${claim.address}:${claim.addressType}`;
+                  if (!seenKeys.has(key)) {
+                    seenKeys.add(key);
+                    found.push(claim);
+                  }
                 }
+              } catch (err) {
+                if (err instanceof ElectrumNetworkError) hadNetworkError = true;
               }
-            } catch (err) {
-              if (err instanceof ElectrumNetworkError) hadNetworkError = true;
             }
+          } finally {
+            // Zero derived child private keys
+            if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
+            if (chainNode.privateKey) { crypto.randomFillSync(chainNode.privateKey); chainNode.privateKey.fill(0); }
           }
           return { found, networkError: hadNetworkError && found.length === 0 };
         })());
@@ -1205,33 +1265,48 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
       continue;
     }
 
-    if (node.depth >= 3) {
-      const pathPrefix = desc.originPath ? `m/${desc.originPath}` : '';
-      for (const chain of [0, 1]) {
-        await scanChainGapLimit(node, chain, pathPrefix, desc.addressType);
-      }
-    } else {
-      const accountPaths = DESCRIPTOR_ACCOUNT_PATHS[desc.addressType] || [];
-      for (const accountPath of accountPaths) {
-        let accountNode: BIP32Interface;
-        try {
-          accountNode = node.derivePath(accountPath);
-        } catch {
-          continue;
-        }
+    try {
+      if (node.depth >= 3) {
+        const pathPrefix = desc.originPath ? `m/${desc.originPath}` : '';
         for (const chain of [0, 1]) {
-          await scanChainGapLimit(accountNode, chain, accountPath, desc.addressType);
+          await scanChainGapLimit(node, chain, pathPrefix, desc.addressType);
+        }
+      } else {
+        const accountPaths = DESCRIPTOR_ACCOUNT_PATHS[desc.addressType] || [];
+        const accountNodes: BIP32Interface[] = [];
+        for (const accountPath of accountPaths) {
+          let accountNode: BIP32Interface;
+          try {
+            accountNode = node.derivePath(accountPath);
+          } catch {
+            continue;
+          }
+          accountNodes.push(accountNode);
+          for (const chain of [0, 1]) {
+            await scanChainGapLimit(accountNode, chain, accountPath, desc.addressType);
+          }
+        }
+        // Zero derived account nodes
+        for (const an of accountNodes) {
+          if (an.privateKey) { crypto.randomFillSync(an.privateKey); an.privateKey.fill(0); }
         }
       }
+    } finally {
+      // Zero xprv node private key
+      if (node.privateKey) { crypto.randomFillSync(node.privateKey); node.privateKey.fill(0); }
     }
   }
 
   // Clean up: disconnect Electrum clients after scan
   try { BCH2Electrum.disconnectAll(); } catch {}
 
-  const totalBalance = claims.reduce((sum, c) => sum + c.balance, 0);
+  const totalBalance = claims.reduce((sum, c) => {
+    if (!Number.isSafeInteger(c.balance)) return sum;
+    return sum + c.balance;
+  }, 0);
   const airdropBalance = claims.reduce((sum, c) => {
     const bc2 = c.bc2Balance ?? 0;
+    if (!Number.isSafeInteger(c.balance) || !Number.isSafeInteger(bc2)) return sum;
     return sum + Math.min(c.balance, bc2);
   }, 0);
 
@@ -1295,9 +1370,11 @@ async function scanSingleAddress(
   try {
     if (addressType === 'legacy') {
       const balance = await BCH2Electrum.getBalanceByAddress(bch2Address);
+      if (!Number.isSafeInteger(balance.confirmed) || !Number.isSafeInteger(balance.unconfirmed)) throw new ElectrumNetworkError('Invalid balance response');
       total = balance.confirmed + balance.unconfirmed;
     } else {
       const balance = await BCH2Electrum.getBalanceByScripthash(scripthash);
+      if (!Number.isSafeInteger(balance.confirmed) || !Number.isSafeInteger(balance.unconfirmed)) throw new ElectrumNetworkError('Invalid balance response');
       total = balance.confirmed + balance.unconfirmed;
     }
   } catch (err: any) {
@@ -1336,9 +1413,13 @@ async function scanSingleAddress(
  */
 export function buildScanResult(results: AirdropClaimResult[]): AirdropScanResult {
   const claims = results.filter(r => r.success && r.balance > 0);
-  const totalBalance = claims.reduce((sum, c) => sum + c.balance, 0);
+  const totalBalance = claims.reduce((sum, c) => {
+    if (!Number.isSafeInteger(c.balance)) return sum;
+    return sum + c.balance;
+  }, 0);
   const airdropBalance = claims.reduce((sum, c) => {
     const bc2 = c.bc2Balance ?? 0;
+    if (!Number.isSafeInteger(c.balance) || !Number.isSafeInteger(bc2)) return sum;
     return sum + Math.min(c.balance, bc2);
   }, 0);
 

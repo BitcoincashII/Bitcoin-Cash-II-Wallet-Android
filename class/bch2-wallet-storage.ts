@@ -126,8 +126,8 @@ export async function saveWallet(
   walletType: 'bch2' | 'bc2' | 'bc1' = 'bch2',
   password: string
 ): Promise<StoredWallet> {
-  if (!password) {
-    throw new Error('Password is required to save a wallet');
+  if (!password || password.length < 8) {
+    throw new Error('Password must be at least 8 characters');
   }
 
   // Trim mnemonic once — must use same value for address derivation and encryption

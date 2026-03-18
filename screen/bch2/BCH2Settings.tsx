@@ -131,7 +131,9 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
       client = null;
 
       if (versionResult) {
-        const serverVersion = Array.isArray(versionResult) ? versionResult.join(' / ') : String(versionResult);
+        let serverVersion = Array.isArray(versionResult) ? versionResult.join(' / ') : String(versionResult);
+        // Sanitize server version string to prevent phishing via rogue Electrum servers
+        serverVersion = serverVersion.replace(/[^a-zA-Z0-9./ \-_:()]/g, '').slice(0, 80);
         setStatus('connected');
         Alert.alert('Success', `Connected to ${coinName} server: ${server.host}:${server.port}\nServer: ${serverVersion}`);
       } else {
@@ -211,12 +213,21 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
         await DefaultPreference.set('bch2_electrum_host', bch2CustomHost.trim());
         await DefaultPreference.set('bch2_electrum_port', bch2CustomPort);
         await DefaultPreference.set('bch2_electrum_ssl', bch2UseSSL ? '1' : '0');
+      } else {
+        // Clear stale custom server entries when switching to built-in server
+        await DefaultPreference.clear('bch2_electrum_host');
+        await DefaultPreference.clear('bch2_electrum_port');
+        await DefaultPreference.clear('bch2_electrum_ssl');
       }
       // Save BC2 server settings
       if (bc2SelectedServer === -1 && bc2CustomHost.trim()) {
         await DefaultPreference.set('bc2_electrum_host', bc2CustomHost.trim());
         await DefaultPreference.set('bc2_electrum_port', bc2CustomPort);
         await DefaultPreference.set('bc2_electrum_ssl', bc2UseSSL ? '1' : '0');
+      } else {
+        await DefaultPreference.clear('bc2_electrum_host');
+        await DefaultPreference.clear('bc2_electrum_port');
+        await DefaultPreference.clear('bc2_electrum_ssl');
       }
       Alert.alert('Settings Saved', 'Your Electrum server settings have been saved. Restart the app for changes to take effect.');
     } catch (error: any) {

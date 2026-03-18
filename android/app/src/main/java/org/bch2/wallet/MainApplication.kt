@@ -39,14 +39,14 @@ class MainApplication : Application(), ReactApplication {
         } else if (key == "donottrack") {
             // Handle Do Not Track changes similar to iOS
             val isEnabled = prefs.getString("donottrack", "0") == "1"
-            Log.d("MainApplication", "Do Not Track changed to: $isEnabled")
+            if (BuildConfig.DEBUG) Log.d("MainApplication", "Do Not Track changed to: $isEnabled")
             
             if (isEnabled) {
                 // Set deviceUIDCopy to "Disabled"
                 prefs.edit()
                     .putString("deviceUIDCopy", "Disabled")
                     .apply()
-                Log.d("MainApplication", "Do Not Track enabled - set deviceUIDCopy to 'Disabled'")
+                if (BuildConfig.DEBUG) Log.d("MainApplication", "Do Not Track enabled - set deviceUIDCopy to 'Disabled'")
             } else {
                 // Re-initialize device UID
                 initializeDeviceUID()
@@ -60,7 +60,7 @@ class MainApplication : Application(), ReactApplication {
                     prefs.edit()
                         .putString("deviceUIDCopy", deviceUID)
                         .apply()
-                    Log.d("MainApplication", "deviceUID changed, synced to deviceUIDCopy: $deviceUID")
+                    if (BuildConfig.DEBUG) Log.d("MainApplication", "deviceUID changed, synced to deviceUIDCopy: $deviceUID")
                 }
             }
         }
@@ -97,7 +97,11 @@ class MainApplication : Application(), ReactApplication {
         sharedPref.registerOnSharedPreferenceChangeListener(preferenceChangeListener)
         
         // Register the theme change receiver
-        registerReceiver(themeChangeReceiver, IntentFilter(Intent.ACTION_CONFIGURATION_CHANGED))
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(themeChangeReceiver, IntentFilter(Intent.ACTION_CONFIGURATION_CHANGED), RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(themeChangeReceiver, IntentFilter(Intent.ACTION_CONFIGURATION_CHANGED))
+        }
         
         val sharedI18nUtilInstance = I18nUtil.getInstance()
         sharedI18nUtilInstance.allowRTL(applicationContext, true)
@@ -132,10 +136,10 @@ class MainApplication : Application(), ReactApplication {
                 if (enabled) {
                     Bugsnag.start(this)
                 } else {
-                    Log.d("MainApplication", "Bugsnag disabled - no valid API key configured")
+                    if (BuildConfig.DEBUG) Log.d("MainApplication", "Bugsnag disabled - no valid API key configured")
                 }
             } catch (e: Exception) {
-                Log.d("MainApplication", "Bugsnag initialization skipped: ${e.message}")
+                if (BuildConfig.DEBUG) Log.d("MainApplication", "Bugsnag initialization skipped: ${e.message}")
             }
         }
     }
@@ -153,7 +157,7 @@ class MainApplication : Application(), ReactApplication {
                 sharedPref.edit()
                     .putString("deviceUIDCopy", "Disabled")
                     .apply()
-                Log.d("MainApplication", "Do Not Track enabled - set deviceUIDCopy to 'Disabled'")
+                if (BuildConfig.DEBUG) Log.d("MainApplication", "Do Not Track enabled - set deviceUIDCopy to 'Disabled'")
             }
             return
         }
@@ -180,7 +184,7 @@ class MainApplication : Application(), ReactApplication {
             sharedPref.edit()
                 .putString("deviceUIDCopy", deviceUID)
                 .apply()
-            Log.d("MainApplication", "Synced deviceUID to deviceUIDCopy: $deviceUID")
+            if (BuildConfig.DEBUG) Log.d("MainApplication", "Synced deviceUID to deviceUIDCopy: $deviceUID")
         }
     }
 
@@ -208,7 +212,7 @@ class MainApplication : Application(), ReactApplication {
                     .putBoolean("shouldShowCacheClearedAlert", true)
                     .apply()
                 
-                Log.d("MainApplication", "Cache and files cleared on launch")
+                if (BuildConfig.DEBUG) Log.d("MainApplication", "Cache and files cleared on launch")
             } catch (e: Exception) {
                 Log.e("MainApplication", "Error clearing files", e)
             }
@@ -227,7 +231,7 @@ class MainApplication : Application(), ReactApplication {
             }
             try {
                 file.delete()
-                Log.d("MainApplication", "Deleted: ${file.absolutePath}")
+                if (BuildConfig.DEBUG) Log.d("MainApplication", "Deleted: ${file.absolutePath}")
             } catch (e: Exception) {
                 Log.e("MainApplication", "Error deleting file: ${file.absolutePath}", e)
             }

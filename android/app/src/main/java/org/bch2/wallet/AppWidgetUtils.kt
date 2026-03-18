@@ -23,12 +23,12 @@ object AppWidgetUtils {
      * Trigger update for all widgets when theme changes
      */
     fun updateWidgetsForThemeChange(context: Context) {
-        Log.d(TAG, "Updating widgets for theme change")
+        if (BuildConfig.DEBUG) Log.d(TAG, "Updating widgets for theme change")
         
         // Update Bitcoin Price widgets - force a complete refresh
         val bitcoinWidgetIds = getBitcoinPriceWidgetIds(context)
         if (bitcoinWidgetIds.isNotEmpty()) {
-            Log.d(TAG, "Refreshing ${bitcoinWidgetIds.size} Bitcoin Price widgets")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Refreshing ${bitcoinWidgetIds.size} Bitcoin Price widgets")
             for (widgetId in bitcoinWidgetIds) {
                 BitcoinPriceWidget.refreshWidget(context, widgetId)
             }
@@ -37,7 +37,7 @@ object AppWidgetUtils {
         // Update Market widgets
         val marketWidgetIds = MarketWidget.getAllWidgetIds(context)
         if (marketWidgetIds.isNotEmpty()) {
-            Log.d(TAG, "Refreshing ${marketWidgetIds.size} Market widgets")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Refreshing ${marketWidgetIds.size} Market widgets")
             MarketWidget.refreshAllWidgetsImmediately(context)
         }
     }
@@ -96,7 +96,7 @@ object AppWidgetUtils {
      * Refresh all widgets by triggering updates
      */
     fun refreshAllWidgets(context: Context) {
-        Log.d(TAG, "Refreshing all widgets")
+        if (BuildConfig.DEBUG) Log.d(TAG, "Refreshing all widgets")
         
         // Refresh Bitcoin Price widgets
         val bitcoinWidgetIds = getBitcoinPriceWidgetIds(context)

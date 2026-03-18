@@ -3,6 +3,7 @@ package org.bch2.wallet
 import android.appwidget.AppWidgetManager
 import android.content.Intent
 import android.os.Bundle
+import android.view.WindowManager
 import android.widget.Button
 import androidx.appcompat.app.AppCompatActivity
 
@@ -16,6 +17,7 @@ class MarketWidgetConfigureActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
 
         // Set the result to CANCELED. This will be overridden if the user
         // configures the widget properly and clicks the Add button

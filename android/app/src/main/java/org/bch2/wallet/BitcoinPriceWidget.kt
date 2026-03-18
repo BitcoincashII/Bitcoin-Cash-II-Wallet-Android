@@ -92,7 +92,7 @@ class BitcoinPriceWidget : AppWidgetProvider() {
         super.onUpdate(context, appWidgetManager, appWidgetIds)
         
         for (widgetId in appWidgetIds) {
-            Log.d(TAG, "Updating widget with ID: $widgetId")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Updating widget with ID: $widgetId")
             refreshWidget(context, widgetId)
         }
     }
@@ -105,7 +105,10 @@ class BitcoinPriceWidget : AppWidgetProvider() {
 
     override fun onDisabled(context: Context) {
         super.onDisabled(context)
-        context.getSharedPreferences(SHARED_PREF_NAME, Context.MODE_PRIVATE).edit().clear().apply()
+        context.getSharedPreferences(SHARED_PREF_NAME, Context.MODE_PRIVATE).edit()
+            .remove("previous_price")
+            .remove("preferredCurrencyLocale")
+            .apply()
         WorkManager.getInstance(context).cancelUniqueWork(WidgetUpdateWorker.WORK_NAME)
     }
 

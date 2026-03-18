@@ -18,14 +18,12 @@ object MarketAPI {
     private const val TAG = "MarketAPI"
     private val client = OkHttpClient()
     private val numberFormatter = NumberFormat.getNumberInstance()
-    private val electrumClient = ElectrumClient()
-    
     private var lastFetchedFee: String? = null
 
     // Single indicator for error/unavailable
     private const val ERROR_INDICATOR = "!"
     
-    var baseUrl: String? = null
+    internal var baseUrl: String? = null
     
     data class ApiResponse(val body: String?, val code: Int)
     data class PriceResult(val rateDouble: Double, val formattedRate: String?)
@@ -43,7 +41,7 @@ object MarketAPI {
         Log.w(TAG, "BCH2 price data not yet available. Returning null for $currency.")
         return ApiResponse(null, 200)
         val startTime = System.currentTimeMillis()
-        Log.d(TAG, "Starting price fetch for currency: $currency")
+        if (BuildConfig.DEBUG) Log.d(TAG, "Starting price fetch for currency: $currency")
 
         try {
             // Load the currency info from JSON
@@ -59,10 +57,10 @@ object MarketAPI {
             val source = currencyInfo.getString("source")
             val endPointKey = currencyInfo.getString("endPointKey")
             
-            Log.d(TAG, "Using price source: $source, endpoint key: $endPointKey")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Using price source: $source, endpoint key: $endPointKey")
 
             val urlString = buildURLString(source, endPointKey)
-            Log.d(TAG, "Fetching price from URL: $urlString")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Fetching price from URL: $urlString")
 
             val request = Request.Builder().url(urlString).build()
             val apiStartTime = System.currentTimeMillis()
@@ -71,7 +69,7 @@ object MarketAPI {
             val apiDuration = System.currentTimeMillis() - apiStartTime
             
             val responseCode = response.code
-            Log.d(TAG, "Price API response received in ${apiDuration}ms, response code: $responseCode")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Price API response received in ${apiDuration}ms, response code: $responseCode")
             
             if (responseCode == 429) {
                 Log.e(TAG, "Rate limited by API ($source). Response code: $responseCode, Headers: ${response.headers}")
@@ -84,7 +82,7 @@ object MarketAPI {
             }
 
             val jsonResponse = response.body?.string()
-            Log.d(TAG, "Raw response from $source: $jsonResponse")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Raw response from $source: $jsonResponse")
             
             val parsedResult = if (jsonResponse != null) {
                 parseJSONBasedOnSource(jsonResponse, source, endPointKey)
@@ -156,13 +154,14 @@ object MarketAPI {
         val startTime = System.currentTimeMillis()
         Log.i(TAG, "Fetching next block fee from Electrum")
         
-        // Initialize ElectrumClient with context if not already done
+        // Create a per-request ElectrumClient to avoid thread-safety issues
+        val electrumClient = ElectrumClient()
         electrumClient.initialize(context)
-        
+
         // Set up network status listener
         electrumClient.setNetworkStatusListener(object : ElectrumClient.NetworkStatusListener {
             override fun onNetworkStatusChanged(isConnected: Boolean) {
-                Log.d(TAG, "Electrum network status changed: ${if (isConnected) "Connected" else "Disconnected"}")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Electrum network status changed: ${if (isConnected) "Connected" else "Disconnected"}")
             }
             
             override fun onConnectionError(error: String) {
@@ -170,7 +169,7 @@ object MarketAPI {
             }
             
             override fun onConnectionSuccess() {
-                Log.d(TAG, "Successfully connected to Electrum server")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Successfully connected to Electrum server")
             }
         })
         
@@ -189,7 +188,7 @@ object MarketAPI {
             }
             
             // First try connecting directly for fee histogram
-            Log.d(TAG, "Attempting to connect directly to Electrum server for fee")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Attempting to connect directly to Electrum server for fee")
             // Use validateCertificates=false because electrum.bch2.org uses a self-signed SSL cert
             var success = electrumClient.connectToNextAvailable(validateCertificates = false)
 
@@ -211,14 +210,14 @@ object MarketAPI {
                 }
             }
             
-            Log.d(TAG, "Successfully connected to Electrum server. Sending fee histogram request")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Successfully connected to Electrum server. Sending fee histogram request")
             val message = "{\"id\": 1, \"method\": \"mempool.get_fee_histogram\", \"params\": []}\n"
             if (!electrumClient.send(message.toByteArray())) {
                 Log.e(TAG, "Failed to send fee histogram request. Fee unavailable.")
                 return ERROR_INDICATOR
             }
             
-            Log.d(TAG, "Waiting for fee histogram response")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Waiting for fee histogram response")
             val receivedData = electrumClient.receive()
             if (receivedData.isEmpty()) {
                 Log.e(TAG, "Empty response from Electrum server when requesting fee histogram. Fee unavailable.")
@@ -226,7 +225,7 @@ object MarketAPI {
             }
             
             val jsonString = String(receivedData)
-            Log.d(TAG, "Received fee histogram: $jsonString")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Received fee histogram: $jsonString")
             
             try {
                 val json = JSONObject(jsonString)
@@ -241,7 +240,7 @@ object MarketAPI {
                     return ERROR_INDICATOR
                 }
                 
-                Log.d(TAG, "Calculating fee from ${feeHistogram.length()} data points")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Calculating fee from ${feeHistogram.length()} data points")
                 
                 val feeRate = calculateFeeFromHistogram(feeHistogram, 1)
                 if (feeRate <= 0) {
@@ -274,7 +273,7 @@ object MarketAPI {
      */
     private fun calculateFeeFromHistogram(feeHistogram: JSONArray, targetBlocks: Int): Double {
         try {
-            Log.d(TAG, "Calculating fee from histogram with ${feeHistogram.length()} entries for $targetBlocks blocks")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Calculating fee from histogram with ${feeHistogram.length()} entries for $targetBlocks blocks")
             
             // Transform histogram - accumulate vsize until we reach the target block size
             val blockSize = 32000000 // 32MB block size (BCH2)
@@ -296,12 +295,12 @@ object MarketAPI {
                 histogramToUse.add(Pair(feeRate, vsize))
                 totalVsize += vsize
                 
-                Log.v(TAG, "Fee entry: rate=$feeRate, vsize=$vsize, accumulated=$totalVsize")
+                if (BuildConfig.DEBUG) Log.v(TAG, "Fee entry: rate=$feeRate, vsize=$vsize, accumulated=$totalVsize")
                 
                 if (timeToStop) break
             }
             
-            Log.d(TAG, "Transformed histogram has ${histogramToUse.size} entries with total vsize $totalVsize")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Transformed histogram has ${histogramToUse.size} entries with total vsize $totalVsize")
             
             // Create a weighted flat array (similar to the JS implementation)
             val histogramFlat = mutableListOf<Double>()
@@ -325,7 +324,7 @@ object MarketAPI {
             val median = calculatePercentile(histogramFlat, 0.5)
             val result = median.coerceAtLeast(2.0) // Minimum 2 sat/byte
             
-            Log.d(TAG, "Calculated median fee rate: $median, final rate: $result sat/byte")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Calculated median fee rate: $median, final rate: $result sat/byte")
             return result
             
         } catch (e: Exception) {
@@ -390,12 +389,12 @@ object MarketAPI {
             marketData.rate = 0.0
             
             // 2. Fetch next block fee - Always run this, regardless of price fetch result
-            Log.d(TAG, "Fetching next block fee")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Fetching next block fee")
             val feeStartTime = System.currentTimeMillis()
             val nextBlockFee = fetchNextBlockFee(context)
             val feeDuration = System.currentTimeMillis() - feeStartTime
             
-            Log.d(TAG, "Next block fee fetched in ${feeDuration}ms: $nextBlockFee")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Next block fee fetched in ${feeDuration}ms: $nextBlockFee")
             marketData.nextBlock = nextBlockFee
             Log.i(TAG, "Set nextBlock fee in marketData: ${marketData.nextBlock}")
             

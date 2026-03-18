@@ -356,7 +356,7 @@ const BCH2WalletDetailWrapper: React.FC = () => {
       } : null);
       updateWalletBalance(w.id, balance.confirmed, balance.unconfirmed).catch(() => {});
     } catch (error) {
-      console.log('Failed to fetch wallet data:', error);
+      __DEV__ && console.log('Failed to fetch wallet data:', error);
     }
   }, []);
 

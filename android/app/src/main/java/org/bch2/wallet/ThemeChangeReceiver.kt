@@ -19,7 +19,7 @@ class ThemeChangeReceiver : BroadcastReceiver() {
             val currentNightMode = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
             
             if (!ThemeHelper.isForceDarkModeEnabled(context)) {
-                Log.d(TAG, "Configuration changed, updating widgets for theme change")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Configuration changed, updating widgets for theme change")
                 AppWidgetUtils.updateWidgetsForThemeChange(context)
             }
         }

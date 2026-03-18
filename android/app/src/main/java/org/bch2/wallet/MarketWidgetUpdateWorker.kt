@@ -29,7 +29,7 @@ class MarketWidgetUpdateWorker(context: Context, workerParams: WorkerParameters)
             val currentTime = System.currentTimeMillis()
             
             if (!forceUpdate && currentTime - lastUpdateTime < MIN_UPDATE_INTERVAL_MS) {
-                Log.d(TAG, "Skipping update - too soon since last update")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Skipping update - too soon since last update")
                 return
             }
                 
@@ -51,7 +51,7 @@ class MarketWidgetUpdateWorker(context: Context, workerParams: WorkerParameters)
                 updateRequest
             )
             
-            Log.d(TAG, "Scheduled market widget update work with delay: ${initialDelay}ms")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Scheduled market widget update work with delay: ${initialDelay}ms")
         }
         
         /**
@@ -64,7 +64,7 @@ class MarketWidgetUpdateWorker(context: Context, workerParams: WorkerParameters)
             
             return if (rateLimitedTime > 0 && currentTime - rateLimitedTime < RATE_LIMIT_COOLDOWN_MS) {
                 val remainingCooldown = RATE_LIMIT_COOLDOWN_MS - (currentTime - rateLimitedTime)
-                Log.d(TAG, "Rate limit cooldown active, delaying for ${remainingCooldown}ms")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Rate limit cooldown active, delaying for ${remainingCooldown}ms")
                 remainingCooldown
             } else {
                 0
@@ -87,17 +87,17 @@ class MarketWidgetUpdateWorker(context: Context, workerParams: WorkerParameters)
                 updateRequest
             )
             
-            Log.d(TAG, "Scheduled network retry in $NETWORK_RETRY_DELAY_SECONDS seconds")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Scheduled network retry in $NETWORK_RETRY_DELAY_SECONDS seconds")
         }
     }
 
     override suspend fun doWork(): Result {
-        Log.d(TAG, "MarketWidgetUpdateWorker running. Confirming interaction with MainActivity.")
+        if (BuildConfig.DEBUG) Log.d(TAG, "MarketWidgetUpdateWorker running. Confirming interaction with MainActivity.")
         return updateMarketWidgets()
     }
 
     private suspend fun updateMarketWidgets(): Result {
-        Log.d(TAG, "Starting market widget update work")
+        if (BuildConfig.DEBUG) Log.d(TAG, "Starting market widget update work")
         val widgetIds = MarketWidget.getAllWidgetIds(applicationContext)
         
         val currency = getPreferredCurrency(applicationContext)
@@ -154,14 +154,14 @@ class MarketWidgetUpdateWorker(context: Context, workerParams: WorkerParameters)
             }
             
             val jsonString = json.toString()
-            Log.d(TAG, "Storing market data JSON: $jsonString")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Storing market data JSON: $jsonString")
             
             applicationContext.getSharedPreferences(SHARED_PREF_NAME, Context.MODE_PRIVATE)
                 .edit()
                 .putString(MarketData.PREF_KEY, jsonString)
                 .apply()
                 
-            Log.d(TAG, "Stored market data: $marketData")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Stored market data: $marketData")
         } catch (e: Exception) {
             Log.e(TAG, "Error storing market data", e)
         }
@@ -183,7 +183,7 @@ class MarketWidgetUpdateWorker(context: Context, workerParams: WorkerParameters)
             updateRequest
         )
         
-        Log.d(TAG, "Scheduled next market update with delay: ${delayMs}ms")
+        if (BuildConfig.DEBUG) Log.d(TAG, "Scheduled next market update with delay: ${delayMs}ms")
     }
     
     /**

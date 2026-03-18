@@ -320,7 +320,7 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
           )}
         </TouchableOpacity>
 
-        <TouchableOpacity style={styles.secondaryButton} onPress={() => setMode('select')}>
+        <TouchableOpacity style={styles.secondaryButton} onPress={() => { setMnemonic(''); setMode('select'); }}>
           <Text style={styles.secondaryButtonText}>Back</Text>
         </TouchableOpacity>
       </ScrollView>
@@ -379,7 +379,7 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
           )}
         </TouchableOpacity>
 
-        <TouchableOpacity style={styles.secondaryButton} onPress={() => setMode(previousMode)}>
+        <TouchableOpacity style={styles.secondaryButton} onPress={() => { setPassword(''); setConfirmPassword(''); setMode(previousMode); }}>
           <Text style={styles.secondaryButtonText}>Back</Text>
         </TouchableOpacity>
       </ScrollView>
@@ -412,6 +412,9 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
           numberOfLines={4}
           autoCapitalize="none"
           autoCorrect={false}
+          autoComplete="off"
+          importantForAutofill="no"
+          spellCheck={false}
           maxLength={500}
           accessibilityLabel="Recovery phrase, enter 12 or 24 words separated by spaces"
         />
@@ -441,7 +444,7 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
         )}
       </TouchableOpacity>
 
-      <TouchableOpacity style={styles.secondaryButton} onPress={() => setMode('select')}>
+      <TouchableOpacity style={styles.secondaryButton} onPress={() => { setImportMnemonic(''); setWalletLabel(''); setMode('select'); }}>
         <Text style={styles.secondaryButtonText}>Back</Text>
       </TouchableOpacity>
     </ScrollView>

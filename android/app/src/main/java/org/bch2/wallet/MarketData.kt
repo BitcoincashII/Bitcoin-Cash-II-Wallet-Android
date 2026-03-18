@@ -14,14 +14,14 @@ data class MarketData(
 ) {
     val formattedNextBlock: String
         get() {
-            Log.d("MarketData", "Getting formatted next block from value: '$nextBlock'")
+            if (BuildConfig.DEBUG) Log.d("MarketData", "Getting formatted next block from value: '$nextBlock'")
             return when (nextBlock) {
                 "..." -> {
-                    Log.d("MarketData", "Next block is a loading placeholder")
+                    if (BuildConfig.DEBUG) Log.d("MarketData", "Next block is a loading placeholder")
                     "..."
                 }
                 "!" -> {
-                    Log.d("MarketData", "Next block is an error placeholder")
+                    if (BuildConfig.DEBUG) Log.d("MarketData", "Next block is an error placeholder")
                     "!"
                 }
                 else -> {
@@ -29,7 +29,7 @@ data class MarketData(
                         val nextBlockInt = nextBlock.toInt()
                         val numberFormatter = NumberFormat.getNumberInstance()
                         val formattedValue = "${numberFormatter.format(nextBlockInt)} sat/vb"
-                        Log.d("MarketData", "Formatted next block: $formattedValue from $nextBlock")
+                        if (BuildConfig.DEBUG) Log.d("MarketData", "Formatted next block: $formattedValue from $nextBlock")
                         formattedValue
                     } catch (e: Exception) {
                         Log.e("MarketData", "Error formatting next block value: '$nextBlock'", e)

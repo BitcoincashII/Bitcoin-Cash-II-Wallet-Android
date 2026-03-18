@@ -26,13 +26,16 @@ class ElectrumClient {
         private const val TAG = "ElectrumClient"
         private const val MAX_RETRIES = 3
         private const val RETRY_DELAY_MS = 1000L // 1 second delay between retries
+
+        /** Debug-only logging — stripped from release builds */
+        private fun logD(tag: String, msg: String) {
+            if (BuildConfig.DEBUG) Log.d(tag, msg)
+        }
         
-        // BCH2 Electrum servers (SSL preferred for security)
+        // BCH2 Electrum servers — SSL only for production security
         val hardcodedPeers = listOf(
             ElectrumServer("electrum.bch2.org", 50002, true),
-            ElectrumServer("electrum2.bch2.org", 50002, true),
-            ElectrumServer("electrum.bch2.org", 50001, false),
-            ElectrumServer("electrum2.bch2.org", 50001, false)
+            ElectrumServer("electrum2.bch2.org", 50002, true)
         )
     }
 
@@ -49,14 +52,14 @@ class ElectrumClient {
      */
     fun initialize(context: Context) {
         Log.i(TAG, "Initializing ElectrumClient with context")
-        this.context = context
+        this.context = context.applicationContext
     }
     
     /**
      * Set a listener for network status changes
      */
     fun setNetworkStatusListener(listener: NetworkStatusListener) {
-        Log.d(TAG, "Setting network status listener")
+        logD(TAG, "Setting network status listener")
         this.networkStatusListener = listener
     }
     
@@ -74,7 +77,7 @@ class ElectrumClient {
      */
     private fun isNetworkAvailable(): Boolean {
         val hasNetwork = context?.let { NetworkUtils.isNetworkAvailable(it) } ?: false
-        Log.d(TAG, "Network available: $hasNetwork")
+        logD(TAG, "Network available: $hasNetwork")
         return hasNetwork
     }
     
@@ -103,12 +106,12 @@ class ElectrumClient {
             val server = servers[serverIndex]
             if (connected) break
             
-            Log.d(TAG, "Trying server ${serverIndex+1}/${servers.size}: ${server.host}:${server.port} (SSL: ${server.isSsl})")
+            logD(TAG, "Trying server ${serverIndex+1}/${servers.size}: ${server.host}:${server.port} (SSL: ${server.isSsl})")
             
             // Try up to MAX_RETRIES times per server
             for (attempt in 1..MAX_RETRIES) {
                 try {
-                    Log.d(TAG, "Connection attempt $attempt/$MAX_RETRIES to ${server.host}:${server.port} (SSL: ${server.isSsl})")
+                    logD(TAG, "Connection attempt $attempt/$MAX_RETRIES to ${server.host}:${server.port} (SSL: ${server.isSsl})")
                     val attemptStartTime = System.currentTimeMillis()
                     
                     withTimeout(connectTimeout) {
@@ -125,14 +128,14 @@ class ElectrumClient {
                     lastError = e
                     Log.e(TAG, "Connection to ${server.host}:${server.port} timed out after ${connectTimeout}ms (attempt $attempt)")
                     if (attempt < MAX_RETRIES) {
-                        Log.d(TAG, "Retrying after ${RETRY_DELAY_MS}ms delay")
+                        logD(TAG, "Retrying after ${RETRY_DELAY_MS}ms delay")
                         delay(RETRY_DELAY_MS)
                     }
                 } catch (e: Exception) {
                     lastError = e
                     Log.e(TAG, "Error connecting to ${server.host}:${server.port} (attempt $attempt): ${e.message}")
                     if (attempt < MAX_RETRIES) {
-                        Log.d(TAG, "Retrying after ${RETRY_DELAY_MS}ms delay")
+                        logD(TAG, "Retrying after ${RETRY_DELAY_MS}ms delay")
                         delay(RETRY_DELAY_MS)
                     }
                 }
@@ -166,7 +169,7 @@ class ElectrumClient {
         validateCertificates: Boolean = true
     ): Boolean = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
-        Log.d(TAG, "Attempting direct connection to ${server.host}:${server.port} (SSL: ${server.isSsl})")
+        logD(TAG, "Attempting direct connection to ${server.host}:${server.port} (SSL: ${server.isSsl})")
 
         var result = false
 
@@ -178,28 +181,25 @@ class ElectrumClient {
 
         try {
             close() // Close any existing connection
-            Log.d(TAG, "Creating ${if (server.isSsl) "SSL " else ""}socket to ${server.host}:${server.port}")
+            logD(TAG, "Creating ${if (server.isSsl) "SSL " else ""}socket to ${server.host}:${server.port}")
 
-            socket = if (server.isSsl) {
-                createSslSocket(server.host, server.port, validateCertificates)
-            } else {
-                Socket(server.host, server.port)
-            }
+            // Always use SSL — plaintext connections are not permitted
+            socket = createSslSocket(server.host, server.port, validateCertificates)
 
-            Log.d(TAG, "Socket created successfully. Setting timeout and getting streams.")
+            logD(TAG, "Socket created successfully. Setting timeout and getting streams.")
             socket?.soTimeout = 10000 // 10 seconds read timeout
             outputStream = socket?.getOutputStream()
             inputReader = BufferedReader(InputStreamReader(socket?.getInputStream()))
 
             // Testing the connection with simple version request
             val versionRequest = "{\"id\": 0, \"method\": \"server.version\", \"params\": [\"BCH2Wallet\", \"1.4\"]}\n"
-            Log.d(TAG, "Sending version request to verify connection")
+            logD(TAG, "Sending version request to verify connection")
             send(versionRequest.toByteArray())
 
             val response = receive()
             if (response.isNotEmpty()) {
                 val responseStr = String(response)
-                Log.d(TAG, "Received server version response: $responseStr")
+                logD(TAG, "Received server version response: $responseStr")
                 networkStatusListener?.onNetworkStatusChanged(true)
                 logServerDetails(server) // Log server details here
                 result = true
@@ -215,7 +215,7 @@ class ElectrumClient {
         }
 
         val duration = System.currentTimeMillis() - startTime
-        Log.d(TAG, "Connection attempt to ${server.host}:${server.port} completed in ${duration}ms, result: $result")
+        logD(TAG, "Connection attempt to ${server.host}:${server.port} completed in ${duration}ms, result: $result")
 
         result
     }
@@ -226,7 +226,7 @@ class ElectrumClient {
     suspend fun send(data: ByteArray): Boolean = withContext(Dispatchers.IO) {
         val message = String(data).trim()
         val messagePreview = if (message.length > 100) message.substring(0, 100) + "..." else message
-        Log.d(TAG, "Sending to Electrum: $messagePreview")
+        logD(TAG, "Sending to Electrum: $messagePreview")
         
         if (!isNetworkAvailable()) {
             Log.e(TAG, "Cannot send data: No network connection available")
@@ -237,7 +237,7 @@ class ElectrumClient {
         try {
             outputStream?.write(data)
             outputStream?.flush()
-            Log.d(TAG, "Data sent successfully")
+            logD(TAG, "Data sent successfully")
             return@withContext true
         } catch (e: Exception) {
             Log.e(TAG, "Error sending data to Electrum server: ${e.javaClass.simpleName} - ${e.message}")
@@ -250,20 +250,17 @@ class ElectrumClient {
      * Receive data from the connected Electrum server with timeout handling
      */
     suspend fun receive(): ByteArray = withContext(Dispatchers.IO) {
-        Log.d(TAG, "Waiting to receive data from Electrum server")
+        logD(TAG, "Waiting to receive data from Electrum server")
         val startTime = System.currentTimeMillis()
         
         try {
             val response = StringBuilder()
-            var line: String? = null
-            
+
             try {
-                while (inputReader?.readLine()?.also { line = it } != null) {
+                // Electrum JSON-RPC uses newline-delimited JSON — read a single line
+                val line = inputReader?.readLine()
+                if (line != null) {
                     response.append(line)
-                    // Break after receiving a complete JSON object
-                    if (line?.contains("}") == true) {
-                        break
-                    }
                 }
             } catch (e: SocketTimeoutException) {
                 Log.e(TAG, "Socket read timed out after ${System.currentTimeMillis() - startTime}ms")
@@ -275,7 +272,7 @@ class ElectrumClient {
             
             if (responseData.isNotEmpty()) {
                 val duration = System.currentTimeMillis() - startTime
-                Log.d(TAG, "Received data (${responseData.size} bytes) in ${duration}ms: $responsePreview")
+                logD(TAG, "Received data (${responseData.size} bytes) in ${duration}ms: $responsePreview")
             } else {
                 Log.w(TAG, "Received empty response from Electrum server")
             }
@@ -305,38 +302,65 @@ class ElectrumClient {
         }
     }
     
+    // Known BCH2 Electrum server hosts — only these may skip full cert validation
+    private val BCH2_ELECTRUM_HOSTS = setOf(
+        "electrum.bch2.org",
+        "144.202.73.66",
+        "45.32.138.29",
+        "108.61.190.83",
+        "64.176.215.202",
+        "139.180.132.24",
+    )
+
     /**
      * Create an SSL socket with certificate validation control.
-     * When validateCertificates is false, self-signed certificates are accepted.
-     * This is needed for the BCH2 Electrum server (electrum.bch2.org) which uses
-     * a self-signed SSL certificate.
+     * When validateCertificates is false, self-signed certificates are accepted
+     * ONLY for known BCH2 Electrum server hosts. Unknown hosts always use full
+     * validation to prevent MITM attacks.
      */
     private fun createSslSocket(host: String, port: Int, validateCertificates: Boolean = true): SSLSocket {
         val sslContext = SSLContext.getInstance("TLS")
-        if (validateCertificates) {
-            // Use default trust manager for proper certificate validation
+        if (validateCertificates || host !in BCH2_ELECTRUM_HOSTS) {
+            // Use default trust manager for proper certificate validation.
+            // Also enforced for unknown hosts even if validateCertificates=false.
+            if (!validateCertificates && host !in BCH2_ELECTRUM_HOSTS) {
+                Log.w(TAG, "Certificate validation skip denied for unknown host: $host — using default validation")
+            }
             sslContext.init(null, null, null)
         } else {
-            // Accept self-signed certificates (for BCH2 Electrum server)
-            val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
+            // Accept self-signed certificates for known BCH2 Electrum servers only.
+            // Still validates cert is present and not expired.
+            val trustBCH2Certs = arrayOf<TrustManager>(object : X509TrustManager {
                 override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-                override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+                override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+                    if (chain.isNullOrEmpty()) throw java.security.cert.CertificateException("Empty certificate chain from $host")
+                    chain[0].checkValidity() // Reject expired certs
+                }
                 override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
             })
-            sslContext.init(null, trustAllCerts, SecureRandom())
+            sslContext.init(null, trustBCH2Certs, SecureRandom())
         }
 
         val factory: SSLSocketFactory = sslContext.socketFactory
-        return factory.createSocket(host, port) as SSLSocket
+        val sslSocket = factory.createSocket(host, port) as SSLSocket
+        // Restrict to TLS 1.2+ to prevent protocol downgrade attacks
+        sslSocket.enabledProtocols = arrayOf("TLSv1.2", "TLSv1.3")
+        // Enable hostname verification for non-BCH2 hosts (standard CA-validated connections)
+        if (validateCertificates || host !in BCH2_ELECTRUM_HOSTS) {
+            sslSocket.sslParameters = sslSocket.sslParameters.apply {
+                endpointIdentificationAlgorithm = "HTTPS"
+            }
+        }
+        return sslSocket
     }
 
     private fun getNextPeer(): ElectrumServer {
         val savedPeer = getSavedPeer()
         return if (savedPeer != null) {
-            Log.d(TAG, "Using saved peer: ${savedPeer.host}:${savedPeer.port} (SSL: ${savedPeer.isSsl})")
+            logD(TAG, "Using saved peer: ${savedPeer.host}:${savedPeer.port} (SSL: ${savedPeer.isSsl})")
             savedPeer
         } else {
-            Log.d(TAG, "No saved peer found. Using default hardcoded peers.")
+            logD(TAG, "No saved peer found. Using default hardcoded peers.")
             hardcodedPeers.random()
         }
     }

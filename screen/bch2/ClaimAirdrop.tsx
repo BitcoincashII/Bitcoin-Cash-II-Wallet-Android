@@ -600,7 +600,11 @@ export const ClaimAirdropScreen: React.FC = () => {
               placeholderTextColor={BCH2Colors.textMuted}
               autoCapitalize="none"
               autoCorrect={false}
+              autoComplete="off"
+              importantForAutofill="no"
+              spellCheck={false}
               secureTextEntry
+              maxLength={60}
             />
           )}
           {effectiveMode === 'phrase' && (
@@ -614,6 +618,10 @@ export const ClaimAirdropScreen: React.FC = () => {
               numberOfLines={3}
               autoCapitalize="none"
               autoCorrect={false}
+              autoComplete="off"
+              importantForAutofill="no"
+              spellCheck={false}
+              maxLength={500}
             />
           )}
           {effectiveMode === 'descriptor' && (
@@ -628,6 +636,9 @@ export const ClaimAirdropScreen: React.FC = () => {
               maxLength={5000}
               autoCapitalize="none"
               autoCorrect={false}
+              autoComplete="off"
+              importantForAutofill="no"
+              spellCheck={false}
             />
           )}
           <Text style={styles.helperText}>{effectiveConfig?.helperText}</Text>
@@ -644,6 +655,11 @@ export const ClaimAirdropScreen: React.FC = () => {
               placeholder="BIP39 passphrase if used..."
               placeholderTextColor={BCH2Colors.textMuted}
               secureTextEntry
+              autoComplete="off"
+              importantForAutofill="no"
+              spellCheck={false}
+              autoCorrect={false}
+              maxLength={256}
             />
           </View>
         )}
@@ -666,6 +682,10 @@ export const ClaimAirdropScreen: React.FC = () => {
           style={styles.backButton}
           onPress={() => {
             setError('');
+            setWifInput('');
+            setPhraseInput('');
+            setDescriptorInput('');
+            setPassphrase('');
             setStep(0);
           }}
         >
@@ -873,6 +893,7 @@ export const ClaimAirdropScreen: React.FC = () => {
               setScanResult(null);
               setAntiGamingWarning(null);
               setAntiGamingBlocked(false);
+              setStoredCredentials(null);
               setStep(1);
             }}
           >
