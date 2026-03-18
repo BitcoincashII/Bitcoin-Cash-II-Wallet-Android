@@ -23,6 +23,7 @@ export type BCH2RootStackParamList = {
     walletId: string;
   };
   AddWallet: undefined;
+  BCH2AppPassword: undefined;
 };
 
 // Navigation prop types

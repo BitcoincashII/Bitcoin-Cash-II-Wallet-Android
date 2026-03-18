@@ -83,9 +83,9 @@ export const ELECTRUM_SSL_PORT = 'electrum_ssl_port';
 export const ELECTRUM_SERVER_HISTORY = 'electrum_server_history';
 const ELECTRUM_CONNECTION_DISABLED = 'electrum_disabled';
 const storageKey = 'ELECTRUM_PEERS';
-const defaultPeer = { host: 'electrum.bch2.org', ssl: 50002, tcp: 50001 };
+const defaultPeer = { host: 'electrum.bch2.org', tcp: 50001 };
 export const hardcodedPeers: Peer[] = [
-  { host: 'electrum.bch2.org', ssl: 50002, tcp: 50001 },
+  { host: 'electrum.bch2.org', tcp: 50001 },
 ];
 
 export const suggestedServers: Peer[] = hardcodedPeers.map(peer => ({

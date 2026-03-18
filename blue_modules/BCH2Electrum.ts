@@ -29,14 +29,14 @@ export const BCH2_ELECTRUM_SSL_PORT = 'bch2_electrum_ssl_port';
 
 // Default BCH2 Electrum servers (post-fork chain)
 // SSL preferred for security; TCP available as fallback
-const defaultPeer: Peer = { host: 'electrum.bch2.org', ssl: 50002, tcp: 50001 };
+const defaultPeer: Peer = { host: 'electrum.bch2.org', tcp: 50001 };
 export const hardcodedPeers: Peer[] = [
-  { host: 'electrum.bch2.org', ssl: 50002, tcp: 50001 },
+  { host: 'electrum.bch2.org', tcp: 50001 },
 ];
 
 // BC2 Electrum servers (for airdrop balance checking)
 export const bc2Peers: Peer[] = [
-  { host: 'infra1.bitcoin-ii.org', ssl: 50009, tcp: 50008 },
+  { host: 'infra1.bitcoin-ii.org', tcp: 50008 },
   // TODO: Add explorer.bitcoin-ii.org:50008 when Electrum is deployed on that host
 ];
 

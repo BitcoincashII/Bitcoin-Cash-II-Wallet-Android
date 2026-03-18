@@ -16,6 +16,7 @@ import BCH2Send from '../screen/bch2/BCH2Send';
 import BCH2Settings from '../screen/bch2/BCH2Settings';
 import BCH2WalletDetail from '../screen/bch2/BCH2WalletDetail';
 import AddWallet from '../screen/bch2/AddWallet';
+import BCH2AppPassword from '../screen/bch2/BCH2AppPassword';
 import { getWallet, getWalletMnemonic, updateWalletBalance, StoredWallet } from '../class/bch2-wallet-storage';
 import { getTransactionsByAddress, getBC2Transactions, getBalanceByAddress, getBC2Balance, getBalanceByScripthash, getTransactionsByScripthash } from '../blue_modules/BCH2Electrum';
 import { sendTransaction, sendFromBech32, sendFromP2SH } from '../class/bch2-transaction';
@@ -104,6 +105,15 @@ export const BCH2Navigator: React.FC = () => {
         component={AddWallet}
         options={{
           title: 'Add Wallet',
+          headerBackTitle: 'Back',
+        }}
+      />
+
+      <Stack.Screen
+        name="BCH2AppPassword"
+        component={BCH2AppPassword}
+        options={{
+          title: 'App Password',
           headerBackTitle: 'Back',
         }}
       />

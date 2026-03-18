@@ -469,7 +469,7 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
 
         <TouchableOpacity
           style={styles.explorerCard}
-          onPress={() => navigation?.navigate('EncryptStorage')}
+          onPress={() => navigation?.navigate('BCH2AppPassword')}
           accessibilityLabel="Set up app password"
           accessibilityRole="button"
         >
