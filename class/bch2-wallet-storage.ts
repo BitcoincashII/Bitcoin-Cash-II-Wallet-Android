@@ -7,14 +7,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as bip39 from 'bip39';
 import BIP32Factory from 'bip32';
 import ecc from '../blue_modules/noble_ecc';
-
 const bip32 = BIP32Factory(ecc);
 const crypto = require('crypto');
 
 const WALLETS_KEY = '@bch2_wallets';
-const ENCRYPTION_ALGO_GCM = 'aes-256-gcm';
-const ENCRYPTION_ALGO_CBC = 'aes-256-cbc'; // Legacy — decrypt only
-const KEY_DERIVATION_ITERATIONS = 600000; // OWASP 2023 recommended minimum for PBKDF2-SHA256
 const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 
 // Simple async mutex to prevent concurrent read-modify-write races on wallet storage
@@ -31,130 +27,40 @@ export interface StoredWallet {
   id: string;
   type: 'bch2' | 'bc2' | 'bc1';  // bc1 = Native SegWit for BCH2 airdrop claims
   label: string;
-  mnemonic: string; // AES-256-GCM encrypted (gcm:salt:iv:authTag:ciphertext) or legacy CBC (salt:iv:ciphertext)
+  mnemonic: string;
   address: string;
   balance: number;
   unconfirmedBalance: number;
   createdAt: number;
-  isEncrypted?: boolean;  // false/undefined for legacy unencrypted wallets
-}
-
-/**
- * Encrypt a mnemonic using AES-256-GCM with PBKDF2 key derivation.
- * Returns "gcm:salt:iv:authTag:ciphertext" (all hex-encoded).
- * GCM provides both confidentiality and authenticity (prevents ciphertext tampering).
- */
-function encryptMnemonic(mnemonic: string, password: string): string {
-  const salt = crypto.randomBytes(16);
-  const key = crypto.pbkdf2Sync(password, salt, KEY_DERIVATION_ITERATIONS, 32, 'sha256');
-  try {
-    const iv = crypto.randomBytes(12); // 96-bit IV recommended for GCM
-    const cipher = crypto.createCipheriv(ENCRYPTION_ALGO_GCM, key, iv);
-    let encrypted = cipher.update(mnemonic, 'utf8', 'hex');
-    encrypted += cipher.final('hex');
-    const authTag = cipher.getAuthTag().toString('hex');
-    return 'gcm:' + salt.toString('hex') + ':' + iv.toString('hex') + ':' + authTag + ':' + encrypted;
-  } finally {
-    crypto.randomFillSync(key);
-  }
-}
-
-/**
- * Decrypt a mnemonic. Supports both new GCM format and legacy CBC format.
- * GCM format: "gcm:salt:iv:authTag:ciphertext"
- * Legacy CBC format: "salt:iv:ciphertext"
- */
-function decryptMnemonic(encryptedData: string, password: string): string {
-  const parts = encryptedData.split(':');
-
-  // New GCM format: gcm:salt:iv:authTag:ciphertext (5 parts)
-  if (parts[0] === 'gcm' && parts.length === 5) {
-    const salt = Buffer.from(parts[1], 'hex');
-    const iv = Buffer.from(parts[2], 'hex');
-    const authTag = Buffer.from(parts[3], 'hex');
-    const ciphertext = parts[4];
-    // Validate component lengths — reject truncated/oversized values that could
-    // weaken crypto (e.g. short authTag reduces authentication strength)
-    if (salt.length !== 16) throw new Error('Decryption failed: invalid GCM salt length');
-    if (iv.length !== 12) throw new Error('Decryption failed: invalid GCM IV length');
-    if (authTag.length !== 16) throw new Error('Decryption failed: invalid GCM authTag length');
-    const key = crypto.pbkdf2Sync(password, salt, KEY_DERIVATION_ITERATIONS, 32, 'sha256');
-    try {
-      const decipher = crypto.createDecipheriv(ENCRYPTION_ALGO_GCM, key, iv);
-      decipher.setAuthTag(authTag);
-      let decrypted = decipher.update(ciphertext, 'hex', 'utf8');
-      decrypted += decipher.final('utf8');
-      return decrypted;
-    } finally {
-      crypto.randomFillSync(key);
-    }
-  }
-
-  // Legacy CBC format: salt:iv:ciphertext (3 parts)
-  if (parts.length === 3) {
-    const salt = Buffer.from(parts[0], 'hex');
-    const iv = Buffer.from(parts[1], 'hex');
-    if (salt.length !== 16) throw new Error('Decryption failed: invalid salt length');
-    if (iv.length !== 16) throw new Error('Decryption failed: invalid IV length');
-    const ciphertext = parts[2];
-    const key = crypto.pbkdf2Sync(password, salt, KEY_DERIVATION_ITERATIONS, 32, 'sha256');
-    try {
-      const decipher = crypto.createDecipheriv(ENCRYPTION_ALGO_CBC, key, iv);
-      let decrypted = decipher.update(ciphertext, 'hex', 'utf8');
-      decrypted += decipher.final('utf8');
-      return decrypted;
-    } finally {
-      crypto.randomFillSync(key);
-    }
-  }
-
-  // Legacy unencrypted mnemonic — validate it looks like a real mnemonic
-  // to prevent malformed encrypted blobs from silently bypassing decryption
-  if (!bip39.validateMnemonic(encryptedData)) {
-    throw new Error('Decryption failed: unrecognized format');
-  }
-  return encryptedData;
 }
 
 /**
  * Save a new wallet to storage
- * @param password - Encryption password for the mnemonic (required)
  */
 export async function saveWallet(
   label: string,
   mnemonic: string,
-  walletType: 'bch2' | 'bc2' | 'bc1' = 'bch2',
-  password: string
+  walletType: 'bch2' | 'bc2' | 'bc1' = 'bch2'
 ): Promise<StoredWallet> {
-  if (!password || password.length < 8) {
-    throw new Error('Password must be at least 8 characters');
-  }
-
-  // Trim mnemonic once — must use same value for address derivation and encryption
+  // Trim mnemonic once — must use same value for address derivation and storage
   const trimmedMnemonic = mnemonic.trim();
 
-  // Validate mnemonic before saving — an invalid mnemonic would be permanently
-  // inaccessible because getWalletMnemonic validates after decryption
   if (!bip39.validateMnemonic(trimmedMnemonic)) {
     throw new Error('Invalid mnemonic phrase');
   }
 
-  // Derive address from mnemonic (before encrypting)
-  const address = await deriveAddress(trimmedMnemonic, walletType);
-
-  // Always encrypt the mnemonic
-  const encryptedMnemonic = encryptMnemonic(trimmedMnemonic, password);
+  // Derive address from mnemonic
+  const address = deriveAddress(trimmedMnemonic, walletType);
 
   const wallet: StoredWallet = {
     id: generateId(),
     type: walletType,
     label: label.trim(),
-    mnemonic: encryptedMnemonic,
+    mnemonic: trimmedMnemonic,
     address,
     balance: 0,
     unconfirmedBalance: 0,
     createdAt: Date.now(),
-    isEncrypted: true,
   };
 
   // Serialized via lock to prevent concurrent read-modify-write races
@@ -235,8 +141,8 @@ export async function deleteWallet(id: string): Promise<void> {
 /**
  * Derive address from mnemonic (BCH2 CashAddr, BC2 legacy, or bc1 SegWit)
  */
-async function deriveAddress(mnemonic: string, walletType: 'bch2' | 'bc2' | 'bc1' = 'bch2'): Promise<string> {
-  const seed = await bip39.mnemonicToSeed(mnemonic);
+function deriveAddress(mnemonic: string, walletType: 'bch2' | 'bc2' | 'bc1' = 'bch2'): string {
+  const seed = bip39.mnemonicToSeedSync(mnemonic);
   try {
     const root = bip32.fromSeed(seed);
 
@@ -309,56 +215,13 @@ function base58Encode(data: Buffer): string {
 
 /**
  * Get mnemonic for a wallet (for sending transactions)
- * @param password - Decryption password. Required for encrypted wallets.
  */
-export async function getWalletMnemonic(id: string, password: string = ''): Promise<string | null> {
+export async function getWalletMnemonic(id: string): Promise<string | null> {
   const wallet = await getWallet(id);
   if (!wallet?.mnemonic) return null;
-
-  if (wallet.isEncrypted) {
-    if (!password) {
-      throw new Error('Password is required for encrypted wallets');
-    }
-    const decrypted = decryptMnemonic(wallet.mnemonic, password);
-    // Validate decrypted result — AES-CBC has ~1/256 chance of wrong password
-    // producing valid padding but garbage output
-    if (!bip39.validateMnemonic(decrypted)) {
-      throw new Error('Decryption failed');
-    }
-    return decrypted;
-  }
-
-  // Legacy unencrypted wallet — validate before returning
-  if (!bip39.validateMnemonic(wallet.mnemonic)) {
-    throw new Error('Invalid mnemonic in legacy wallet');
-  }
   return wallet.mnemonic;
 }
 
-/**
- * Check if a wallet is encrypted
- */
-export async function isWalletEncrypted(id: string): Promise<boolean> {
-  const wallet = await getWallet(id);
-  return wallet?.isEncrypted === true;
-}
-
-/**
- * Verify a wallet password by attempting to decrypt the mnemonic.
- * Returns true if decryption succeeds, false otherwise.
- */
-export async function verifyWalletPassword(id: string, password: string): Promise<boolean> {
-  try {
-    const wallet = await getWallet(id);
-    if (!wallet?.mnemonic) return false;
-    if (!wallet.isEncrypted) return true; // Unencrypted wallets always pass
-    const decrypted = decryptMnemonic(wallet.mnemonic, password);
-    // Validate result — AES-CBC can produce garbage without throwing (~1/256)
-    return bip39.validateMnemonic(decrypted);
-  } catch {
-    return false;
-  }
-}
 
 // Helper functions
 
@@ -514,6 +377,4 @@ export default {
   updateWalletBalance,
   deleteWallet,
   getWalletMnemonic,
-  isWalletEncrypted,
-  verifyWalletPassword,
 };

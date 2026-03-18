@@ -15,7 +15,7 @@ import {
   Linking,
 } from 'react-native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2Shadows, BCH2BorderRadius } from '../../components/BCH2Theme';
-import { getWalletMnemonic, isWalletEncrypted } from '../../class/bch2-wallet-storage';
+import { getWalletMnemonic } from '../../class/bch2-wallet-storage';
 import { useScreenProtect } from '../../hooks/useScreenProtect';
 import { getBCH2TransactionUrl, getBC2TransactionUrl, getBCH2BlockUrl, getBC2BlockUrl } from '../../class/bch2-constants';
 import { PasswordModalWithRef, PasswordModalHandle } from '../../components/PasswordModal';
@@ -138,50 +138,16 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
 
   const handleBackupWallet = async () => {
     try {
-      const encrypted = await isWalletEncrypted(walletId);
-
-      if (!encrypted) {
-        // Legacy unencrypted wallet
-        const mnemonic = await getWalletMnemonic(walletId);
-        if (mnemonic) {
-          showMnemonicAlert(mnemonic);
-        } else {
-          Alert.alert('Error', 'Could not retrieve wallet backup phrase.');
-        }
-        return;
+      const mnemonic = await getWalletMnemonic(walletId);
+      if (mnemonic) {
+        showMnemonicAlert(mnemonic);
+      } else {
+        Alert.alert('Error', 'Could not retrieve wallet backup phrase.');
       }
-
-      // Encrypted wallet — show password modal
-      setPasswordModalVisible(true);
     } catch (error) {
       Alert.alert('Error', 'Failed to export wallet backup.');
     }
   };
-
-  const handleBackupPasswordSubmit = useCallback(async (password: string) => {
-    try {
-      const mnemonic = await getWalletMnemonic(walletId, password);
-      if (!mnemonic) {
-        passwordModalRef.current?.showError();
-        return;
-      }
-
-      passwordModalRef.current?.showSuccess();
-      backupPendingRef.current = true;
-
-      // Clear any previous timer before setting a new one
-      if (backupTimerRef.current) clearTimeout(backupTimerRef.current);
-      backupTimerRef.current = setTimeout(() => {
-        backupTimerRef.current = null;
-        if (!backupPendingRef.current) return;
-        backupPendingRef.current = false;
-        setPasswordModalVisible(false);
-        showMnemonicAlert(mnemonic);
-      }, 500);
-    } catch {
-      passwordModalRef.current?.showError();
-    }
-  }, [walletId, enableScreenProtect, disableScreenProtect]);
 
   const formatTxid = (txid: string): string => {
     if (!txid || txid.length <= 16) return txid;

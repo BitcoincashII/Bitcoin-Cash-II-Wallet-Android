@@ -463,6 +463,28 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
         </View>
       </View>
 
+      {/* Security Section */}
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: BCH2Colors.textPrimary }]}>Security</Text>
+
+        <TouchableOpacity
+          style={styles.explorerCard}
+          onPress={() => navigation?.navigate('EncryptStorage')}
+          accessibilityLabel="Set up app password"
+          accessibilityRole="button"
+        >
+          <View style={[styles.explorerRow, { paddingVertical: 16 }]}>
+            <View style={styles.explorerInfo}>
+              <Text style={styles.explorerLabel}>App Password</Text>
+              <Text style={[styles.explorerUrl, { color: BCH2Colors.textSecondary }]}>
+                Lock the app with a password on open
+              </Text>
+            </View>
+            <Text style={styles.explorerArrow}>→</Text>
+          </View>
+        </TouchableOpacity>
+      </View>
+
       {/* Network Info Section */}
       <View style={styles.section}>
         <Text style={[styles.sectionTitle, { color: BCH2Colors.textPrimary }]}>Network Information</Text>
