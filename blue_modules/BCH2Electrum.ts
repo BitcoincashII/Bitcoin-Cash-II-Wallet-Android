@@ -32,7 +32,6 @@ export const BCH2_ELECTRUM_SSL_PORT = 'bch2_electrum_ssl_port';
 const defaultPeer: Peer = { host: 'electrum.bch2.org', ssl: 50002, tcp: 50001 };
 export const hardcodedPeers: Peer[] = [
   { host: 'electrum.bch2.org', ssl: 50002, tcp: 50001 },
-  { host: 'electrum2.bch2.org', ssl: 50002, tcp: 50001 },
 ];
 
 // BC2 Electrum servers (for airdrop balance checking)
@@ -84,12 +83,15 @@ async function _doConnectMain(): Promise<void> {
 
     try {
       const useSSL = !!peer.ssl;
+      // BCH2 Electrum servers use self-signed certs — disable TLS verification for known hosts
+      const isSelfSigned = peer.host === 'electrum.bch2.org' || peer.host === 'electrum2.bch2.org';
       mainClient = new ElectrumClient(
         net,
         tls,
         useSSL ? peer.ssl : peer.tcp,
         peer.host,
-        useSSL ? 'tls' : 'tcp'
+        useSSL ? 'tls' : 'tcp',
+        useSSL && isSelfSigned ? { rejectUnauthorized: false } : undefined
       );
 
       mainClient.onError = (e: Error) => {

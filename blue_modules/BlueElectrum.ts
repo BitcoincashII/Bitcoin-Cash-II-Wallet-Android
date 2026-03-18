@@ -86,7 +86,6 @@ const storageKey = 'ELECTRUM_PEERS';
 const defaultPeer = { host: 'electrum.bch2.org', ssl: 50002, tcp: 50001 };
 export const hardcodedPeers: Peer[] = [
   { host: 'electrum.bch2.org', ssl: 50002, tcp: 50001 },
-  { host: 'electrum2.bch2.org', ssl: 50002, tcp: 50001 },
 ];
 
 export const suggestedServers: Peer[] = hardcodedPeers.map(peer => ({
@@ -257,7 +256,10 @@ export async function connectMain(): Promise<void> {
 
   try {
     console.log('begin connection:', JSON.stringify(usingPeer));
-    mainClient = new ElectrumClient(net, tls, usingPeer.ssl || usingPeer.tcp, usingPeer.host, usingPeer.ssl ? 'tls' : 'tcp');
+    // BCH2 Electrum servers use self-signed certs — disable TLS verification for known hosts
+    const isSelfSigned = usingPeer.host === 'electrum.bch2.org' || usingPeer.host === 'electrum2.bch2.org';
+    const tlsOptions = usingPeer.ssl && isSelfSigned ? { rejectUnauthorized: false } : undefined;
+    mainClient = new ElectrumClient(net, tls, usingPeer.ssl || usingPeer.tcp, usingPeer.host, usingPeer.ssl ? 'tls' : 'tcp', tlsOptions);
 
     mainClient.onError = function (e: { message: string }) {
       console.log('electrum mainClient.onError():', e.message);

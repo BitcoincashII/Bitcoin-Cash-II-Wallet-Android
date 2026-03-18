@@ -34,8 +34,7 @@ class ElectrumClient {
         
         // BCH2 Electrum servers — SSL only for production security
         val hardcodedPeers = listOf(
-            ElectrumServer("electrum.bch2.org", 50002, true),
-            ElectrumServer("electrum2.bch2.org", 50002, true)
+            ElectrumServer("electrum.bch2.org", 50002, true)
         )
     }
 
