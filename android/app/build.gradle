@@ -160,4 +160,3 @@ dependencies {
     implementation fileTree(dir: "libs", include: ["*.jar"])
     implementation 'androidx.constraintlayout:constraintlayout:2.2.1'
 }
-apply plugin: "com.bugsnag.android.gradle"

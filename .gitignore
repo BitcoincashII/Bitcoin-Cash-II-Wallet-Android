@@ -26,6 +26,7 @@ DerivedData
 .cxx/
 *.keystore
 !debug.keystore
+keystore.properties
 # Android/IntelliJ
 #
 build/
