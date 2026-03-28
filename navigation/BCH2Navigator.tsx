@@ -4,6 +4,7 @@
  */
 
 import React from 'react';
+import { View, Text } from 'react-native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { BCH2Colors, BCH2Typography } from '../components/BCH2Theme';
 import { BCH2RootStackParamList } from './BCH2NavigationTypes';
@@ -260,7 +261,11 @@ const BCH2WalletDetailWrapper: React.FC = () => {
   }, [wallet, fetchWalletData]);
 
   if (loading || !wallet) {
-    return null;
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0a0a0a' }}>
+        <Text style={{ color: '#888', fontSize: 16 }}>Loading wallet...</Text>
+      </View>
+    );
   }
 
   return (

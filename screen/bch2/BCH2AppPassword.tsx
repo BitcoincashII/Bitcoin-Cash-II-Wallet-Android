@@ -188,7 +188,7 @@ const styles = StyleSheet.create({
     marginTop: BCH2Spacing.sm,
   },
   dangerButton: {
-    backgroundColor: BCH2Colors.danger,
+    backgroundColor: BCH2Colors.error,
   },
   buttonText: {
     color: '#FFFFFF',

@@ -436,7 +436,7 @@ export const ClaimAirdropScreen: React.FC = () => {
 
     setImporting(true);
     try {
-      await saveWallet('Claimed BCH2 Wallet', storedCredentials!.value, 'bch2', walletPassword);
+      await saveWallet('Claimed BCH2 Wallet', storedCredentials!.value, 'bch2');
       // Clear sensitive data
       setWifInput('');
       setPhraseInput('');

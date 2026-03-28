@@ -158,7 +158,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   errorText: {
-    color: BCH2Colors.danger,
+    color: BCH2Colors.error,
     fontSize: 14,
     marginBottom: 12,
   },

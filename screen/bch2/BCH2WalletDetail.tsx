@@ -3,7 +3,7 @@
  * Shows wallet details, transactions, and actions
  */
 
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -18,7 +18,6 @@ import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2Shadows, BCH2BorderRadius 
 import { getWalletMnemonic } from '../../class/bch2-wallet-storage';
 import { useScreenProtect } from '../../hooks/useScreenProtect';
 import { getBCH2TransactionUrl, getBC2TransactionUrl, getBCH2BlockUrl, getBC2BlockUrl } from '../../class/bch2-constants';
-import { PasswordModalWithRef, PasswordModalHandle } from '../../components/PasswordModal';
 
 interface Transaction {
   txid: string;
@@ -55,24 +54,9 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
   refreshing: externalRefreshing,
 }) => {
   const [internalRefreshing, setInternalRefreshing] = useState(false);
-  const [passwordModalVisible, setPasswordModalVisible] = useState(false);
-  const passwordModalRef = useRef<PasswordModalHandle>(null);
-  const backupPendingRef = useRef(false);
-  const backupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshing = externalRefreshing ?? internalRefreshing;
   const primaryColor = isBC2 ? BCH2Colors.bc2Primary : BCH2Colors.primary;
   const coinSymbol = isBC2 ? 'BC2' : 'BCH2';
-
-  // Clean up backup timer on unmount to prevent mnemonic retention in closure
-  useEffect(() => {
-    return () => {
-      if (backupTimerRef.current) {
-        clearTimeout(backupTimerRef.current);
-        backupTimerRef.current = null;
-      }
-      backupPendingRef.current = false;
-    };
-  }, []);
 
   const onRefresh = useCallback(async () => {
     if (externalRefresh) {
@@ -304,17 +288,6 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
         <Text style={styles.exportButtonText}>Export Wallet Backup</Text>
       </TouchableOpacity>
     </ScrollView>
-    <PasswordModalWithRef
-      ref={passwordModalRef}
-      visible={passwordModalVisible}
-      title="Unlock Backup"
-      subtitle="Enter your password to view your recovery phrase"
-      onSubmit={handleBackupPasswordSubmit}
-      onCancel={() => {
-        backupPendingRef.current = false;
-        setPasswordModalVisible(false);
-      }}
-    />
     </>
   );
 };
