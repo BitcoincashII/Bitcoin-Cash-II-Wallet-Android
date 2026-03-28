@@ -64,6 +64,10 @@ APK output: `android/app/build/outputs/apk/release/app-release-unsigned.apk`
 - **Website:** https://bch2.org
 - **BC2 Website:** https://bitcoin-ii.org
 
+## Credits
+
+This wallet is a fork of [BlueWallet](https://github.com/BlueWallet/BlueWallet), adapted for Bitcoin Cash II.
+
 ## License
 
-MIT License
+MIT License - see [LICENSE](LICENSE)
