@@ -24,8 +24,7 @@ Download the latest APK from [Releases](https://github.com/BitcoincashII/Bitcoin
 - electrum2.bch2.org:50002 (SSL)
 
 **BC2:**
-- infra1.bitcoin-ii.org:50009 (SSL)
-- explorer.bitcoin-ii.org:50009 (SSL)
+- bc2electrum.bch2.org:50010 (TCP) / :50011 (SSL)
 
 ## Block Explorers
 

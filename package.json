@@ -1,6 +1,6 @@
 {
   "name": "bch2-wallet",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Bitcoin Cash II (BCH2) Wallet - Fork of BlueWallet with BC2 and BCH2 support",
   "license": "MIT",
   "repository": {

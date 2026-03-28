@@ -180,10 +180,13 @@ class ElectrumClient {
 
         try {
             close() // Close any existing connection
-            logD(TAG, "Creating ${if (server.isSsl) "SSL " else ""}socket to ${server.host}:${server.port}")
+            logD(TAG, "Creating ${if (server.isSsl) "SSL " else "TCP "}socket to ${server.host}:${server.port}")
 
-            // Always use SSL — plaintext connections are not permitted
-            socket = createSslSocket(server.host, server.port, validateCertificates)
+            socket = if (server.isSsl) {
+                createSslSocket(server.host, server.port, validateCertificates)
+            } else {
+                Socket().apply { connect(java.net.InetSocketAddress(server.host, server.port), 10000) }
+            }
 
             logD(TAG, "Socket created successfully. Setting timeout and getting streams.")
             socket?.soTimeout = 10000 // 10 seconds read timeout

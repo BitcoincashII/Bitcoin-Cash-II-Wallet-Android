@@ -29,15 +29,16 @@ export const BCH2_ELECTRUM_SSL_PORT = 'bch2_electrum_ssl_port';
 
 // Default BCH2 Electrum servers (post-fork chain)
 // SSL preferred for security; TCP available as fallback
-const defaultPeer: Peer = { host: 'electrum.bch2.org', tcp: 50001 };
+const defaultPeer: Peer = { host: 'electrum.bch2.org', ssl: 50002, tcp: 50001 };
 export const hardcodedPeers: Peer[] = [
-  { host: 'electrum.bch2.org', tcp: 50001 },
+  { host: 'electrum.bch2.org', ssl: 50002, tcp: 50001 },
+  { host: '144.202.73.66', ssl: 50002, tcp: 50001 },  // IP fallback if DNS fails
 ];
 
-// BC2 Electrum servers (for airdrop balance checking)
+// BC2 Electrum servers (for airdrop balance checking) — Dallas server
 export const bc2Peers: Peer[] = [
-  { host: 'infra1.bitcoin-ii.org', tcp: 50008 },
-  // TODO: Add explorer.bitcoin-ii.org:50008 when Electrum is deployed on that host
+  { host: 'bc2electrum.bch2.org', ssl: 50011, tcp: 50010 },
+  { host: '144.202.73.66', ssl: 50011, tcp: 50010 },  // IP fallback if DNS fails
 ];
 
 let mainClient: typeof ElectrumClient | undefined;
@@ -77,52 +78,58 @@ async function connectMain(): Promise<void> {
 }
 
 async function _doConnectMain(): Promise<void> {
+  let lastError: Error | undefined;
+
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     const peer = hardcodedPeers[currentPeerIndex];
     currentPeerIndex = (currentPeerIndex + 1) % hardcodedPeers.length;
 
-    try {
-      const useSSL = !!peer.ssl;
-      // BCH2 Electrum servers use self-signed certs — disable TLS verification for known hosts
-      const isSelfSigned = peer.host === 'electrum.bch2.org' || peer.host === 'electrum2.bch2.org';
-      mainClient = new ElectrumClient(
-        net,
-        tls,
-        useSSL ? peer.ssl : peer.tcp,
-        peer.host,
-        useSSL ? 'tls' : 'tcp',
-        useSSL && isSelfSigned ? { rejectUnauthorized: false } : undefined
-      );
+    // Build list of protocols to try: SSL first, then TCP fallback
+    const protocols: Array<{ port: number; proto: string; opts?: object }> = [];
+    if (peer.ssl) protocols.push({ port: peer.ssl, proto: 'tls', opts: { rejectUnauthorized: false } });
+    if (peer.tcp) protocols.push({ port: peer.tcp, proto: 'tcp' });
 
-      mainClient.onError = (e: Error) => {
+    for (const { port, proto, opts } of protocols) {
+      try {
+        mainClient = new ElectrumClient(net, tls, port, peer.host, proto, opts);
+
+        mainClient.onError = (e: Error) => {
+          mainConnected = false;
+        };
+
+        mainClient.onClose = () => {
+          mainConnected = false;
+          DEBUG && console.log('[BCH2Electrum] Connection closed, will reconnect on next request');
+        };
+
+        await Promise.race([
+          mainClient.initElectrum({ client: 'bluewallet-bch2', version: '1.4' }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout')), 10000)),
+        ]);
+        mainConnected = true;
+        serverName = peer.host;
+
+        // Subscribe to headers
+        const header = await mainClient.blockchainHeaders_subscribe();
+        if (header && typeof header.height === 'number' && Number.isInteger(header.height) && header.height >= 0) {
+          latestBlock = { height: header.height, time: Math.floor(Date.now() / 1000) };
+        }
+        return; // Success
+      } catch (e) {
+        lastError = e instanceof Error ? e : new Error(String(e));
         mainConnected = false;
-      };
-
-      mainClient.onClose = () => {
-        mainConnected = false;
-        DEBUG && console.log('[BCH2Electrum] Connection closed, will reconnect on next request');
-      };
-
-      await mainClient.initElectrum({ client: 'bluewallet-bch2', version: '1.4' });
-      mainConnected = true;
-      serverName = peer.host;
-
-      // Subscribe to headers
-      const header = await mainClient.blockchainHeaders_subscribe();
-      if (header && typeof header.height === 'number' && Number.isInteger(header.height) && header.height >= 0) {
-        latestBlock = { height: header.height, time: Math.floor(Date.now() / 1000) };
-      }
-      return; // Success
-    } catch (e) {
-      mainConnected = false;
-      if (attempt < MAX_RETRIES - 1) {
-        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
-        await new Promise(resolve => setTimeout(resolve, delay));
-      } else {
-        throw e;
+        try { mainClient?.close(); } catch {}
+        DEBUG && console.log(`[BCH2Electrum] ${proto}://${peer.host}:${port} failed:`, lastError.message);
       }
     }
+
+    // Delay before trying next peer
+    if (attempt < MAX_RETRIES - 1) {
+      const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
   }
+  throw lastError || new Error('Failed to connect to any Electrum server');
 }
 
 export async function getBalanceByAddress(address: string): Promise<{ confirmed: number; unconfirmed: number }> {
@@ -516,39 +523,49 @@ async function connectBC2(): Promise<void> {
 }
 
 async function _doConnectBC2(): Promise<void> {
+  let lastError: Error | undefined;
+
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     const peer = bc2Peers[bc2PeerIndex];
     bc2PeerIndex = (bc2PeerIndex + 1) % bc2Peers.length;
 
-    try {
-      bc2Client = new ElectrumClient(
-        net,
-        tls,
-        peer.ssl || peer.tcp,
-        peer.host,
-        peer.ssl ? 'tls' : 'tcp'
-      );
+    // Build list of protocols to try: SSL first, then TCP fallback
+    const protocols: Array<{ port: number; proto: string; opts?: object }> = [];
+    if (peer.ssl) protocols.push({ port: peer.ssl, proto: 'tls', opts: { rejectUnauthorized: false } });
+    if (peer.tcp) protocols.push({ port: peer.tcp, proto: 'tcp' });
 
-      bc2Client.onError = (e: Error) => {
-        bc2Connected = false;
-      };
-      bc2Client.onClose = () => {
-        bc2Connected = false;
-      };
+    for (const { port, proto, opts } of protocols) {
+      try {
+        bc2Client = new ElectrumClient(net, tls, port, peer.host, proto, opts);
 
-      await bc2Client.initElectrum({ client: 'bluewallet-bch2', version: '1.4' });
-      bc2Connected = true;
-      return; // Success
-    } catch (e) {
-      bc2Connected = false;
-      if (attempt < MAX_RETRIES - 1) {
-        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
-        await new Promise(resolve => setTimeout(resolve, delay));
-      } else {
-        throw e;
+        bc2Client.onError = (e: Error) => {
+          bc2Connected = false;
+        };
+        bc2Client.onClose = () => {
+          bc2Connected = false;
+        };
+
+        await Promise.race([
+          bc2Client.initElectrum({ client: 'bluewallet-bch2', version: '1.4' }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('BC2 connection timeout')), 10000)),
+        ]);
+        bc2Connected = true;
+        return; // Success
+      } catch (e) {
+        lastError = e instanceof Error ? e : new Error(String(e));
+        bc2Connected = false;
+        try { bc2Client?.close(); } catch {}
+        DEBUG && console.log(`[BCH2Electrum] BC2 ${proto}://${peer.host}:${port} failed:`, lastError.message);
       }
     }
+
+    // Delay before trying next peer
+    if (attempt < MAX_RETRIES - 1) {
+      const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
   }
+  throw lastError || new Error('Failed to connect to any BC2 Electrum server');
 }
 
 // Get BC2 balance using explorer API (Electrum server has indexing issues)

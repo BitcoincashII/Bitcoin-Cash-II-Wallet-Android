@@ -1,29 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Allow cleartext traffic for local development, Tor, and LAN -->
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">10.0.2.2</domain>
-        <domain includeSubdomains="true">localhost</domain>
-        <domain includeSubdomains="true">onion</domain>
-    </domain-config>
+    <!-- Allow cleartext for all hosts — Electrum uses raw TCP on non-standard ports -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
 
-    <!-- BCH2 Electrum servers use self-signed SSL certificates.
-         Allow user-installed trust anchors only for specific Electrum subdomains. -->
-    <domain-config>
+    <!-- BCH2 Electrum servers — also trust user-installed certs for self-signed SSL -->
+    <domain-config cleartextTrafficPermitted="true">
         <domain>electrum.bch2.org</domain>
         <domain>electrum2.bch2.org</domain>
         <trust-anchors>
             <certificates src="system" />
             <certificates src="user" />
-        </trust-anchors>
-    </domain-config>
-
-    <!-- BC2 Electrum server (airdrop balance checking) — system certs only -->
-    <domain-config>
-        <domain includeSubdomains="true">infra1.bitcoin-ii.org</domain>
-        <domain includeSubdomains="true">bitcoin-ii.org</domain>
-        <trust-anchors>
-            <certificates src="system" />
         </trust-anchors>
     </domain-config>
 </network-security-config>

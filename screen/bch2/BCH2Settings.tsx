@@ -39,26 +39,26 @@ const BCH2_SERVERS: ElectrumServer[] = [
   { host: 'electrum.bch2.org', port: 50002, ssl: true },
 ];
 
-// BC2 Electrum Servers
+// BC2 Electrum Servers — Dallas server
 const BC2_SERVERS: ElectrumServer[] = [
-  { host: 'infra1.bitcoin-ii.org', port: 50008, ssl: false },
-  { host: 'infra1.bitcoin-ii.org', port: 50009, ssl: true },
+  { host: 'bc2electrum.bch2.org', port: 50010, ssl: false },
+  { host: 'bc2electrum.bch2.org', port: 50011, ssl: true },
 ];
 
 export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) => {
   // BCH2 Server State
   const [bch2SelectedServer, setBch2SelectedServer] = useState(0);
   const [bch2CustomHost, setBch2CustomHost] = useState('');
-  const [bch2CustomPort, setBch2CustomPort] = useState('50002');
-  const [bch2UseSSL, setBch2UseSSL] = useState(true);
+  const [bch2CustomPort, setBch2CustomPort] = useState('50001');
+  const [bch2UseSSL, setBch2UseSSL] = useState(false);
   const [bch2Testing, setBch2Testing] = useState(false);
   const [bch2Status, setBch2Status] = useState<'unknown' | 'connected' | 'failed'>('unknown');
 
   // BC2 Server State
   const [bc2SelectedServer, setBc2SelectedServer] = useState(0);
   const [bc2CustomHost, setBc2CustomHost] = useState('');
-  const [bc2CustomPort, setBc2CustomPort] = useState('50009');
-  const [bc2UseSSL, setBc2UseSSL] = useState(true);
+  const [bc2CustomPort, setBc2CustomPort] = useState('50010');
+  const [bc2UseSSL, setBc2UseSSL] = useState(false);
   const [bc2Testing, setBc2Testing] = useState(false);
   const [bc2Status, setBc2Status] = useState<'unknown' | 'connected' | 'failed'>('unknown');
 
@@ -113,18 +113,13 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
         server.port,
         server.host,
         server.ssl ? 'tls' : 'tcp',
+        server.ssl ? { rejectUnauthorized: false } : undefined,
       );
 
-      // Connect with 10s timeout
-      await Promise.race([
-        client.initElectrum({ client: 'bch2-wallet-test', version: '1.4' }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout (10s)')), 10000)),
-      ]);
-
-      // Request server version to verify it responds
+      // Connect with 10s timeout — initElectrum calls server.version internally
       const versionResult = await Promise.race([
-        client.server_version('BCH2Wallet', '1.4'),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Request timeout (5s)')), 5000)),
+        client.initElectrum({ client: 'bch2-wallet-test', version: '1.4' }, { maxRetry: 0, callback: null }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout (10s)')), 10000)),
       ]);
 
       client.close();
@@ -173,7 +168,7 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
       if (!validatePort(bch2CustomPort)) { Alert.alert('Error', 'Port must be between 1 and 65535'); return; }
     }
     const server = bch2SelectedServer === -1
-      ? { host: bch2CustomHost.trim(), port: parseInt(bch2CustomPort) || 50002, ssl: bch2UseSSL }
+      ? { host: bch2CustomHost.trim(), port: parseInt(bch2CustomPort) || 50001, ssl: bch2UseSSL }
       : BCH2_SERVERS[bch2SelectedServer];
     testConnection(server, setBch2Testing, setBch2Status, 'BCH2');
   }, [bch2SelectedServer, bch2CustomHost, bch2CustomPort, bch2UseSSL, testConnection]);
@@ -186,7 +181,7 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
       if (!validatePort(bc2CustomPort)) { Alert.alert('Error', 'Port must be between 1 and 65535'); return; }
     }
     const server = bc2SelectedServer === -1
-      ? { host: bc2CustomHost.trim(), port: parseInt(bc2CustomPort) || 50009, ssl: bc2UseSSL }
+      ? { host: bc2CustomHost.trim(), port: parseInt(bc2CustomPort) || 50010, ssl: bc2UseSSL }
       : BC2_SERVERS[bc2SelectedServer];
     testConnection(server, setBc2Testing, setBc2Status, 'BC2');
   }, [bc2SelectedServer, bc2CustomHost, bc2CustomPort, bc2UseSSL, testConnection]);

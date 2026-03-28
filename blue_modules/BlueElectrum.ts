@@ -86,6 +86,7 @@ const storageKey = 'ELECTRUM_PEERS';
 const defaultPeer = { host: 'electrum.bch2.org', tcp: 50001 };
 export const hardcodedPeers: Peer[] = [
   { host: 'electrum.bch2.org', tcp: 50001 },
+  { host: '144.202.73.66', tcp: 50001 },  // IP fallback if DNS fails
 ];
 
 export const suggestedServers: Peer[] = hardcodedPeers.map(peer => ({

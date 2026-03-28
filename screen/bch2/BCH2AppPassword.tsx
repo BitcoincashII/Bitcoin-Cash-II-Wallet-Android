@@ -14,6 +14,8 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { sha256 } from '@noble/hashes/sha256';
+import { bytesToHex } from '@noble/hashes/utils';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2BorderRadius } from '../../components/BCH2Theme';
 
 const APP_PASSWORD_KEY = '@bch2_app_password';
@@ -25,8 +27,7 @@ export async function getAppPassword(): Promise<string | null> {
 export async function verifyAppPassword(input: string): Promise<boolean> {
   const stored = await AsyncStorage.getItem(APP_PASSWORD_KEY);
   if (!stored) return true; // No password set
-  const crypto = require('crypto');
-  const hash = crypto.createHash('sha256').update(input).digest('hex');
+  const hash = bytesToHex(sha256(new TextEncoder().encode(input)));
   return hash === stored;
 }
 
@@ -60,8 +61,7 @@ const BCH2AppPassword: React.FC<Props> = ({ navigation }) => {
       Alert.alert('Error', 'Passwords do not match');
       return;
     }
-    const crypto = require('crypto');
-    const hash = crypto.createHash('sha256').update(newPassword).digest('hex');
+    const hash = bytesToHex(sha256(new TextEncoder().encode(newPassword)));
     await AsyncStorage.setItem(APP_PASSWORD_KEY, hash);
     setHasPassword(true);
     setNewPassword('');
@@ -70,8 +70,7 @@ const BCH2AppPassword: React.FC<Props> = ({ navigation }) => {
   };
 
   const handleRemovePassword = async () => {
-    const crypto = require('crypto');
-    const hash = crypto.createHash('sha256').update(currentPassword).digest('hex');
+    const hash = bytesToHex(sha256(new TextEncoder().encode(currentPassword)));
     const stored = await AsyncStorage.getItem(APP_PASSWORD_KEY);
     if (hash !== stored) {
       Alert.alert('Error', 'Current password is incorrect');
