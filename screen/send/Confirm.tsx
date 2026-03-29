@@ -244,8 +244,13 @@ const Confirm: React.FC = () => {
   };
 
   const broadcastTransaction = async (transaction: string) => {
-    await BlueElectrum.ping();
-    await BlueElectrum.waitTillConnected();
+    try {
+      await BlueElectrum.ping();
+      await BlueElectrum.waitTillConnected();
+    } catch (_) {
+      // Connection check failed, but still attempt broadcast
+      // The transaction may reach the network regardless
+    }
 
     const result = await wallet.broadcastTx(transaction);
     if (!result) {
