@@ -16,9 +16,57 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { sha256 } from '@noble/hashes/sha256';
 import { bytesToHex } from '@noble/hashes/utils';
+import ReactNativeBiometrics from 'react-native-biometrics';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2BorderRadius } from '../../components/BCH2Theme';
 
 const APP_PASSWORD_KEY = '@bch2_app_password';
+const BIOMETRIC_ENABLED_KEY = '@bch2_biometric_enabled';
+const AUTO_LOCK_TIMEOUT_KEY = '@bch2_auto_lock_timeout';
+
+const rnBiometrics = new ReactNativeBiometrics({ allowDeviceCredentials: true });
+
+// --- Biometric helpers ---
+
+export async function isBiometricAvailable(): Promise<{ available: boolean; biometryType?: string }> {
+  try {
+    const { available, biometryType } = await rnBiometrics.isSensorAvailable();
+    return { available, biometryType: biometryType || undefined };
+  } catch {
+    return { available: false };
+  }
+}
+
+export async function isBiometricEnabled(): Promise<boolean> {
+  const val = await AsyncStorage.getItem(BIOMETRIC_ENABLED_KEY);
+  return val === '1';
+}
+
+export async function setBiometricEnabled(enabled: boolean): Promise<void> {
+  await AsyncStorage.setItem(BIOMETRIC_ENABLED_KEY, enabled ? '1' : '');
+}
+
+export async function authenticateWithBiometric(): Promise<boolean> {
+  try {
+    const { available } = await rnBiometrics.isSensorAvailable();
+    if (!available) return false;
+    const { success } = await rnBiometrics.simplePrompt({ promptMessage: 'Confirm your identity' });
+    return success;
+  } catch {
+    return false;
+  }
+}
+
+// --- Auto-lock timeout helpers ---
+// Values in seconds: 0 = immediate, 30, 60, 300, -1 = never
+export async function getAutoLockTimeout(): Promise<number> {
+  const val = await AsyncStorage.getItem(AUTO_LOCK_TIMEOUT_KEY);
+  if (val === null) return 0; // default: immediate
+  return parseInt(val, 10);
+}
+
+export async function setAutoLockTimeout(seconds: number): Promise<void> {
+  await AsyncStorage.setItem(AUTO_LOCK_TIMEOUT_KEY, String(seconds));
+}
 
 export async function getAppPassword(): Promise<string | null> {
   return AsyncStorage.getItem(APP_PASSWORD_KEY);

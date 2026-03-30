@@ -3,14 +3,24 @@
  * Main app with BCH2 navigation
  */
 
-import React, { useEffect, useState } from 'react';
-import { StatusBar, View, Text, TextInput, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
+import { StatusBar, View, Text, TextInput, TouchableOpacity, StyleSheet, ActivityIndicator, AppState, Alert } from 'react-native';
 import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { BCH2Navigator } from './navigation/BCH2Navigator';
 import { BCH2Colors } from './components/BCH2Theme';
 import BCH2Electrum from './blue_modules/BCH2Electrum';
-import { getAppPassword, verifyAppPassword } from './screen/bch2/BCH2AppPassword';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import {
+  getAppPassword,
+  verifyAppPassword,
+  isBiometricAvailable,
+  isBiometricEnabled,
+  authenticateWithBiometric,
+  getAutoLockTimeout,
+} from './screen/bch2/BCH2AppPassword';
+
+const MAX_UNLOCK_ATTEMPTS = 10;
 
 // BCH2 Dark Theme
 const BCH2Theme = {
@@ -33,17 +43,76 @@ const BCH2App: React.FC = () => {
   const [locked, setLocked] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
   const [passwordError, setPasswordError] = useState('');
+  const [biometricType, setBiometricType] = useState<string | undefined>(undefined);
+  const [biometricReady, setBiometricReady] = useState(false);
+  const [unlockAttempts, setUnlockAttempts] = useState(0);
+
+  // Background re-lock refs (avoid stale closures)
+  const appState = useRef(AppState.currentState);
+  const backgroundTimestamp = useRef<number | null>(null);
+  const hasUnlockedOnce = useRef(false);
+  const lockedRef = useRef(locked);
+  lockedRef.current = locked;
 
   useEffect(() => {
     initializeApp();
+  }, []);
+
+  // Auto-lock on background — single listener, uses refs to avoid stale state
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', async (nextAppState) => {
+      try {
+        if (appState.current === 'active' && (nextAppState === 'inactive' || nextAppState === 'background')) {
+          backgroundTimestamp.current = Date.now();
+        } else if (appState.current !== 'active' && nextAppState === 'active') {
+          if (hasUnlockedOnce.current && !lockedRef.current) {
+            const hasPassword = await getAppPassword();
+            const bioEnabled = await isBiometricEnabled();
+            if (hasPassword || bioEnabled) {
+              const timeout = await getAutoLockTimeout();
+              if (timeout !== -1) {
+                const elapsed = backgroundTimestamp.current
+                  ? (Date.now() - backgroundTimestamp.current) / 1000
+                  : Infinity;
+                if (elapsed >= timeout) {
+                  setLocked(true);
+                  setPasswordInput('');
+                  setPasswordError('');
+                  setUnlockAttempts(0);
+                  if (bioEnabled) {
+                    setTimeout(() => tryBiometricUnlock(), 300);
+                  }
+                }
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.log('Auto-lock error:', e);
+      }
+      appState.current = nextAppState;
+    });
+    return () => subscription.remove();
   }, []);
 
   const initializeApp = async () => {
     setIsConnecting(true);
     try {
       const hasPassword = await getAppPassword();
-      if (hasPassword) {
+      const bioEnabled = await isBiometricEnabled();
+      const { available, biometryType } = await isBiometricAvailable();
+
+      if (available && bioEnabled) {
+        setBiometricType(biometryType);
+        setBiometricReady(true);
+      }
+
+      if (hasPassword || bioEnabled) {
         setLocked(true);
+        // Auto-trigger biometric if available
+        if (available && bioEnabled) {
+          setTimeout(() => tryBiometricUnlock(), 400);
+        }
       }
       setConnectionStatus('connected');
     } catch (error) {
@@ -54,15 +123,55 @@ const BCH2App: React.FC = () => {
     }
   };
 
+  const tryBiometricUnlock = useCallback(async () => {
+    const success = await authenticateWithBiometric();
+    if (success) {
+      setLocked(false);
+      setPasswordInput('');
+      setPasswordError('');
+      setUnlockAttempts(0);
+      hasUnlockedOnce.current = true;
+    }
+  }, []);
+
   const handleUnlock = async () => {
     const ok = await verifyAppPassword(passwordInput);
     if (ok) {
       setLocked(false);
       setPasswordInput('');
       setPasswordError('');
+      setUnlockAttempts(0);
+      hasUnlockedOnce.current = true;
     } else {
-      setPasswordError('Incorrect password');
+      const attempts = unlockAttempts + 1;
+      setUnlockAttempts(attempts);
+      setPasswordError(`Incorrect password (${attempts}/${MAX_UNLOCK_ATTEMPTS})`);
       setPasswordInput('');
+      if (attempts >= MAX_UNLOCK_ATTEMPTS) {
+        Alert.alert(
+          'Too Many Attempts',
+          'You have entered the wrong password 10 times. For security, you can wipe app data and start fresh.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Wipe Data',
+              style: 'destructive',
+              onPress: async () => {
+                try {
+                  await AsyncStorage.clear();
+                  setLocked(false);
+                  setUnlockAttempts(0);
+                  setPasswordError('');
+                  hasUnlockedOnce.current = false;
+                  Alert.alert('Data Wiped', 'All wallet data has been removed. Please restart the app.');
+                } catch (e) {
+                  Alert.alert('Error', 'Failed to wipe data.');
+                }
+              },
+            },
+          ],
+        );
+      }
     }
   };
 
@@ -81,6 +190,7 @@ const BCH2App: React.FC = () => {
   }
 
   if (locked) {
+    const hasPasswordSet = unlockAttempts > 0 || passwordInput.length > 0 || !biometricReady;
     return (
       <View style={styles.loadingContainer}>
         <StatusBar barStyle="light-content" backgroundColor={BCH2Colors.background} />
@@ -88,20 +198,40 @@ const BCH2App: React.FC = () => {
           <Text style={styles.logoText}>BCH2</Text>
           <Text style={styles.logoSubtext}>Wallet</Text>
         </View>
-        <TextInput
-          style={styles.passwordInput}
-          placeholder="Enter password"
-          placeholderTextColor={BCH2Colors.textMuted}
-          secureTextEntry
-          value={passwordInput}
-          onChangeText={(t) => { setPasswordInput(t); setPasswordError(''); }}
-          onSubmitEditing={handleUnlock}
-          autoFocus
-        />
-        {passwordError ? <Text style={styles.errorText}>{passwordError}</Text> : null}
-        <TouchableOpacity style={styles.unlockButton} onPress={handleUnlock}>
-          <Text style={styles.unlockButtonText}>Unlock</Text>
-        </TouchableOpacity>
+
+        {biometricReady && (
+          <TouchableOpacity style={styles.biometricButton} onPress={tryBiometricUnlock}>
+            <Text style={styles.biometricIcon}>
+              {biometricType === 'FaceID' ? '🔓' : '🔓'}
+            </Text>
+            <Text style={styles.biometricButtonText}>
+              Unlock with {biometricType === 'FaceID' ? 'Face' : biometricType === 'TouchID' ? 'Touch ID' : 'Biometrics'}
+            </Text>
+          </TouchableOpacity>
+        )}
+
+        {/* Show password input if password is set */}
+        {(hasPasswordSet || !biometricReady) && (
+          <>
+            {biometricReady && (
+              <Text style={styles.orText}>or enter password</Text>
+            )}
+            <TextInput
+              style={styles.passwordInput}
+              placeholder="Enter password"
+              placeholderTextColor={BCH2Colors.textMuted}
+              secureTextEntry
+              value={passwordInput}
+              onChangeText={(t) => { setPasswordInput(t); setPasswordError(''); }}
+              onSubmitEditing={handleUnlock}
+              autoFocus={!biometricReady}
+            />
+            {passwordError ? <Text style={styles.errorText}>{passwordError}</Text> : null}
+            <TouchableOpacity style={styles.unlockButton} onPress={handleUnlock}>
+              <Text style={styles.unlockButtonText}>Unlock</Text>
+            </TouchableOpacity>
+          </>
+        )}
       </View>
     );
   }
@@ -144,6 +274,32 @@ const styles = StyleSheet.create({
   loadingText: {
     fontSize: 14,
     color: BCH2Colors.textMuted,
+  },
+  biometricButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: BCH2Colors.primaryGlow,
+    borderRadius: 12,
+    paddingVertical: 16,
+    paddingHorizontal: 32,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: BCH2Colors.primary,
+  },
+  biometricIcon: {
+    fontSize: 24,
+    marginRight: 12,
+  },
+  biometricButtonText: {
+    color: BCH2Colors.primary,
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  orText: {
+    color: BCH2Colors.textMuted,
+    fontSize: 14,
+    marginBottom: 12,
+    marginTop: 4,
   },
   passwordInput: {
     width: '80%',

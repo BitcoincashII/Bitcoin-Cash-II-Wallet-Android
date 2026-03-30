@@ -18,6 +18,14 @@ import {
   Linking,
 } from 'react-native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2Shadows, BCH2BorderRadius } from '../../components/BCH2Theme';
+import {
+  isBiometricAvailable,
+  isBiometricEnabled,
+  setBiometricEnabled,
+  authenticateWithBiometric,
+  getAutoLockTimeout,
+  setAutoLockTimeout,
+} from './BCH2AppPassword';
 
 // Coin logos
 const BCH2_LOGO = require('../../img/bch2-logo-small.png');
@@ -61,6 +69,74 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
   const [bc2UseSSL, setBc2UseSSL] = useState(false);
   const [bc2Testing, setBc2Testing] = useState(false);
   const [bc2Status, setBc2Status] = useState<'unknown' | 'connected' | 'failed'>('unknown');
+
+  // Biometric State
+  const [biometricAvailable, setBiometricAvailable] = useState(false);
+  const [biometricTypeName, setBiometricTypeName] = useState('Biometrics');
+  const [biometricOn, setBiometricOn] = useState(false);
+  const [autoLockValue, setAutoLockValue] = useState(0);
+
+  // Load biometric + auto-lock settings on mount
+  useEffect(() => {
+    (async () => {
+      const { available, biometryType } = await isBiometricAvailable();
+      setBiometricAvailable(available);
+      if (biometryType === 'FaceID') setBiometricTypeName('Face ID');
+      else if (biometryType === 'TouchID') setBiometricTypeName('Touch ID');
+      else setBiometricTypeName('Biometrics');
+
+      const enabled = await isBiometricEnabled();
+      setBiometricOn(enabled);
+
+      const timeout = await getAutoLockTimeout();
+      setAutoLockValue(timeout);
+    })();
+  }, []);
+
+  const handleBiometricToggle = useCallback(async (value: boolean) => {
+    if (value) {
+      // Verify identity before enabling
+      const success = await authenticateWithBiometric();
+      if (!success) {
+        Alert.alert('Authentication Failed', 'Could not verify your identity. Please try again.');
+        return;
+      }
+    }
+    await setBiometricEnabled(value);
+    setBiometricOn(value);
+    Alert.alert(
+      value ? 'Biometrics Enabled' : 'Biometrics Disabled',
+      value
+        ? `${biometricTypeName} will be used to unlock the app.`
+        : 'Biometric unlock has been disabled.',
+    );
+  }, [biometricTypeName]);
+
+  const handleAutoLockChange = useCallback(async () => {
+    const options = [
+      { label: 'Immediately', value: 0 },
+      { label: 'After 30 seconds', value: 30 },
+      { label: 'After 1 minute', value: 60 },
+      { label: 'After 5 minutes', value: 300 },
+      { label: 'Never', value: -1 },
+    ];
+    const buttons = options.map(opt => ({
+      text: opt.label + (opt.value === autoLockValue ? ' (current)' : ''),
+      onPress: async () => {
+        await setAutoLockTimeout(opt.value);
+        setAutoLockValue(opt.value);
+      },
+    }));
+    buttons.push({ text: 'Cancel', onPress: async () => {} });
+    Alert.alert('Auto-Lock Timeout', 'Lock the app after going to the background for:', buttons);
+  }, [autoLockValue]);
+
+  const autoLockLabel = autoLockValue === 0 ? 'Immediately'
+    : autoLockValue === 30 ? '30 seconds'
+    : autoLockValue === 60 ? '1 minute'
+    : autoLockValue === 300 ? '5 minutes'
+    : autoLockValue === -1 ? 'Never'
+    : `${autoLockValue}s`;
 
   // Load previously saved custom server settings on mount
   useEffect(() => {
@@ -462,22 +538,57 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
       <View style={styles.section}>
         <Text style={[styles.sectionTitle, { color: BCH2Colors.textPrimary }]}>Security</Text>
 
-        <TouchableOpacity
-          style={styles.explorerCard}
-          onPress={() => navigation?.navigate('BCH2AppPassword')}
-          accessibilityLabel="Set up app password"
-          accessibilityRole="button"
-        >
-          <View style={[styles.explorerRow, { paddingVertical: 16 }]}>
-            <View style={styles.explorerInfo}>
-              <Text style={styles.explorerLabel}>App Password</Text>
-              <Text style={[styles.explorerUrl, { color: BCH2Colors.textSecondary }]}>
-                Lock the app with a password on open
-              </Text>
+        <View style={styles.explorerCard}>
+          <TouchableOpacity
+            onPress={() => navigation?.navigate('BCH2AppPassword')}
+            accessibilityLabel="Set up app password"
+            accessibilityRole="button"
+          >
+            <View style={[styles.explorerRow, { paddingVertical: 16 }]}>
+              <View style={styles.explorerInfo}>
+                <Text style={styles.explorerLabel}>App Password</Text>
+                <Text style={[styles.explorerUrl, { color: BCH2Colors.textSecondary }]}>
+                  Lock the app with a password on open
+                </Text>
+              </View>
+              <Text style={styles.explorerArrow}>→</Text>
             </View>
-            <Text style={styles.explorerArrow}>→</Text>
-          </View>
-        </TouchableOpacity>
+          </TouchableOpacity>
+
+          {biometricAvailable && (
+            <View style={[styles.explorerRow, { paddingVertical: 16 }]}>
+              <View style={styles.explorerInfo}>
+                <Text style={styles.explorerLabel}>{biometricTypeName}</Text>
+                <Text style={[styles.explorerUrl, { color: BCH2Colors.textSecondary }]}>
+                  Unlock with {biometricTypeName.toLowerCase()} instead of password
+                </Text>
+              </View>
+              <Switch
+                value={biometricOn}
+                onValueChange={handleBiometricToggle}
+                trackColor={{ false: BCH2Colors.border, true: BCH2Colors.primary + '40' }}
+                thumbColor={biometricOn ? BCH2Colors.primary : BCH2Colors.textMuted}
+                accessibilityLabel={`${biometricTypeName} unlock, currently ${biometricOn ? 'enabled' : 'disabled'}`}
+              />
+            </View>
+          )}
+
+          <TouchableOpacity
+            onPress={handleAutoLockChange}
+            accessibilityLabel="Change auto-lock timeout"
+            accessibilityRole="button"
+          >
+            <View style={[styles.explorerRow, { paddingVertical: 16, borderBottomWidth: 0 }]}>
+              <View style={styles.explorerInfo}>
+                <Text style={styles.explorerLabel}>Auto-Lock</Text>
+                <Text style={[styles.explorerUrl, { color: BCH2Colors.textSecondary }]}>
+                  Re-lock after going to background
+                </Text>
+              </View>
+              <Text style={[styles.explorerUrl, { color: BCH2Colors.primary }]}>{autoLockLabel}</Text>
+            </View>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* Network Info Section */}
@@ -511,11 +622,11 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
         <TouchableOpacity
           style={styles.supportButton}
           onPress={() => {
-            const subject = encodeURIComponent('Bitcoin Cash II Wallet - Bug Report');
+            const subject = encodeURIComponent('Bitcoin Cash II Android Wallet - Bug Report');
             const body = encodeURIComponent(
               `\n\n` +
               `-------------------\n` +
-              `App Version: 1.1.0\n` +
+              `App Version: 1.3.0\n` +
               `Platform: Android\n` +
               `Date: ${new Date().toISOString()}\n` +
               `-------------------\n` +
@@ -535,11 +646,11 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
         <TouchableOpacity
           style={styles.supportButton}
           onPress={() => {
-            const subject = encodeURIComponent('Bitcoin Cash II Wallet - Feature Request');
+            const subject = encodeURIComponent('Bitcoin Cash II Android Wallet - Feature Request');
             const body = encodeURIComponent(
               `\n\n` +
               `-------------------\n` +
-              `App Version: 1.1.0\n` +
+              `App Version: 1.3.0\n` +
               `-------------------\n` +
               `Please describe your feature request above this line.`
             );
@@ -561,7 +672,7 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
 
         <View style={styles.aboutCard}>
           <Text style={styles.aboutTitle}>Bitcoin Cash II Wallet</Text>
-          <Text style={styles.aboutVersion}>Version 1.1.0</Text>
+          <Text style={styles.aboutVersion}>Version 1.3.0</Text>
           <Text style={styles.aboutDescription}>
             A mobile wallet for Bitcoin Cash II (BCH2) and BitcoinII (BC2) with full support for both chains.
           </Text>
