@@ -22,6 +22,7 @@ import {
   getUtxosByScripthash,
   broadcastTransaction,
   broadcastBC2Transaction,
+  filterMatureUtxos,
 } from '../blue_modules/BCH2Electrum';
 
 const bip32 = BIP32Factory(ecc);
@@ -132,13 +133,14 @@ export async function sendTransaction(
     }
   }
 
-  // Fetch UTXOs
+  // Fetch UTXOs and filter out immature coinbase rewards
   DEBUG && console.log(`[TX] Fetching UTXOs for address: ${fromAddress}`);
-  const utxos: UTXO[] = isBC2
+  const rawUtxos: UTXO[] = isBC2
     ? await getBC2Utxos(fromAddress)
     : await getUtxosByAddress(fromAddress);
 
-  DEBUG && console.log(`[TX] Found ${utxos.length} UTXOs`);
+  const utxos: UTXO[] = await filterMatureUtxos(rawUtxos);
+  DEBUG && console.log(`[TX] Found ${rawUtxos.length} UTXOs, ${utxos.length} mature (${rawUtxos.length - utxos.length} immature coinbase excluded)`);
   if (utxos.length > 0) {
     DEBUG && console.log(`[TX] UTXOs:`, JSON.stringify(utxos.slice(0, 5))); // Log first 5
   }
@@ -1018,17 +1020,19 @@ async function sendTransactionWithKey(
   if (!Number.isFinite(feePerByte) || feePerByte < 1) feePerByte = 1;
   if (feePerByte > 1000) throw new Error('Fee rate too high (max 1000 sat/byte)');
   if (!Number.isInteger(amountSats) || amountSats < 546) throw new Error('Invalid amount');
-  // Fetch UTXOs
+  // Fetch UTXOs and filter out immature coinbase rewards
   DEBUG && console.log(`[TX] Fetching UTXOs for address: ${fromAddress}`);
-  const utxos: UTXO[] = isBC2
+  const rawUtxos: UTXO[] = isBC2
     ? await getBC2Utxos(fromAddress)
     : await getUtxosByAddress(fromAddress);
 
-  DEBUG && console.log(`[TX] Found ${utxos.length} UTXOs`);
+  const utxos: UTXO[] = await filterMatureUtxos(rawUtxos);
+  DEBUG && console.log(`[TX] Found ${rawUtxos.length} UTXOs, ${utxos.length} mature (${rawUtxos.length - utxos.length} immature coinbase excluded)`);
 
   if (utxos.length === 0) {
     const coinType = isBC2 ? 'BC2' : 'BCH2';
-    throw new Error(`No UTXOs available for ${coinType} address ${fromAddress}`);
+    const immatureMsg = rawUtxos.length > 0 ? ' All UTXOs may be immature coinbase rewards (need 100 confirmations).' : '';
+    throw new Error(`No spendable UTXOs for ${coinType} address ${fromAddress}.${immatureMsg}`);
   }
 
   // Validate UTXO fields, txids, and deduplicate
