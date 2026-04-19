@@ -1010,6 +1010,7 @@ export interface ParsedDescriptor {
   fingerprint?: string;
   childPath: string;         // "0/*" or "1/*"
   addressType: 'legacy' | 'bc1' | 'p2sh-segwit' | 'p2tr' | 'p2pk';
+  nextIndex?: number;        // from listdescriptors JSON — scan at least this many addresses
 }
 
 const DESCRIPTOR_TYPE_MAP: Record<string, { type: ParsedDescriptor['type']; addressType: ParsedDescriptor['addressType'] }> = {
@@ -1104,11 +1105,13 @@ export function parseDescriptorInput(input: string): ParsedDescriptor[] {
   if (jsonCandidate) {
     try {
       const json = JSON.parse(jsonCandidate);
-      const descriptors: { desc: string }[] = json.descriptors || (Array.isArray(json) ? json : []);
+      const descriptors: { desc: string; next_index?: number; next?: number }[] = json.descriptors || (Array.isArray(json) ? json : []);
       for (const d of descriptors) {
         if (d.desc) {
           try {
-            results.push(parseDescriptor(d.desc));
+            const parsed = parseDescriptor(d.desc);
+            parsed.nextIndex = d.next_index ?? d.next;
+            results.push(parsed);
           } catch {
             // Skip unparseable descriptors in JSON
           }
@@ -1195,12 +1198,13 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
     chain: number,
     pathPrefix: string,
     primaryType: NonNullable<AirdropClaimResult['addressType']>,
+    minScan: number = 0,
   ): Promise<void> {
     let consecutiveEmpty = 0;
     let consecutiveNetErrors = 0;
     let index = 0;
 
-    while (consecutiveEmpty < DESCRIPTOR_GAP_LIMIT && index < DESCRIPTOR_MAX_INDEX && consecutiveNetErrors < DESCRIPTOR_MAX_NET_ERRORS) {
+    while ((consecutiveEmpty < DESCRIPTOR_GAP_LIMIT || index < minScan) && index < DESCRIPTOR_MAX_INDEX && consecutiveNetErrors < DESCRIPTOR_MAX_NET_ERRORS) {
       const batchEnd = Math.min(index + DESCRIPTOR_BATCH_SIZE, DESCRIPTOR_MAX_INDEX);
       const batchPromises: Promise<{ found: AirdropClaimResult[]; networkError: boolean }>[] = [];
 
@@ -1265,11 +1269,12 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
       continue;
     }
 
+    const minScan = desc.nextIndex ? desc.nextIndex + DESCRIPTOR_GAP_LIMIT : 0;
     try {
       if (node.depth >= 3) {
         const pathPrefix = desc.originPath ? `m/${desc.originPath}` : '';
         for (const chain of [0, 1]) {
-          await scanChainGapLimit(node, chain, pathPrefix, desc.addressType);
+          await scanChainGapLimit(node, chain, pathPrefix, desc.addressType, minScan);
         }
       } else {
         const accountPaths = DESCRIPTOR_ACCOUNT_PATHS[desc.addressType] || [];
@@ -1283,7 +1288,7 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
           }
           accountNodes.push(accountNode);
           for (const chain of [0, 1]) {
-            await scanChainGapLimit(accountNode, chain, accountPath, desc.addressType);
+            await scanChainGapLimit(accountNode, chain, accountPath, desc.addressType, minScan);
           }
         }
         // Zero derived account nodes
