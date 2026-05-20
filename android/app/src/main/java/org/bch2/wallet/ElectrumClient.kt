@@ -34,9 +34,9 @@ class ElectrumClient {
             if (BuildConfig.DEBUG) Log.d(tag, msg)
         }
         
-        // BCH2 Electrum servers — SSL only for production security
+        // BCH2 Electrum servers — SSL (port 50002) so SPKI cert pinning is active
         val hardcodedPeers = listOf(
-            ElectrumServer("electrum.bch2.org", 50001, false)
+            ElectrumServer("electrum.bch2.org", 50002, true)
         )
     }
 
