@@ -13,7 +13,9 @@ import java.io.InputStreamReader
 import java.io.OutputStream
 import java.net.Socket
 import java.net.SocketTimeoutException
+import java.security.MessageDigest
 import java.security.SecureRandom
+import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
@@ -314,6 +316,13 @@ class ElectrumClient {
         "139.180.132.24",
     )
 
+    // SPKI SHA-256 fingerprints for BCH2 Electrum servers (hex, lowercase).
+    // Pins the public key rather than the full cert — survives certificate renewals
+    // as long as the key pair is unchanged. Update this set when keys rotate.
+    private val PINNED_ELECTRUM_SPKI_SHA256 = setOf(
+        "ad71c6307a433d08934cc5b71ae9e310052d0937cb83e663e5dd082d76551684", // 144.202.73.66 / electrum.bch2.org
+    )
+
     /**
      * Create an SSL socket with certificate validation control.
      * When validateCertificates is false, self-signed certificates are accepted
@@ -330,13 +339,19 @@ class ElectrumClient {
             }
             sslContext.init(null, null, null)
         } else {
-            // Accept self-signed certificates for known BCH2 Electrum servers only.
-            // Still validates cert is present and not expired.
+            // Accept certificates for known BCH2 Electrum servers, pinned by SPKI SHA-256.
+            // Pins the public key so the pin survives cert renewals without app updates.
             val trustBCH2Certs = arrayOf<TrustManager>(object : X509TrustManager {
                 override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
                 override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
-                    if (chain.isNullOrEmpty()) throw java.security.cert.CertificateException("Empty certificate chain from $host")
-                    chain[0].checkValidity() // Reject expired certs
+                    if (chain.isNullOrEmpty()) throw CertificateException("Empty certificate chain from $host")
+                    chain[0].checkValidity()
+                    val spkiHash = MessageDigest.getInstance("SHA-256")
+                        .digest(chain[0].publicKey.encoded)
+                        .joinToString("") { "%02x".format(it) }
+                    if (spkiHash !in PINNED_ELECTRUM_SPKI_SHA256) {
+                        throw CertificateException("Cert public key not in pinned set for $host (SPKI=$spkiHash)")
+                    }
                 }
                 override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
             })
