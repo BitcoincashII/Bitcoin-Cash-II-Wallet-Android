@@ -16,7 +16,14 @@ const mockBlockchainEstimatefee = jest.fn();
 const mockBlockchainTransaction_broadcast = jest.fn();
 const mockClose = jest.fn();
 
-function createMockClient() {
+function createMockClient(host?: string) {
+  // connectMain/connectBC2 verify the pinned cert via conn.getPeerCertificate();
+  // without it, pinning throws every attempt and connectMain spins its retry-delay
+  // loop (which the fake timers can't advance → 5s hangs). Return the pinned
+  // full-cert fingerprint for the requested server so pinning passes.
+  const fingerprint256 = host && host.includes('bc2')
+    ? '64660131e5ad82b54c6c88b8131c8931283b197a382fc08c698c73ddc3d58c61'  // bc2electrum.bch2.org
+    : '622849af0ced546f3ab24870eda5d63e36df7f302892b1cb36a89a73228a8fc6'; // electrum.bch2.org
   return {
     initElectrum: mockInitElectrum,
     blockchainHeaders_subscribe: mockBlockchainHeaders_subscribe,
@@ -25,13 +32,14 @@ function createMockClient() {
     blockchainTransaction_get: mockBlockchainTransaction_get,
     blockchainEstimatefee: mockBlockchainEstimatefee,
     blockchainTransaction_broadcast: mockBlockchainTransaction_broadcast,
+    conn: { getPeerCertificate: () => ({ fingerprint256 }) },
     close: mockClose,
     onError: null as any,
     onClose: null as any,
   };
 }
 
-jest.mock('electrum-client', () => jest.fn().mockImplementation(() => createMockClient()));
+jest.mock('electrum-client', () => jest.fn().mockImplementation((_net: any, _tls: any, _port: any, host: string) => createMockClient(host)));
 jest.mock('react-native-default-preference', () => ({
   get: jest.fn().mockResolvedValue(null),
   set: jest.fn().mockResolvedValue(undefined),
@@ -701,10 +709,13 @@ describe('BCH2Electrum Security - Additional Edge Cases', () => {
     mockBlockchainTransaction_broadcast.mockResolvedValue(null);
     await expect(mod.broadcastTransaction(validHex)).rejects.toThrow('Broadcast failed');
 
-    // Server returns valid txid -- should succeed
-    mockBlockchainTransaction_broadcast.mockResolvedValue(VALID_TXID);
-    const result = await mod.broadcastTransaction(validHex);
-    expect(result).toBe(VALID_TXID);
+    // Server returns valid txid -- should succeed. Use a REAL tx so the broadcast
+    // txid-verification (computeTxid) matches the returned id.
+    const realHex = '0200000001c257fc0059cc360dd3e93c495b8b2daca06a8dcb740f721a996a4760f1adec4f010000006a4730440220716cff0d9f79f662aed47bd7ef38a9ae11fdb612b336f644a68aec0de4f71ec40220663fa8ec699e61a0e2b44356823fdd0ca33cefaad79aecef7343a94aa96e5b1c01210231a1bc6e5328c8c5abc5c5501d27f352e7e8e58d7a84af7f1c75e0c3ef17dfd1fdffffff029df67101000000001976a914f63b01a980933a814efd0af25103c92408d51f4988aca0690f0400000000160014bd01a19927956467fe8b8c69fb50619e3a155329c8e00000';
+    const realTxid = 'a4d42079b4037a9d55ef27958b88f8479c3d73e06a5607579a7d9c0f412ee12f';
+    mockBlockchainTransaction_broadcast.mockResolvedValue(realTxid);
+    const result = await mod.broadcastTransaction(realHex);
+    expect(result).toBe(realTxid);
   });
 
   it('getTransaction validates txid format', async () => {
