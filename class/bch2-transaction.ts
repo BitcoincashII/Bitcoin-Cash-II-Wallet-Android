@@ -3145,7 +3145,22 @@ export async function sendBC2Native(
 
 const HD_GAP_LIMIT = 20;      // BIP44 standard
 const HD_MAX_INDEX = 1000;    // hard cap so a broken indexer can't spin forever
-const HD_MAX_NET_ERRORS = 10; // give up a chain after this many consecutive network errors
+
+/**
+ * Retry a transient per-address explorer lookup a few times, then throw. Keeps the
+ * HD scan ATOMIC — an address is never silently skipped. Skipping would (a) hide
+ * that address's funds and (b) let empty trailing indices push the gap boundary
+ * out, inflating nextChangeIndex so a later change output lands past the gap and
+ * is unrecoverable on restore. A thrown error instead lets callers fall back /
+ * retry rather than trust a partial "clean" result.
+ */
+async function hdFetchWithRetries<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try { return await fn(); } catch (e) { lastErr = e; }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('BC2 HD scan: address lookup failed');
+}
 
 function bc2Purpose(scriptType: BC2ScriptType): number {
   return scriptType === 'p2sh-segwit' ? 49 : scriptType === 'native-segwit' ? 84 : scriptType === 'taproot' ? 86 : 44;
@@ -3172,6 +3187,7 @@ export async function scanBC2Hd(mnemonic: string, scriptType: BC2ScriptType): Pr
   const seed = await bip39.mnemonicToSeed(mnemonic);
   const root = bip32.fromSeed(seed);
   const purpose = bc2Purpose(scriptType);
+  const nodes: BIP32Interface[] = []; // every private-bearing node we derive, wiped in finally
   try {
     let confirmed = 0;
     let unconfirmed = 0;
@@ -3179,33 +3195,26 @@ export async function scanBC2Hd(mnemonic: string, scriptType: BC2ScriptType): Pr
     const nextIndex: [number, number] = [0, 0];
     for (const chain of [0, 1] as const) {
       const acct = root.derivePath(`m/${purpose}'/0'/0'/${chain}`);
+      nodes.push(acct);
       let consecutiveEmpty = 0;
-      let consecutiveErrors = 0;
       let index = 0;
-      while (consecutiveEmpty < HD_GAP_LIMIT && index < HD_MAX_INDEX && consecutiveErrors < HD_MAX_NET_ERRORS) {
-        const address = bc2AddressFromPubkey(scriptType, Buffer.from(acct.derive(index).publicKey));
-        let info: { confirmed: number; unconfirmed: number; txCount: number };
-        try {
-          info = await getBC2AddressInfo(address);
-          consecutiveErrors = 0;
-        } catch {
-          consecutiveErrors++;
-          index++;
-          continue; // network error: skip this index without touching the gap counter
-        }
+      while (consecutiveEmpty < HD_GAP_LIMIT && index < HD_MAX_INDEX) {
+        const child = acct.derive(index);
+        nodes.push(child);
+        const address = bc2AddressFromPubkey(scriptType, Buffer.from(child.publicKey));
+        // Atomic: retry a transient failure, then throw. Never skip an index.
+        const info = await hdFetchWithRetries(() => getBC2AddressInfo(address));
         if (info.txCount > 0) {
           consecutiveEmpty = 0;
           confirmed += info.confirmed;
           unconfirmed += info.unconfirmed;
           if (info.confirmed > 0 || info.unconfirmed > 0) {
-            try {
-              const mature = await filterMatureUtxos(await getBC2Utxos(address), true);
-              for (const u of mature) {
-                if (Number.isInteger(u.value) && u.value > 0 && /^[0-9a-fA-F]{64}$/.test(u.txid) && Number.isInteger(u.vout) && u.vout >= 0) {
-                  utxos.push({ txid: u.txid, vout: u.vout, value: u.value, chain, index });
-                }
+            const mature = await filterMatureUtxos(await hdFetchWithRetries(() => getBC2Utxos(address)), true);
+            for (const u of mature) {
+              if (Number.isInteger(u.value) && u.value > 0 && /^[0-9a-fA-F]{64}$/.test(u.txid) && Number.isInteger(u.vout) && u.vout >= 0) {
+                utxos.push({ txid: u.txid, vout: u.vout, value: u.value, chain, index });
               }
-            } catch { /* leave this address's UTXOs out rather than block the scan */ }
+            }
           }
         } else {
           consecutiveEmpty++;
@@ -3214,11 +3223,14 @@ export async function scanBC2Hd(mnemonic: string, scriptType: BC2ScriptType): Pr
       }
       nextIndex[chain] = index - consecutiveEmpty; // first unused index on this chain
     }
-    const receiveAddress = bc2AddressFromPubkey(scriptType, Buffer.from(root.derivePath(`m/${purpose}'/0'/0'/0/${nextIndex[0]}`).publicKey));
+    const recvNode = root.derivePath(`m/${purpose}'/0'/0'/0/${nextIndex[0]}`);
+    nodes.push(recvNode);
+    const receiveAddress = bc2AddressFromPubkey(scriptType, Buffer.from(recvNode.publicKey));
     return { confirmed, unconfirmed, utxos, nextReceiveIndex: nextIndex[0], nextChangeIndex: nextIndex[1], receiveAddress };
   } finally {
     if (seed instanceof Buffer || seed instanceof Uint8Array) { try { crypto.randomFillSync(seed); } catch {} seed.fill(0); }
     if (root.privateKey) { try { crypto.randomFillSync(root.privateKey); } catch {} root.privateKey.fill(0); }
+    for (const n of nodes) { try { if (n.privateKey) { crypto.randomFillSync(n.privateKey); n.privateKey.fill(0); } } catch {} }
   }
 }
 
@@ -3259,7 +3271,9 @@ export async function sendBC2NativeHd(
   const keyBuffers: Buffer[] = [];
   try {
     // Change to a fresh change address (chain 1, next unused index).
-    const changeAddress = bc2AddressFromPubkey(scriptType, Buffer.from(root.derivePath(`m/${purpose}'/0'/0'/1/${scan.nextChangeIndex}`).publicKey));
+    const changeNode = root.derivePath(`m/${purpose}'/0'/0'/1/${scan.nextChangeIndex}`);
+    derivedNodes.push(changeNode);
+    const changeAddress = bc2AddressFromPubkey(scriptType, Buffer.from(changeNode.publicKey));
     const changeScript = addressToScript(changeAddress, true);
 
     // Coin selection — outputs sized by their real scriptPubKey length.
@@ -3298,11 +3312,13 @@ export async function sendBC2NativeHd(
         const negRaw = pub[0] === 0x02 ? null : ecc.privateNegate(priv);
         const eff = negRaw ? Buffer.from(negRaw) : priv;
         const added = ecc.privateAdd(eff, tweak);
+        // Wipe the negate/effective intermediates BEFORE any throw so a failed
+        // tweak never leaves cleartext key copies on the heap.
+        if (negRaw) { try { crypto.randomFillSync(negRaw); } catch {} negRaw.fill(0); }
+        if (eff !== priv) { try { crypto.randomFillSync(eff); } catch {} eff.fill(0); }
         if (!added) throw new Error('Taproot private tweak failed for input');
         const tweakedPrivkey = Buffer.from(added); keyBuffers.push(tweakedPrivkey);
-        if (added) { try { crypto.randomFillSync(added); } catch {} added.fill(0); }
-        if (negRaw) { try { crypto.randomFillSync(negRaw); } catch {} negRaw.fill(0); }
-        if (eff !== priv) { crypto.randomFillSync(eff); eff.fill(0); }
+        try { crypto.randomFillSync(added); } catch {} added.fill(0);
         return { txid: u.txid, vout: u.vout, value: u.value, tweakedPrivkey, tweakedXonly: Buffer.from(trp.xOnlyPubkey) };
       });
       txHex = buildBC2TaprootTxMulti(inputs, recipientScript, amountSats, hasChange ? changeScript : null, changeAmount);
