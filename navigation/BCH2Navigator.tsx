@@ -18,7 +18,7 @@ import BCH2Settings from '../screen/bch2/BCH2Settings';
 import BCH2WalletDetail from '../screen/bch2/BCH2WalletDetail';
 import AddWallet from '../screen/bch2/AddWallet';
 import BCH2AppPassword from '../screen/bch2/BCH2AppPassword';
-import { getWallet, getWalletMnemonic, updateWalletBalance, StoredWallet } from '../class/bch2-wallet-storage';
+import { getWallet, getWalletMnemonic, updateWalletBalance, getBC2AccountXpub, StoredWallet } from '../class/bch2-wallet-storage';
 import { getTransactionsByAddress, getBC2Transactions, getBalanceByAddress, getBC2Balance, getBalanceByScripthash, getTransactionsByScripthash } from '../blue_modules/BCH2Electrum';
 import { sendTransaction, sendFromBech32, sendFromP2SH, sendBC2NativeHd, bc2ScriptTypeFromAddress, getBC2HdBalance, scanBC2Hd } from '../class/bch2-transaction';
 import { bc1AddressToScripthash } from '../class/bch2-airdrop';
@@ -137,9 +137,11 @@ const BCH2ReceiveWrapper: React.FC = () => {
     if (isBC2 && walletId) {
       (async () => {
         try {
-          const mnemonic = await getWalletMnemonic(walletId);
-          if (!mnemonic || cancelled) return;
-          const scan = await scanBC2Hd(mnemonic, bc2ScriptTypeFromAddress(address));
+          const wallet = await getWallet(walletId);
+          if (!wallet || cancelled) return;
+          const scriptType = bc2ScriptTypeFromAddress(address);
+          const xpub = await getBC2AccountXpub(wallet, scriptType); // seed touched at most once (backfill)
+          const scan = await scanBC2Hd(xpub, scriptType);
           if (!cancelled && scan.receiveAddress) setDisplayAddress(scan.receiveAddress);
         } catch { /* keep the stored address */ }
       })();
@@ -230,28 +232,24 @@ const BCH2WalletDetailWrapper: React.FC = () => {
         // (across every used address, deduped). Fall back to the primary address if
         // the seed can't be read (e.g. locked) or the scan fails.
         const scriptType = bc2ScriptTypeFromAddress(w.address);
-        let mnemonic: string | null = null;
-        try { mnemonic = await getWalletMnemonic(w.id); } catch { /* locked / unavailable */ }
-        if (mnemonic) {
-          try {
-            const scan = await scanBC2Hd(mnemonic, scriptType);
-            balance = { confirmed: scan.confirmed, unconfirmed: scan.unconfirmed };
-            const seen = new Set<string>();
-            const merged: any[] = [];
-            for (const addr of scan.usedAddresses) {
-              try {
-                for (const t of await getBC2Transactions(addr)) {
-                  if (t.tx_hash && !seen.has(t.tx_hash)) { seen.add(t.tx_hash); merged.push(t); }
-                }
-              } catch { /* skip one address's history, don't block */ }
-            }
-            merged.sort((a, b) => (b.height || Number.MAX_SAFE_INTEGER) - (a.height || Number.MAX_SAFE_INTEGER));
-            txHistory = merged;
-          } catch {
-            balance = await getBC2Balance(w.address);
-            txHistory = await getBC2Transactions(w.address);
+        try {
+          // Watch-only: derive/read the account xpub (seed touched at most once, to
+          // backfill an older wallet), then scan without the seed.
+          const xpub = await getBC2AccountXpub(w, scriptType);
+          const scan = await scanBC2Hd(xpub, scriptType);
+          balance = { confirmed: scan.confirmed, unconfirmed: scan.unconfirmed };
+          const seen = new Set<string>();
+          const merged: any[] = [];
+          for (const addr of scan.usedAddresses) {
+            try {
+              for (const t of await getBC2Transactions(addr)) {
+                if (t.tx_hash && !seen.has(t.tx_hash)) { seen.add(t.tx_hash); merged.push(t); }
+              }
+            } catch { /* skip one address's history, don't block */ }
           }
-        } else {
+          merged.sort((a, b) => (b.height || Number.MAX_SAFE_INTEGER) - (a.height || Number.MAX_SAFE_INTEGER));
+          txHistory = merged;
+        } catch {
           balance = await getBC2Balance(w.address);
           txHistory = await getBC2Transactions(w.address);
         }

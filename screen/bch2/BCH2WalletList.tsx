@@ -16,17 +16,19 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2BorderRadius, BCH2Shadows } from '../../components/BCH2Theme';
 import BCH2WalletCard from '../../components/BCH2WalletCard';
-import { getWallets, StoredWallet, updateWalletBalance, getWalletMnemonic } from '../../class/bch2-wallet-storage';
+import { getWallets, StoredWallet, updateWalletBalance, getBC2AccountXpub } from '../../class/bch2-wallet-storage';
 import { getBalanceByAddress, getBC2Balance, getBalanceByScripthash, isConnected as isElectrumConnected } from '../../blue_modules/BCH2Electrum';
 import { getBC2HdBalance, bc2ScriptTypeFromAddress } from '../../class/bch2-transaction';
 import { bc1AddressToScripthash } from '../../class/bch2-airdrop';
 
-// HD-aggregate BC2 balance across the whole account; falls back to the primary
-// address if the seed can't be read or the scan fails.
+// HD-aggregate BC2 balance across the whole account, watch-only via the account
+// xpub (the seed is read at most once, to backfill an older wallet). Falls back to
+// the primary-address balance if that fails.
 async function bc2WalletBalance(wallet: StoredWallet): Promise<{ confirmed: number; unconfirmed: number }> {
   try {
-    const mnemonic = await getWalletMnemonic(wallet.id);
-    if (mnemonic) return await getBC2HdBalance(mnemonic, bc2ScriptTypeFromAddress(wallet.address));
+    const scriptType = bc2ScriptTypeFromAddress(wallet.address);
+    const xpub = await getBC2AccountXpub(wallet, scriptType);
+    return await getBC2HdBalance(xpub, scriptType);
   } catch { /* fall through */ }
   return getBC2Balance(wallet.address);
 }

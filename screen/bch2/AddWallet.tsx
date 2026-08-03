@@ -17,7 +17,7 @@ import {
 } from 'react-native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2BorderRadius, BCH2Shadows } from '../../components/BCH2Theme';
 import * as bip39 from 'bip39';
-import { saveWallet, BC2ScriptType } from '../../class/bch2-wallet-storage';
+import { saveWallet, deriveBC2AccountXpub, BC2ScriptType } from '../../class/bch2-wallet-storage';
 import { getBC2HdBalance } from '../../class/bch2-transaction';
 import { useScreenProtect } from '../../hooks/useScreenProtect';
 
@@ -41,7 +41,7 @@ async function discoverBc2ScriptType(mnemonic: string): Promise<BC2ScriptType | 
   let best: { type: BC2ScriptType; total: number } | null = null;
   for (const t of types) {
     try {
-      const bal = await getBC2HdBalance(mnemonic, t);
+      const bal = await getBC2HdBalance(deriveBC2AccountXpub(mnemonic, t), t);
       const total = (bal.confirmed || 0) + (bal.unconfirmed || 0);
       if (total > 0 && (!best || total > best.total)) best = { type: t, total };
     } catch {

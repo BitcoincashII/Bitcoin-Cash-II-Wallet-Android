@@ -3020,66 +3020,56 @@ export interface HdScanResult {
 /**
  * Scan a BC2 HD account (receive chain 0 + change chain 1) with a BIP44 gap
  * limit, aggregating balance and collecting spendable UTXOs (tagged with their
- * derivation chain/index) across every used address. Returns NO key material —
- * spending re-derives keys on demand. A used-but-empty address advances the gap
- * counter (via tx_count) so spent addresses don't prematurely stop the scan.
+ * derivation chain/index) across every used address.
+ *
+ * WATCH-ONLY: takes the account extended PUBLIC key (xpub at m/purpose'/0'/0') and
+ * derives only public keys — the seed is NEVER read here. This is the whole point:
+ * balance/receive/discovery run without the seed leaving the Keystore. `accountXpub`
+ * must be the xpub for this scriptType's purpose. A used-but-empty address advances
+ * the gap counter (via tx_count) so spent addresses don't prematurely stop the scan.
  */
-export async function scanBC2Hd(mnemonic: string, scriptType: BC2ScriptType): Promise<HdScanResult> {
-  const seed = await bip39.mnemonicToSeed(mnemonic);
-  const root = bip32.fromSeed(seed);
-  const purpose = bc2Purpose(scriptType);
-  const nodes: BIP32Interface[] = []; // every private-bearing node we derive, wiped in finally
-  try {
-    let confirmed = 0;
-    let unconfirmed = 0;
-    const utxos: HdUtxo[] = [];
-    const usedAddresses: string[] = [];
-    const nextIndex: [number, number] = [0, 0];
-    for (const chain of [0, 1] as const) {
-      const acct = root.derivePath(`m/${purpose}'/0'/0'/${chain}`);
-      nodes.push(acct);
-      let consecutiveEmpty = 0;
-      let index = 0;
-      while (consecutiveEmpty < HD_GAP_LIMIT && index < HD_MAX_INDEX) {
-        const child = acct.derive(index);
-        nodes.push(child);
-        const address = bc2AddressFromPubkey(scriptType, Buffer.from(child.publicKey));
-        // Atomic: retry a transient failure, then throw. Never skip an index.
-        const info = await hdFetchWithRetries(() => getBC2AddressInfo(address));
-        if (info.txCount > 0) {
-          consecutiveEmpty = 0;
-          usedAddresses.push(address);
-          confirmed += info.confirmed;
-          unconfirmed += info.unconfirmed;
-          if (info.confirmed > 0 || info.unconfirmed > 0) {
-            const mature = await filterMatureUtxos(await hdFetchWithRetries(() => getBC2Utxos(address)), true);
-            for (const u of mature) {
-              if (Number.isInteger(u.value) && u.value > 0 && /^[0-9a-fA-F]{64}$/.test(u.txid) && Number.isInteger(u.vout) && u.vout >= 0) {
-                utxos.push({ txid: u.txid, vout: u.vout, value: u.value, chain, index });
-              }
+export async function scanBC2Hd(accountXpub: string, scriptType: BC2ScriptType): Promise<HdScanResult> {
+  const account = bip32.fromBase58(accountXpub); // public-only account node (no privateKey)
+  let confirmed = 0;
+  let unconfirmed = 0;
+  const utxos: HdUtxo[] = [];
+  const usedAddresses: string[] = [];
+  const nextIndex: [number, number] = [0, 0];
+  for (const chain of [0, 1] as const) {
+    const chainNode = account.derive(chain); // public derivation
+    let consecutiveEmpty = 0;
+    let index = 0;
+    while (consecutiveEmpty < HD_GAP_LIMIT && index < HD_MAX_INDEX) {
+      const address = bc2AddressFromPubkey(scriptType, Buffer.from(chainNode.derive(index).publicKey));
+      // Atomic: retry a transient failure, then throw. Never skip an index.
+      const info = await hdFetchWithRetries(() => getBC2AddressInfo(address));
+      if (info.txCount > 0) {
+        consecutiveEmpty = 0;
+        usedAddresses.push(address);
+        confirmed += info.confirmed;
+        unconfirmed += info.unconfirmed;
+        if (info.confirmed > 0 || info.unconfirmed > 0) {
+          const mature = await filterMatureUtxos(await hdFetchWithRetries(() => getBC2Utxos(address)), true);
+          for (const u of mature) {
+            if (Number.isInteger(u.value) && u.value > 0 && /^[0-9a-fA-F]{64}$/.test(u.txid) && Number.isInteger(u.vout) && u.vout >= 0) {
+              utxos.push({ txid: u.txid, vout: u.vout, value: u.value, chain, index });
             }
           }
-        } else {
-          consecutiveEmpty++;
         }
-        index++;
+      } else {
+        consecutiveEmpty++;
       }
-      nextIndex[chain] = index - consecutiveEmpty; // first unused index on this chain
+      index++;
     }
-    const recvNode = root.derivePath(`m/${purpose}'/0'/0'/0/${nextIndex[0]}`);
-    nodes.push(recvNode);
-    const receiveAddress = bc2AddressFromPubkey(scriptType, Buffer.from(recvNode.publicKey));
-    return { confirmed, unconfirmed, utxos, usedAddresses, nextReceiveIndex: nextIndex[0], nextChangeIndex: nextIndex[1], receiveAddress };
-  } finally {
-    if (seed instanceof Buffer || seed instanceof Uint8Array) { try { crypto.randomFillSync(seed); } catch {} seed.fill(0); }
-    if (root.privateKey) { try { crypto.randomFillSync(root.privateKey); } catch {} root.privateKey.fill(0); }
-    for (const n of nodes) { try { if (n.privateKey) { crypto.randomFillSync(n.privateKey); n.privateKey.fill(0); } } catch {} }
+    nextIndex[chain] = index - consecutiveEmpty; // first unused index on this chain
   }
+  const receiveAddress = bc2AddressFromPubkey(scriptType, Buffer.from(account.derive(0).derive(nextIndex[0]).publicKey));
+  return { confirmed, unconfirmed, utxos, usedAddresses, nextReceiveIndex: nextIndex[0], nextChangeIndex: nextIndex[1], receiveAddress };
 }
 
-/** HD-aggregate balance for a BC2 wallet (sum across all used addresses). */
-export async function getBC2HdBalance(mnemonic: string, scriptType: BC2ScriptType): Promise<{ confirmed: number; unconfirmed: number }> {
-  const scan = await scanBC2Hd(mnemonic, scriptType);
+/** HD-aggregate balance for a BC2 wallet from its account xpub (no seed access). */
+export async function getBC2HdBalance(accountXpub: string, scriptType: BC2ScriptType): Promise<{ confirmed: number; unconfirmed: number }> {
+  const scan = await scanBC2Hd(accountXpub, scriptType);
   return { confirmed: scan.confirmed, unconfirmed: scan.unconfirmed };
 }
 
@@ -3104,17 +3094,23 @@ export async function sendBC2NativeHd(
   const recipientScript = addressToScript(toAddress, true);
   const purpose = bc2Purpose(scriptType);
 
-  const scan = await scanBC2Hd(mnemonic, scriptType);
-  const available = scan.utxos.slice().sort((a, b) => b.value - a.value);
-  if (available.length === 0) throw new Error(`No spendable UTXOs for this BC2 ${scriptType} wallet`);
-
   const seed = await bip39.mnemonicToSeed(mnemonic);
   const root = bip32.fromSeed(seed);
   const derivedNodes: BIP32Interface[] = [];
   const keyBuffers: Buffer[] = [];
   try {
+    // Private account node; its neutered xpub drives the (watch-only) scan and its
+    // children sign. Deriving each chain node once lets us wipe them all in finally.
+    const account = root.derivePath(`m/${purpose}'/0'/0'`);
+    const chainNodes = [account.derive(0), account.derive(1)];
+    derivedNodes.push(account, chainNodes[0], chainNodes[1]);
+
+    const scan = await scanBC2Hd(account.neutered().toBase58(), scriptType);
+    const available = scan.utxos.slice().sort((a, b) => b.value - a.value);
+    if (available.length === 0) throw new Error(`No spendable UTXOs for this BC2 ${scriptType} wallet`);
+
     // Change to a fresh change address (chain 1, next unused index).
-    const changeNode = root.derivePath(`m/${purpose}'/0'/0'/1/${scan.nextChangeIndex}`);
+    const changeNode = chainNodes[1].derive(scan.nextChangeIndex);
     derivedNodes.push(changeNode);
     const changeAddress = bc2AddressFromPubkey(scriptType, Buffer.from(changeNode.publicKey));
     const changeScript = addressToScript(changeAddress, true);
@@ -3144,7 +3140,7 @@ export async function sendBC2NativeHd(
     let txHex: string;
     if (scriptType === 'taproot') {
       const inputs: TaprootKeyedInput[] = selected.map(u => {
-        const node = root.derivePath(`m/${purpose}'/0'/0'/${u.chain}/${u.index}`);
+        const node = chainNodes[u.chain].derive(u.index);
         derivedNodes.push(node);
         const pub = Buffer.from(node.publicKey);
         const priv = Buffer.from(node.privateKey!); keyBuffers.push(priv);
@@ -3167,7 +3163,7 @@ export async function sendBC2NativeHd(
       txHex = buildBC2TaprootTxMulti(inputs, recipientScript, amountSats, hasChange ? changeScript : null, changeAmount);
     } else {
       const inputs: SegwitKeyedInput[] = selected.map(u => {
-        const node = root.derivePath(`m/${purpose}'/0'/0'/${u.chain}/${u.index}`);
+        const node = chainNodes[u.chain].derive(u.index);
         derivedNodes.push(node);
         const priv = Buffer.from(node.privateKey!); keyBuffers.push(priv);
         return { txid: u.txid, vout: u.vout, value: u.value, privateKey: priv, publicKey: Buffer.from(node.publicKey) };

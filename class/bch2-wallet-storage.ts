@@ -60,6 +60,9 @@ export interface StoredWallet {
   id: string;
   type: 'bch2' | 'bc2' | 'bc1';  // bc1 = Native SegWit for BCH2 airdrop claims
   scriptType?: BC2ScriptType;    // BC2 only; undefined === 'legacy'
+  xpub?: string;                 // BC2 only: account xpub m/purpose'/0'/0' — enables
+                                 // watch-only balance/scan/receive WITHOUT reading the
+                                 // seed. The seed (Keystore) is read only to SIGN.
   label: string;
   mnemonic: string;
   address: string;
@@ -86,6 +89,8 @@ export async function saveWallet(
 
   // Derive address from mnemonic
   const address = deriveAddress(trimmedMnemonic, walletType, scriptType);
+  // BC2: also derive the account xpub now so reads never need the seed later.
+  const bc2Xpub = walletType === 'bc2' ? deriveBC2AccountXpub(trimmedMnemonic, scriptType) : undefined;
   const id = generateId();
 
   // Store the recovery phrase in the Keystore FIRST. If that fails, do not
@@ -97,7 +102,7 @@ export async function saveWallet(
   const wallet: StoredWallet = {
     id,
     type: walletType,
-    ...(walletType === 'bc2' ? { scriptType } : {}),
+    ...(walletType === 'bc2' ? { scriptType, xpub: bc2Xpub } : {}),
     label: label.trim(),
     mnemonic: trimmedMnemonic,
     address,
@@ -298,6 +303,57 @@ export function bc2AddressFromPubkey(scriptType: BC2ScriptType, publicKey: Buffe
  */
 export function deriveBC2Address(mnemonic: string, scriptType: BC2ScriptType): string {
   return deriveAddress(mnemonic.trim(), 'bc2', scriptType);
+}
+
+function bc2PurposeFor(scriptType: BC2ScriptType): number {
+  return scriptType === 'p2sh-segwit' ? 49 : scriptType === 'native-segwit' ? 84 : scriptType === 'taproot' ? 86 : 44;
+}
+
+/**
+ * Derive the BC2 account extended PUBLIC key (xpub at m/purpose'/0'/0'). This is
+ * public-only — it can derive every receive/change address for watch-only
+ * balance/scan/receive, but CANNOT sign. Stored so the seed is not read for reads.
+ * The seed is used here (create/import/migration) and then wiped.
+ */
+export function deriveBC2AccountXpub(mnemonic: string, scriptType: BC2ScriptType): string {
+  const purpose = bc2PurposeFor(scriptType);
+  const seed = bip39.mnemonicToSeedSync(mnemonic.trim());
+  const root = bip32.fromSeed(seed);
+  try {
+    const account = root.derivePath(`m/${purpose}'/0'/0'`);
+    const xpub = account.neutered().toBase58();
+    if (account.privateKey) { try { account.privateKey.fill(0); } catch {} }
+    return xpub;
+  } finally {
+    if (seed instanceof Buffer || seed instanceof Uint8Array) seed.fill(0);
+    if (root.privateKey) { try { root.privateKey.fill(0); } catch {} }
+  }
+}
+
+/**
+ * Return a BC2 wallet's account xpub. If not yet stored (older wallet), derive it
+ * from the seed ONCE and persist it — the last seed read for read-only operations;
+ * every later balance/scan/receive uses the stored xpub with no seed access.
+ */
+export async function getBC2AccountXpub(wallet: StoredWallet, scriptType: BC2ScriptType): Promise<string> {
+  if (wallet.xpub) return wallet.xpub;
+  const mnemonic = await getWalletMnemonic(wallet.id);
+  if (!mnemonic) throw new Error('Cannot derive account xpub — wallet seed unavailable');
+  const xpub = deriveBC2AccountXpub(mnemonic, scriptType);
+  await updateWalletXpub(wallet.id, xpub);
+  return xpub;
+}
+
+/** Persist the account xpub for a wallet (one-time backfill; never overwrites). */
+export async function updateWalletXpub(id: string, xpub: string): Promise<void> {
+  await withStorageLock(async () => {
+    const wallets = await getWalletsRaw();
+    const idx = wallets.findIndex(w => w.id === id);
+    if (idx !== -1 && !wallets[idx].xpub) {
+      wallets[idx].xpub = xpub;
+      await AsyncStorage.setItem(WALLETS_KEY, JSON.stringify(wallets));
+    }
+  });
 }
 
 /**
