@@ -36,12 +36,12 @@ const DEBUG = __DEV__ || false;
 // side). bc2electrum uses a long-lived self-signed cert (stable). Keep the hex
 // mirror in android/app/src/main/java/org/bch2/wallet/ElectrumClient.kt in sync.
 const PINNED_SPKI_SHA256: Record<'bch2' | 'bc2', string[]> = {
-  bch2: ['jEqLYdEKOrXjztqypG3B5S9+bsnZmiR0b29juuC6+hE='], // electrum.bch2.org (LE, ~90d)
+  bch2: ['FIBCDUGPgBvYIAoNlVmEzwjvk2SW6yDE0bVGOtgs5as='], // electrum.bch2.org (RSA LE, reuse_key → stable SPKI)
   bc2: ['7RZ1HtI370pp2Re06xJ0W1/QGupIq+X94GdRzPY7aT4='],  // bc2electrum (self-signed, 10y)
 };
 // Full-certificate SHA-256 (lowercase hex, no colons) — the API<26 fallback.
 const PINNED_CERT_SHA256: Record<'bch2' | 'bc2', string[]> = {
-  bch2: ['c127e21e768c222bee1e12454801a043d33e32b167bd5c1bb7aeda4afbdd4034'],
+  bch2: ['622849af0ced546f3ab24870eda5d63e36df7f302892b1cb36a89a73228a8fc6'],
   bc2: ['64660131e5ad82b54c6c88b8131c8931283b197a382fc08c698c73ddc3d58c61'],
 };
 
