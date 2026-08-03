@@ -1,0 +1,202 @@
+/**
+ * Native BC2 SegWit / Taproot spend validation against a real regtest node.
+ *
+ * This exercises the ACTUAL builders from class/bch2-transaction.ts:
+ *   - buildBC2SegwitTx  (P2WPKH + P2SH-P2WPKH)
+ *   - buildBC2TaprootTx (P2TR key-path)
+ *
+ * P2WPKH / P2SH-P2WPKH are validated end-to-end against consensus by mining the
+ * spend into a block with `generateblock` on a bitcoincashII regtest node (SegWit
+ * buried-active). generateblock enforces consensus (not just mempool policy), so a
+ * bad witness/sighash makes it throw.
+ *
+ * Taproot cannot be mined on the available reference node (its regtest DAA jumps to
+ * difficulty 1 at height 2), so it is validated by: (a) the official BIP86 key/tweak
+ * test vector, (b) independently recomputing the BIP341 sighash and BIP340-verifying
+ * the signature the builder produced, and (c) confirming the witness tx decodes on the
+ * node. The witness serializer is additionally proven by the SegWit consensus tests.
+ *
+ * Requires the local regtest node; skipped automatically when absent (so CI is green).
+ * Set BC2_REGTEST_CLI / BC2_REGTEST_DATADIR to point at a funded node.
+ */
+import { execFileSync } from 'child_process';
+import * as fs from 'fs';
+import * as bip39 from 'bip39';
+import BIP32Factory from 'bip32';
+import ecc from '../../blue_modules/noble_ecc';
+
+const crypto = require('crypto');
+const bip32 = BIP32Factory(ecc);
+
+// Builders import class/bch2-transaction which pulls BCH2Electrum (RN net). Mock it.
+jest.mock('../../blue_modules/BCH2Electrum', () => ({
+  getUtxosByAddress: async () => [],
+  getBC2Utxos: async () => [],
+  getUtxosByScripthash: async () => [],
+  broadcastTransaction: async () => '',
+  broadcastBC2Transaction: async () => '',
+  filterMatureUtxos: async (u: any[]) => u,
+}));
+
+import { buildBC2SegwitTx, buildBC2TaprootTx } from '../../class/bch2-transaction';
+
+const CLI_BIN = process.env.BC2_REGTEST_CLI || '/home/dev/bch2-linux-out/bitcoincashII-cli';
+const DATADIR = process.env.BC2_REGTEST_DATADIR ||
+  '/tmp/claude-1000/-home-dev/e646408f-da62-4ce4-9b72-40c2a9b440a9/scratchpad/bc2-regtest';
+
+const TEST_MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
+
+function nodeUp(): boolean {
+  if (!fs.existsSync(CLI_BIN)) return false;
+  try { cli(['getblockcount']); return true; } catch { return false; }
+}
+
+function cli(args: string[]): string {
+  return execFileSync(CLI_BIN, [`-datadir=${DATADIR}`, ...args], { encoding: 'utf8' }).trim();
+}
+function jcli(args: string[]): any { return JSON.parse(cli(args)); }
+
+function le64(n: number): Buffer { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(n)); return b; }
+function varint(n: number): Buffer {
+  if (n < 0xfd) return Buffer.from([n]);
+  if (n <= 0xffff) { const b = Buffer.alloc(3); b[0] = 0xfd; b.writeUInt16LE(n, 1); return b; }
+  const b = Buffer.alloc(5); b[0] = 0xfe; b.writeUInt32LE(n, 1); return b;
+}
+function sha256(b: Buffer): Buffer { return crypto.createHash('sha256').update(b).digest(); }
+function hash160(b: Buffer): Buffer {
+  return crypto.createHash('ripemd160').update(sha256(b)).digest();
+}
+function taggedHash(tag: string, data: Buffer): Buffer {
+  const t = sha256(Buffer.from(tag, 'utf8'));
+  return sha256(Buffer.concat([t, t, data]));
+}
+
+/** Fund an arbitrary scriptPubKey on the node and return its confirmed UTXO.
+ *  Seeds the raw tx with one real wallet input so it isn't mis-parsed as a
+ *  0-input SegWit tx (version + 0x00 would read as the witness marker); then
+ *  lets fundrawtransaction add change + fee. */
+function fundScript(spk: Buffer, valueSats: number): { txid: string; vout: number; value: number } {
+  const u = (jcli(['listunspent', '1']) as any[]).find(x => x.spendable);
+  if (!u) throw new Error('no spendable wallet UTXO to fund from');
+  const prev = Buffer.concat([Buffer.from(u.txid, 'hex').reverse(), (() => { const b = Buffer.alloc(4); b.writeUInt32LE(u.vout); return b; })()]);
+  const partial = Buffer.concat([
+    Buffer.from('02000000', 'hex'),
+    Buffer.from([0x01]), prev, Buffer.from([0x00]), Buffer.from('ffffffff', 'hex'), // 1 input, empty scriptSig
+    Buffer.from([0x01]), le64(valueSats), varint(spk.length), spk,                  // 1 output = target script
+    Buffer.from('00000000', 'hex'),
+  ]).toString('hex');
+  const funded = jcli(['fundrawtransaction', partial]);
+  const signed = jcli(['signrawtransactionwithwallet', funded.hex]);
+  if (!signed.complete) throw new Error('funding tx did not sign');
+  const txid = cli(['sendrawtransaction', signed.hex]);
+  cli(['generatetoaddress', '1', cli(['getnewaddress'])]);
+  const decoded = jcli(['decoderawtransaction', signed.hex]);
+  const out = decoded.vout.find((o: any) => o.scriptPubKey.hex === spk.toString('hex'));
+  if (!out) throw new Error('funded output not found');
+  return { txid, vout: out.n, value: valueSats };
+}
+
+/** Mine the spend into a block: consensus-valid iff height increments (throws otherwise). */
+function assertConsensusValid(spendHex: string): void {
+  const before = Number(cli(['getblockcount']));
+  cli(['generateblock', cli(['getnewaddress']), JSON.stringify([spendHex])]); // throws on invalid
+  const after = Number(cli(['getblockcount']));
+  expect(after).toBe(before + 1);
+}
+
+const RECIPIENT = Buffer.concat([Buffer.from([0x00, 0x14]), Buffer.alloc(20, 0x11)]); // P2WPKH(0x11..)
+
+const run = nodeUp() ? describe : describe.skip;
+
+run('native BC2 SegWit / Taproot spends — real regtest consensus', () => {
+  const root = bip32.fromSeed(bip39.mnemonicToSeedSync(TEST_MNEMONIC));
+
+  it('P2WPKH (m/84\') spend is accepted by SegWit consensus', () => {
+    const child = root.derivePath("m/84'/0'/0'/0/0");
+    const pub = Buffer.from(child.publicKey);
+    const spk = Buffer.concat([Buffer.from([0x00, 0x14]), hash160(pub)]);
+    const utxo = fundScript(spk, 100_000_000);
+    const change = spk;
+    const hex = buildBC2SegwitTx(false, [utxo], RECIPIENT, 50_000_000, change, 49_999_000, Buffer.from(child.privateKey!), pub);
+    // structural sanity: segwit marker+flag present
+    expect(hex.slice(8, 12)).toBe('0001');
+    assertConsensusValid(hex);
+  });
+
+  it('P2SH-P2WPKH (m/49\') spend is accepted by SegWit consensus', () => {
+    const child = root.derivePath("m/49'/0'/0'/0/0");
+    const pub = Buffer.from(child.publicKey);
+    const redeem = Buffer.concat([Buffer.from([0x00, 0x14]), hash160(pub)]);
+    const spk = Buffer.concat([Buffer.from([0xa9, 0x14]), hash160(redeem), Buffer.from([0x87])]);
+    const utxo = fundScript(spk, 100_000_000);
+    const change = spk;
+    const hex = buildBC2SegwitTx(true, [utxo], RECIPIENT, 50_000_000, change, 49_999_000, Buffer.from(child.privateKey!), pub);
+    assertConsensusValid(hex);
+  });
+
+  it('multi-input P2WPKH spend is accepted (proves BIP143 midstates over N inputs)', () => {
+    const child = root.derivePath("m/84'/0'/0'/0/0");
+    const pub = Buffer.from(child.publicKey);
+    const spk = Buffer.concat([Buffer.from([0x00, 0x14]), hash160(pub)]);
+    const u1 = fundScript(spk, 30_000_000);
+    const u2 = fundScript(spk, 40_000_000);
+    const hex = buildBC2SegwitTx(false, [u1, u2], RECIPIENT, 60_000_000, spk, 9_999_000, Buffer.from(child.privateKey!), pub);
+    assertConsensusValid(hex);
+  });
+
+  it('Taproot (m/86\') key/tweak matches the official BIP86 test vector', () => {
+    const child = root.derivePath("m/86'/0'/0'/0/0");
+    const xonly = Buffer.from(child.publicKey).subarray(1, 33);
+    // Official BIP86 vector for "abandon…about" @ m/86'/0'/0'/0/0. The internal
+    // x-only key and the tweaked output key below were both confirmed against
+    // Bitcoin Core's descriptor engine (tr(...)) deriving from this same seed:
+    // output key a60869f0… ⇒ address bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr.
+    expect(xonly.toString('hex')).toBe('cc8a4bc64d897bddc5fbc2f670f7a8ba0b386779106cf1223c6fc5d7cd6fc115');
+    const tweak = taggedHash('TapTweak', xonly);
+    const tr = ecc.xOnlyPointAddTweak(xonly, tweak)!;
+    expect(Buffer.from(tr.xOnlyPubkey).toString('hex')).toBe('a60869f0dbcf1dc659c9cecbaf8050135ea9e8cdc487053f1dc6880949dc684c');
+  });
+
+  it('Taproot key-path spend: sig verifies over an independent BIP341 sighash and decodes on the node', () => {
+    const child = root.derivePath("m/86'/0'/0'/0/0");
+    const pub = Buffer.from(child.publicKey);
+    const xonly = pub.subarray(1, 33);
+    const tweak = taggedHash('TapTweak', xonly);
+    const tr = ecc.xOnlyPointAddTweak(xonly, tweak)!;
+    const tweakedXonly = Buffer.from(tr.xOnlyPubkey);
+    const effective = pub[0] === 0x02 ? Buffer.from(child.privateKey!) : Buffer.from(ecc.privateNegate(Buffer.from(child.privateKey!)));
+    const tweakedPriv = Buffer.from(ecc.privateAdd(effective, tweak)!);
+    const spk = Buffer.concat([Buffer.from([0x51, 0x20]), tweakedXonly]);
+
+    const utxo = fundScript(spk, 100_000_000);
+    const amount = 50_000_000, change = 49_999_000;
+    const hex = buildBC2TaprootTx([utxo], RECIPIENT, amount, spk, change, tweakedPriv, tweakedXonly);
+
+    // Build outputs exactly as the builder did, then independently recompute BIP341 sighash.
+    const outs = Buffer.concat([
+      le64(amount), varint(RECIPIENT.length), RECIPIENT,
+      le64(change), varint(spk.length), spk,
+    ]);
+    const outpoint = Buffer.concat([Buffer.from(utxo.txid, 'hex').reverse(), (() => { const b = Buffer.alloc(4); b.writeUInt32LE(utxo.vout); return b; })()]);
+    const msg = Buffer.concat([
+      Buffer.from([0x00, 0x00]),                       // epoch, SIGHASH_DEFAULT
+      Buffer.from('02000000', 'hex'),                  // nVersion
+      Buffer.from('00000000', 'hex'),                  // nLockTime
+      sha256(outpoint),                                // sha_prevouts
+      sha256(le64(utxo.value)),                        // sha_amounts
+      sha256(Buffer.concat([varint(spk.length), spk])),// sha_scriptpubkeys
+      sha256(Buffer.from('ffffffff', 'hex')),          // sha_sequences
+      sha256(outs),                                    // sha_outputs
+      Buffer.from([0x00]),                             // spend_type
+      Buffer.from('00000000', 'hex'),                  // input_index 0
+    ]);
+    const sighash = taggedHash('TapSighash', msg);
+
+    const decoded = jcli(['decoderawtransaction', hex, 'true']);
+    const sig = Buffer.from(decoded.vin[0].txinwitness[0], 'hex');
+    expect(sig.length).toBe(64);
+    expect(ecc.verifySchnorr(sighash, tweakedXonly, sig)).toBe(true);
+    // The output key committed in the UTXO is exactly what we signed for.
+    expect(decoded.vout[0].scriptPubKey.hex).toBe(RECIPIENT.toString('hex'));
+  });
+});
