@@ -6,6 +6,7 @@
 
 import DefaultPreference from 'react-native-default-preference';
 import { sha256 } from '@noble/hashes/sha256';
+import { BC2_EXPLORER_URL } from '../class/bch2-constants';
 
 const ElectrumClient = require('electrum-client');
 const net = require('net');
@@ -703,7 +704,7 @@ export async function getBC2Balance(address: string): Promise<{ confirmed: numbe
   }
   try {
     // Use explorer API as primary method (more reliable than Electrum)
-    const response = await fetch(`https://explorer.bitcoin-ii.org/api/address/${encodeURIComponent(address)}`);
+    const response = await fetch(`${BC2_EXPLORER_URL}/api/address/${encodeURIComponent(address)}`);
     if (!response.ok) {
       throw new Error(`Explorer API error: ${response.status}`);
     }
@@ -761,7 +762,7 @@ export async function getBC2AddressInfo(address: string): Promise<{ confirmed: n
   if (typeof address !== 'string' || address.length === 0 || address.length > 150) {
     throw new Error('Invalid BC2 address');
   }
-  const response = await fetch(`https://explorer.bitcoin-ii.org/api/address/${encodeURIComponent(address)}`);
+  const response = await fetch(`${BC2_EXPLORER_URL}/api/address/${encodeURIComponent(address)}`);
   if (!response.ok) throw new Error(`Explorer API error: ${response.status}`);
   const data = await response.json();
   const funded = Number(data.chain_stats?.funded_txo_sum ?? 0);
@@ -813,7 +814,7 @@ export async function getBC2Utxos(address: string): Promise<any[]> {
   DEBUG && console.log(`[BC2] Fetching UTXOs for address: ${address}`);
   try {
     // Use explorer API as primary method
-    const url = `https://explorer.bitcoin-ii.org/api/address/${encodeURIComponent(address)}/utxo`;
+    const url = `${BC2_EXPLORER_URL}/api/address/${encodeURIComponent(address)}/utxo`;
     DEBUG && console.log(`[BC2] Explorer API URL: ${url}`);
     const response = await fetch(url);
     DEBUG && console.log(`[BC2] Explorer API response status: ${response.status}`);
@@ -889,7 +890,7 @@ export async function getBC2Transactions(address: string): Promise<any[]> {
     throw new Error('Invalid BC2 address');
   }
   try {
-    const response = await fetch(`https://explorer.bitcoin-ii.org/api/address/${encodeURIComponent(address)}/txs`);
+    const response = await fetch(`${BC2_EXPLORER_URL}/api/address/${encodeURIComponent(address)}/txs`);
     if (!response.ok) {
       throw new Error(`Explorer API error: ${response.status}`);
     }
@@ -918,7 +919,7 @@ export async function broadcastBC2Transaction(hex: string): Promise<string> {
   DEBUG && console.log(`[BC2] Broadcasting transaction, hex length: ${hex.length}`);
 
   try {
-    const response = await fetch('https://explorer.bitcoin-ii.org/api/tx', {
+    const response = await fetch(`${BC2_EXPLORER_URL}/api/tx`, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain' },
       body: hex,

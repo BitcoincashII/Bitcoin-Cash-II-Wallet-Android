@@ -752,7 +752,7 @@ describe('BCH2Electrum', () => {
 
         expect(balance).toEqual({ confirmed: 80000, unconfirmed: 5000 });
         expect(mockFetch).toHaveBeenCalledWith(
-          expect.stringContaining('explorer.bitcoin-ii.org/api/address/'),
+          expect.stringContaining('bc2mempool.com/api/address/'),
         );
       });
 
@@ -770,7 +770,7 @@ describe('BCH2Electrum', () => {
         await mod.getBC2Balance('testaddr123');
 
         expect(mockFetch).toHaveBeenCalledWith(
-          'https://explorer.bitcoin-ii.org/api/address/testaddr123',
+          'https://bc2mempool.com/api/address/testaddr123',
         );
       });
 
@@ -864,7 +864,7 @@ describe('BCH2Electrum', () => {
         await mod.getBC2Utxos('testaddr');
 
         expect(mockFetch).toHaveBeenCalledWith(
-          'https://explorer.bitcoin-ii.org/api/address/testaddr/utxo',
+          'https://bc2mempool.com/api/address/testaddr/utxo',
         );
       });
 
@@ -974,7 +974,7 @@ describe('BCH2Electrum', () => {
 
         expect(result).toBe(validTxid);
         expect(mockFetch).toHaveBeenCalledWith(
-          'https://explorer.bitcoin-ii.org/api/tx',
+          'https://bc2mempool.com/api/tx',
           expect.objectContaining({
             method: 'POST',
             headers: { 'Content-Type': 'text/plain' },

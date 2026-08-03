@@ -17,13 +17,13 @@
         </trust-anchors>
     </domain-config>
 
-    <!-- BC2 explorer (fund path: getBC2Balance/Utxos/History/broadcast use fetch()). -->
+    <!-- BC2 explorer/API (fund path: getBC2Balance/AddressInfo/Utxos/History/broadcast use fetch()). -->
     <!-- Pin the Let's Encrypt ROOTS, not the ~90-day leaf: this defeats a rogue/ -->
     <!-- compromised non-LE CA (the real MITM threat) while surviving LE leaf and -->
-    <!-- intermediate rotation. explorer.bitcoin-ii.org currently chains to ISRG -->
-    <!-- Root X2; X1 is pinned as a backup in case a future cert uses the RSA root. -->
+    <!-- intermediate rotation. bc2mempool.com chains to ISRG Root X2 (verified -->
+    <!-- 2026-08-03); X1 is pinned as a backup in case a future cert uses the RSA root. -->
     <domain-config cleartextTrafficPermitted="false">
-        <domain includeSubdomains="false">explorer.bitcoin-ii.org</domain>
+        <domain includeSubdomains="false">bc2mempool.com</domain>
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>

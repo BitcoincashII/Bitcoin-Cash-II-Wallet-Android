@@ -533,14 +533,14 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.explorerRow}
-            onPress={() => Linking.openURL('https://explorer.bitcoin-ii.org').catch(() => {})}
+            onPress={() => Linking.openURL('https://bc2mempool.com').catch(() => {})}
             accessibilityLabel="Open BC2 block explorer"
             accessibilityRole="link"
           >
             <Image source={BC2_LOGO} style={styles.explorerLogo} resizeMode="contain" />
             <View style={styles.explorerInfo}>
               <Text style={styles.explorerLabel}>BC2 Explorer</Text>
-              <Text style={[styles.explorerUrl, { color: BCH2Colors.bc2Primary }]}>explorer.bitcoin-ii.org</Text>
+              <Text style={[styles.explorerUrl, { color: BCH2Colors.bc2Primary }]}>bc2mempool.com</Text>
             </View>
             <Text style={styles.explorerArrow}>→</Text>
           </TouchableOpacity>

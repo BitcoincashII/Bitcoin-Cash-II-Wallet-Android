@@ -23,7 +23,7 @@ describe('BCH2 Constants', () => {
     });
 
     it('BC2 explorer URL is correct', () => {
-      assert.strictEqual(BC2_EXPLORER_URL, 'https://explorer.bitcoin-ii.org');
+      assert.strictEqual(BC2_EXPLORER_URL, 'https://bc2mempool.com');
     });
 
     it('explorer URLs use HTTPS', () => {
@@ -74,7 +74,7 @@ describe('BCH2 Constants', () => {
     it('returns correct URL for a valid txid', () => {
       assert.strictEqual(
         getBC2TransactionUrl(VALID_TXID),
-        `https://explorer.bitcoin-ii.org/tx/${VALID_TXID}`,
+        `https://bc2mempool.com/tx/${VALID_TXID}`,
       );
     });
 
@@ -90,7 +90,7 @@ describe('BCH2 Constants', () => {
       const upperTxid = VALID_TXID.toUpperCase();
       assert.strictEqual(
         getBC2TransactionUrl(upperTxid),
-        `https://explorer.bitcoin-ii.org/tx/${upperTxid}`,
+        `https://bc2mempool.com/tx/${upperTxid}`,
       );
     });
 
@@ -98,7 +98,7 @@ describe('BCH2 Constants', () => {
       const mixedTxid = 'ABCDef0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789';
       assert.strictEqual(
         getBC2TransactionUrl(mixedTxid),
-        `https://explorer.bitcoin-ii.org/tx/${mixedTxid}`,
+        `https://bc2mempool.com/tx/${mixedTxid}`,
       );
     });
   });
@@ -140,7 +140,7 @@ describe('BCH2 Constants', () => {
       const address = 'bitcoincashii:qtest123';
       assert.strictEqual(
         getBC2AddressUrl(address),
-        `https://explorer.bitcoin-ii.org/address/${encodeURIComponent(address)}`,
+        `https://bc2mempool.com/address/${encodeURIComponent(address)}`,
       );
     });
 
@@ -182,7 +182,7 @@ describe('BCH2 Constants', () => {
     it('returns correct URL for a valid block hash', () => {
       assert.strictEqual(
         getBC2BlockUrl(VALID_BLOCK_HASH),
-        `https://explorer.bitcoin-ii.org/block/${VALID_BLOCK_HASH}`,
+        `https://bc2mempool.com/block/${VALID_BLOCK_HASH}`,
       );
     });
 
@@ -255,14 +255,14 @@ describe('BCH2 Constants', () => {
     it('returns correct URL for height 0', () => {
       assert.strictEqual(
         getBC2BlockHeightUrl(0),
-        'https://explorer.bitcoin-ii.org/block-height/0',
+        'https://bc2mempool.com/block-height/0',
       );
     });
 
     it('returns correct URL for a positive height', () => {
       assert.strictEqual(
         getBC2BlockHeightUrl(53200),
-        'https://explorer.bitcoin-ii.org/block-height/53200',
+        'https://bc2mempool.com/block-height/53200',
       );
     });
 
@@ -277,7 +277,7 @@ describe('BCH2 Constants', () => {
     it('accepts MAX_SAFE_INTEGER as block height', () => {
       assert.strictEqual(
         getBC2BlockHeightUrl(Number.MAX_SAFE_INTEGER),
-        `https://explorer.bitcoin-ii.org/block-height/${Number.MAX_SAFE_INTEGER}`,
+        `https://bc2mempool.com/block-height/${Number.MAX_SAFE_INTEGER}`,
       );
     });
 
@@ -386,7 +386,7 @@ describe('Additional edge cases', () => {
     it('BC2 genesis block height URL is correct', () => {
       assert.strictEqual(
         getBC2BlockHeightUrl(0),
-        'https://explorer.bitcoin-ii.org/block-height/0',
+        'https://bc2mempool.com/block-height/0',
       );
     });
   });

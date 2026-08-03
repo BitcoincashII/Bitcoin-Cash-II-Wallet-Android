@@ -4,7 +4,7 @@
 
 // Block Explorers
 export const BCH2_EXPLORER_URL = 'https://explorer.bch2.org';
-export const BC2_EXPLORER_URL = 'https://explorer.bitcoin-ii.org';
+export const BC2_EXPLORER_URL = 'https://bc2mempool.com';
 
 // Validate that a string looks like a hex txid (64 hex chars)
 function isValidTxid(txid: string): boolean {
