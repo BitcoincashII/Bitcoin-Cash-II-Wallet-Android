@@ -1,6 +1,7 @@
 import assert from 'assert';
 
 import * as BlueElectrum from '../../blue_modules/BlueElectrum';
+import { RUN_NETWORK_TESTS, itNet } from '../helpers/network-gate';
 import { LegacyWallet, SegwitBech32Wallet, SegwitP2SHWallet } from '../../class';
 
 jest.setTimeout(30 * 1000);
@@ -11,6 +12,7 @@ afterAll(async () => {
 });
 
 beforeAll(async () => {
+  if (!RUN_NETWORK_TESTS) return; // live-network suite; skipped unless BW_INTEGRATION=1
   // awaiting for Electrum to be connected. For RN Electrum would naturally connect
   // while app starts up, but for tests we need to wait for it
   await BlueElectrum.connectMain();
@@ -27,7 +29,7 @@ describe('LegacyWallet', function () {
     assert.strictEqual(key, JSON.stringify(b));
   });
 
-  it('can fetch balance', async () => {
+  itNet('can fetch balance', async () => {
     const w = new LegacyWallet();
     w._address = '115fUy41sZkAG14CmdP1VbEKcNRZJWkUWG'; // hack internals
     assert.ok(w.weOwnAddress('115fUy41sZkAG14CmdP1VbEKcNRZJWkUWG'));
@@ -43,7 +45,7 @@ describe('LegacyWallet', function () {
     assert.ok(w._lastBalanceFetch > 0);
   });
 
-  it('can fetch TXs and derive UTXO from them', async () => {
+  itNet('can fetch TXs and derive UTXO from them', async () => {
     const w = new LegacyWallet();
     w._address = '3GCvDBAktgQQtsbN6x5DYiQCMmgZ9Yk8BK';
     await w.fetchTransactions();
@@ -93,9 +95,9 @@ describe('LegacyWallet', function () {
     }
   };
 
-  it('can fetch TXs when ' + cases[0][0], async () => await caseRunner(cases[0][1]), 240000);
+  itNet('can fetch TXs when ' + cases[0][0], async () => await caseRunner(cases[0][1]), 240000);
 
-  it('can fetch UTXO', async () => {
+  itNet('can fetch UTXO', async () => {
     const w = new LegacyWallet();
     w._address = '12c6DSiU4Rq3P4ZxziKxzrL5LmMBrzjrJX';
     await w.fetchUtxo();
@@ -124,7 +126,7 @@ describe('SegwitP2SHWallet', function () {
 });
 
 describe('SegwitBech32Wallet', function () {
-  it('can fetch balance', async () => {
+  itNet('can fetch balance', async () => {
     const w = new SegwitBech32Wallet();
     w._address = 'bc1q063ctu6jhe5k4v8ka99qac8rcm2tzjjnuktyrl';
     assert.ok(w.weOwnAddress('bc1q063ctu6jhe5k4v8ka99qac8rcm2tzjjnuktyrl'));
@@ -136,7 +138,7 @@ describe('SegwitBech32Wallet', function () {
     assert.strictEqual(w.getBalance(), 69909);
   });
 
-  it('can fetch UTXO', async () => {
+  itNet('can fetch UTXO', async () => {
     const w = new SegwitBech32Wallet();
     w._address = 'bc1q063ctu6jhe5k4v8ka99qac8rcm2tzjjnuktyrl';
     await w.fetchUtxo();
@@ -153,7 +155,7 @@ describe('SegwitBech32Wallet', function () {
     assert.strictEqual(l1, l2);
   });
 
-  it('can fetch TXs LegacyWallet', async () => {
+  itNet('can fetch TXs LegacyWallet', async () => {
     const w = new LegacyWallet();
     w._address = 'bc1quhnve8q4tk3unhmjts7ymxv8cd6w9xv8wy29uv';
     await w.fetchTransactions();
@@ -170,7 +172,7 @@ describe('SegwitBech32Wallet', function () {
     assert.strictEqual(w.getTransactions()[1].value, 892111);
   });
 
-  it('can fetch TXs SegwitBech32Wallet', async () => {
+  itNet('can fetch TXs SegwitBech32Wallet', async () => {
     const w = new SegwitBech32Wallet();
     w._address = 'bc1qn887fmetaytw4vj68vsh529ft408q8j9x3dndc';
     assert.ok(w.weOwnAddress('bc1qn887fmetaytw4vj68vsh529ft408q8j9x3dndc'));

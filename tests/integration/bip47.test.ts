@@ -5,6 +5,7 @@ import * as bitcoin from 'bitcoinjs-lib';
 import { ECPairFactory } from 'ecpair';
 
 import * as BlueElectrum from '../../blue_modules/BlueElectrum';
+import { RUN_NETWORK_TESTS, itNet } from '../helpers/network-gate';
 import ecc from '../../blue_modules/noble_ecc';
 import { HDLegacyP2PKHWallet, HDSegwitBech32Wallet } from '../../class';
 
@@ -18,13 +19,12 @@ afterAll(async () => {
 });
 
 beforeAll(async () => {
-  // awaiting for Electrum to be connected. For RN Electrum would naturally connect
-  // while app starts up, but for tests we need to wait for it
+  if (!RUN_NETWORK_TESTS) return; // live-network suite; skipped unless BW_INTEGRATION=1
   await BlueElectrum.connectMain();
 });
 
 describe('Bech32 Segwit HD (BIP84) with BIP47', () => {
-  it('should work', async () => {
+  itNet('should work', async () => {
     const hd = new HDLegacyP2PKHWallet();
     // @see https://gist.github.com/SamouraiDev/6aad669604c5930864bd
     hd.setSecret('reward upper indicate eight swift arch injury crystal super wrestle already dentist');
@@ -52,7 +52,7 @@ describe('Bech32 Segwit HD (BIP84) with BIP47', () => {
     expect(hd.getTransactions().length).toBeGreaterThanOrEqual(4);
   });
 
-  it('should work (samurai)', async () => {
+  itNet('should work (samurai)', async () => {
     if (!process.env.BIP47_HD_MNEMONIC) {
       console.error('process.env.BIP47_HD_MNEMONIC not set, skipped');
       return;
@@ -143,7 +143,7 @@ describe('Bech32 Segwit HD (BIP84) with BIP47', () => {
     ); // transaction is to Bob's notification address
   });
 
-  it('can tell whom to notify and whom dont', async () => {
+  itNet('can tell whom to notify and whom dont', async () => {
     if (!process.env.BIP47_HD_MNEMONIC) {
       console.error('process.env.BIP47_HD_MNEMONIC not set, skipped');
       return;
@@ -171,7 +171,7 @@ describe('Bech32 Segwit HD (BIP84) with BIP47', () => {
     ); // random PC from interwebz. never interacted with him, so need to notify
   });
 
-  it('can tell with which counterparty PC transaction is', async () => {
+  itNet('can tell with which counterparty PC transaction is', async () => {
     if (!process.env.BIP47_HD_MNEMONIC) {
       console.error('process.env.BIP47_HD_MNEMONIC not set, skipped');
       return;
@@ -257,7 +257,7 @@ describe('Bech32 Segwit HD (BIP84) with BIP47', () => {
     );
   });
 
-  it('can tell with which counterparty PC transaction is (sparrow)', async () => {
+  itNet('can tell with which counterparty PC transaction is (sparrow)', async () => {
     if (!process.env.BIP47_HD_MNEMONIC) {
       console.error('process.env.BIP47_HD_MNEMONIC not set, skipped');
       return;

@@ -2,6 +2,7 @@ import assert from 'assert';
 import fs from 'fs';
 
 import * as BlueElectrum from '../../blue_modules/BlueElectrum';
+import { itNet } from '../helpers/network-gate';
 import {
   HDAezeedWallet,
   HDLegacyBreadwalletWallet,
@@ -30,9 +31,12 @@ afterAll(async () => {
 });
 
 beforeAll(async () => {
-  // awaiting for Electrum to be connected. For RN Electrum would naturally connect
-  // while app starts up, but for tests we need to wait for it
-  await BlueElectrum.connectMain();
+  // Best-effort connect: many import tests need an Electrum connection established
+  // (even when the fetch returns nothing). Don't fail the suite if it's unreachable;
+  // the tests that require real Bitcoin data are gated with itNet (BW_INTEGRATION=1).
+  try {
+    await BlueElectrum.connectMain();
+  } catch { /* offline — real-data tests are gated with itNet */ }
 });
 
 type THistoryItem = { action: 'progress'; data: string } | { action: 'wallet'; data: TWallet } | { action: 'password'; data: string };
@@ -95,7 +99,7 @@ describe('import procedure', () => {
     assert.strictEqual(imprt.stopped, true);
   });
 
-  it('can import multiple wallets', async () => {
+  itNet('can import multiple wallets', async () => {
     const store = createStore();
     const { promise } = startImport(
       'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about',
@@ -165,7 +169,7 @@ describe('import procedure', () => {
     assert.strictEqual(store.state.wallets[0]._getExternalAddressByIndex(0), 'bc1qe8q660wfj6uvqg7zyn86jcsux36natklqnfdrc');
   });
 
-  it('can import Legacy', async () => {
+  itNet('can import Legacy', async () => {
     const store = createStore();
     const { promise } = startImport('KztVRmc2EJJBHi599mCdXrxMTsNsGy3NUjc3Fb3FFDSMYyMDRjnv', false, false, false, ...store.callbacks);
     await promise;
@@ -173,7 +177,7 @@ describe('import procedure', () => {
     assert.strictEqual(store.state.wallets[0].getAddress(), '1AhcdMCzby4VXgqrexuMfh7eiSprRFtN78');
   });
 
-  it('can import P2SH Segwit', async () => {
+  itNet('can import P2SH Segwit', async () => {
     const store = createStore();
     const { promise } = startImport('L3NxFnYoBGjJ5PhxrxV6jorvjnc8cerYJx71vXU6ta8BXQxHVZya', false, false, false, ...store.callbacks);
     await promise;
@@ -183,7 +187,7 @@ describe('import procedure', () => {
     assert.strictEqual(store.state.wallets[1].getAddress(), '1L7AmTTKbAAefBe93gJcFRTH9fdfhkMdHt');
   });
 
-  it('can import Bech32 Segwit', async () => {
+  itNet('can import Bech32 Segwit', async () => {
     const store = createStore();
     const { promise } = startImport('L1T6FfKpKHi8JE6eBKrsXkenw34d5FfFzJUZ6dLs2utxkSvsDfxZ', false, false, false, ...store.callbacks);
     await promise;
@@ -205,7 +209,7 @@ describe('import procedure', () => {
     assert.strictEqual(store.state.wallets[2].getAddress(), '16RDEqXtDmZjm8f4s6Uf3EHgjCpsSqB2zM');
   });
 
-  it('can import BIP44', async () => {
+  itNet('can import BIP44', async () => {
     const store = createStore();
     const { promise } = startImport(
       'sting museum endless duty nice riot because swallow brother depth weapon merge woman wish hold finish venture gauge stomach bomb device bracket agent parent',
@@ -219,7 +223,7 @@ describe('import procedure', () => {
     assert.strictEqual(store.state.wallets[0]._getExternalAddressByIndex(0), '1EgDbwf5nXp9knoaWW6nV6N91EK3EFQ5vC');
   });
 
-  it('can import BIP44 with mnemonic in french', async () => {
+  itNet('can import BIP44 with mnemonic in french', async () => {
     const store = createStore();
     const { promise } = startImport(
       'abaisser abaisser abaisser abaisser abaisser abaisser abaisser abaisser abaisser abaisser abaisser abeille',
@@ -233,7 +237,7 @@ describe('import procedure', () => {
     assert.strictEqual(store.state.wallets[0]._getExternalAddressByIndex(0), '1JFdzwd8SqFn5LeeiDKcbYUfXxvButqXgX');
   });
 
-  it('can import BIP49', async () => {
+  itNet('can import BIP49', async () => {
     const store = createStore();
     const { promise } = startImport(
       'believe torch sport lizard absurd retreat scale layer song pen clump combine window staff dream filter latin bicycle vapor anchor put clean gain slush',
@@ -275,7 +279,7 @@ describe('import procedure', () => {
     assert.strictEqual(store.state.wallets[0]._getExternalAddressByIndex(0), '13sPvsrgRN8XibZNHtZXNqVDJPnNZLjTap');
   });
 
-  it('can import BreadWallet', async () => {
+  itNet('can import BreadWallet', async () => {
     const store = createStore();
     const { promise } = startImport(
       'become salmon motor battle sweet merit romance ecology age squirrel oblige awesome',
@@ -426,7 +430,7 @@ describe('import procedure', () => {
     assert.strictEqual(store4.state.wallets[0].type, WatchOnlyWallet.type);
   });
 
-  it('can import slip39 wallet', async () => {
+  itNet('can import slip39 wallet', async () => {
     const store = createStore();
     // 2-of-3 slip39 wallet
     // crystal lungs academic acid corner infant satisfy spider alcohol laser golden equation fiscal epidemic infant scholar space findings tadpole belong
@@ -560,7 +564,7 @@ describe('import procedure', () => {
     assert.strictEqual(store.state.wallets[0].getDerivationPath(), "m/84'/0'/0'");
   });
 
-  it('can import watch-only xpub as a zpub if it has been used', async () => {
+  itNet('can import watch-only xpub as a zpub if it has been used', async () => {
     const store = createStore();
     const { promise } = startImport(
       'xpub6C8z87Nj7vuUqntJdNfkY4LJBSih9BkA3kUVjmTbSmA4Fk88vrBJwcjCt2q8yb2Pt8axgDkonSfdGiACPYNH7yoyQnX3iETHLneSYvPcnRy',
