@@ -14,7 +14,7 @@
  */
 
 import * as bip39 from 'bip39';
-import BIP32Factory from 'bip32';
+import BIP32Factory, { BIP32Interface } from 'bip32';
 import ecc from '../blue_modules/noble_ecc';
 import {
   getUtxosByAddress,
@@ -2516,10 +2516,157 @@ function decodeBech32m(address: string): { version: number; program: Buffer } | 
   };
 }
 
+// ============================================================================
+// Airdrop claim SWEEP (audit #4/#5)
+// ----------------------------------------------------------------------------
+// The airdrop scan finds BCH2 funds at many derivation paths, but a claimed
+// wallet is stored as a single m/44'/145'/0'/0/0 address that cannot spend
+// them. This sweep consolidates the found (legacy P2PKH) UTXOs into the user's
+// new wallet address with one transaction, signing each input with its own
+// derived key. It is FAIL-SAFE: the sole output is the user's OWN wallet
+// address (validated as a BCH2 CashAddr) and the fee is clamped, so a signing
+// bug yields a node-rejected tx — never a payment to anyone else.
+//
+// Scope: legacy P2PKH inputs only — the standard spendable script for BC2-origin
+// airdrop funds (BC2 has no SegWit). P2PK and (anyone-can-spend) SegWit-typed
+// balances are reported as `skipped` for honest UI, not silently dropped.
+// ============================================================================
+export interface SweepClaim {
+  bch2Address: string;
+  derivationPath?: string;
+  addressType?: string;
+  balance: number;
+}
+export interface SweepResult {
+  txid: string | null;
+  sweptSats: number;
+  fee: number;
+  swept: Array<{ address: string; value: number }>;
+  skipped: Array<{ address: string; balance: number; reason: string }>;
+}
+
+export async function sweepAirdropClaims(
+  mnemonic: string,
+  passphrase: string,
+  claims: SweepClaim[],
+  destAddress: string,
+  feePerByte: number,
+): Promise<SweepResult> {
+  // The single output must be a valid BCH2 P2PKH CashAddr the user controls.
+  const destDecoded = decodeCashAddr(destAddress, true);
+  if (destDecoded.type !== 0) throw new Error('Sweep destination must be a BCH2 P2PKH address');
+  if (!Number.isInteger(feePerByte) || feePerByte < 1) feePerByte = 1;
+  if (feePerByte > 1000) throw new Error('Fee rate too high (max 1000 sat/byte)');
+
+  const seed = await bip39.mnemonicToSeed(mnemonic, passphrase);
+  const root = bip32.fromSeed(seed);
+
+  const inputs: Array<{ utxo: UTXO; publicKey: Buffer; privateKey: Buffer }> = [];
+  const skipped: SweepResult['skipped'] = [];
+  try {
+    for (const claim of claims) {
+      // Only legacy P2PKH is swept here (see scope note above).
+      if ((claim.addressType || 'legacy') !== 'legacy' || !claim.derivationPath) {
+        if (claim.balance > 0) skipped.push({ address: claim.bch2Address, balance: claim.balance, reason: `Unsupported script type for auto-sweep (${claim.addressType || 'unknown'}) — recover manually` });
+        continue;
+      }
+      let child: BIP32Interface;
+      try {
+        child = root.derivePath(claim.derivationPath);
+      } catch {
+        skipped.push({ address: claim.bch2Address, balance: claim.balance, reason: 'Could not derive key for path' });
+        continue;
+      }
+      const publicKey = Buffer.from(child.publicKey);
+      const privateKey = child.privateKey ? Buffer.from(child.privateKey) : null;
+      // Sanity: the derived key must actually control the claimed address, else
+      // we would sign for the wrong output. Compare normalized (prefixed) forms.
+      const norm = (a: string) => (a.toLowerCase().startsWith('bitcoincashii:') ? a.toLowerCase() : 'bitcoincashii:' + a.toLowerCase());
+      const derivedAddr = getCashAddr(hash160(publicKey));
+      if (!privateKey || norm(derivedAddr) !== norm(claim.bch2Address)) {
+        skipped.push({ address: claim.bch2Address, balance: claim.balance, reason: 'Derived key does not match claimed address' });
+        continue;
+      }
+      let utxos: UTXO[];
+      try {
+        utxos = await getUtxosByAddress(claim.bch2Address);
+      } catch {
+        skipped.push({ address: claim.bch2Address, balance: claim.balance, reason: 'Could not fetch UTXOs (network)' });
+        continue;
+      }
+      for (const u of utxos) inputs.push({ utxo: u, publicKey, privateKey });
+    }
+
+    if (inputs.length === 0) return { txid: null, sweptSats: 0, fee: 0, swept: [], skipped };
+    if (inputs.length > 500) throw new Error('Too many inputs to sweep at once (max 500)');
+
+    const totalIn = inputs.reduce((s, i) => s + i.utxo.value, 0);
+    const estSize = 10 + 148 * inputs.length + 34; // 1 output
+    const fee = Math.max(1, feePerByte) * estSize;
+    const outputAmount = totalIn - fee;
+    if (outputAmount < 546) throw new Error('Swept amount is below the dust threshold after fees');
+
+    // Outputs: single payment to the user's wallet.
+    const recipientScript = addressToScript(destAddress, false);
+    const outAmountBytes = Buffer.alloc(8);
+    outAmountBytes.writeBigUInt64LE(BigInt(outputAmount), 0);
+    const outputs = Buffer.concat([outAmountBytes, encodeVarInt(recipientScript.length), recipientScript]);
+
+    // BIP143 common hashes over all inputs/outputs.
+    let prevoutsData = Buffer.alloc(0);
+    let sequencesData = Buffer.alloc(0);
+    const utxoList: UTXO[] = inputs.map(i => i.utxo);
+    for (const u of utxoList) {
+      const txid = Buffer.from(u.txid, 'hex').reverse();
+      const vout = Buffer.alloc(4); vout.writeUInt32LE(u.vout, 0);
+      prevoutsData = Buffer.concat([prevoutsData, txid, vout]);
+      sequencesData = Buffer.concat([sequencesData, Buffer.from('ffffffff', 'hex')]);
+    }
+    const hashPrevouts = doubleSha256(prevoutsData);
+    const hashSequence = doubleSha256(sequencesData);
+    const hashOutputs = doubleSha256(outputs);
+
+    const signedInputs: Buffer[] = [];
+    for (let i = 0; i < inputs.length; i++) {
+      const { utxo, publicKey, privateKey } = inputs[i];
+      const sighash = createBIP143Sighash(utxoList, i, publicKey, 1, outputs, utxo.value, hashPrevouts, hashSequence, hashOutputs);
+      const signature = signWithPrivateKey(sighash, privateKey);
+      const sigWithHashType = Buffer.concat([signature, Buffer.from([0x41])]); // SIGHASH_ALL|FORKID
+      const scriptSig = Buffer.concat([
+        encodeVarInt(sigWithHashType.length), sigWithHashType,
+        encodeVarInt(publicKey.length), publicKey,
+      ]);
+      const txidBytes = Buffer.from(utxo.txid, 'hex').reverse();
+      const voutBytes = Buffer.alloc(4); voutBytes.writeUInt32LE(utxo.vout, 0);
+      signedInputs.push(Buffer.concat([txidBytes, voutBytes, encodeVarInt(scriptSig.length), scriptSig, Buffer.from('ffffffff', 'hex')]));
+    }
+
+    const version = Buffer.alloc(4); version.writeUInt32LE(2, 0);
+    let tx = Buffer.concat([version, encodeVarInt(inputs.length)]);
+    for (const inp of signedInputs) tx = Buffer.concat([tx, inp]);
+    const locktime = Buffer.alloc(4); locktime.writeUInt32LE(0, 0);
+    tx = Buffer.concat([tx, encodeVarInt(1), outputs, locktime]);
+
+    const txid = await broadcastTransaction(tx.toString('hex'));
+    return {
+      txid,
+      sweptSats: outputAmount,
+      fee,
+      swept: inputs.map(i => ({ address: destAddress, value: i.utxo.value })),
+      skipped,
+    };
+  } finally {
+    // Zero key material.
+    if (seed instanceof Buffer || seed instanceof Uint8Array) seed.fill(0);
+    for (const i of inputs) { try { i.privateKey.fill(0); } catch {} }
+  }
+}
+
 export default {
   sendTransaction,
   sendFromBech32,
   sendFromP2SH,
   sendFromP2WSH,
   sendFromP2TR,
+  sweepAirdropClaims,
 };

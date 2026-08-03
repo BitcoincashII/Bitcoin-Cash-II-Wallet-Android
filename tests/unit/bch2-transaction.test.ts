@@ -38,7 +38,7 @@ jest.mock('../../blue_modules/BCH2Electrum', () => ({
 }));
 
 // Import after mocking
-import { sendTransaction, sendFromBech32, sendFromP2SH, sendFromP2WSH, sendFromP2TR, decodeCashAddr } from '../../class/bch2-transaction';
+import { sendTransaction, sendFromBech32, sendFromP2SH, sendFromP2WSH, sendFromP2TR, decodeCashAddr, sweepAirdropClaims } from '../../class/bch2-transaction';
 
 // ---- Test Helpers ----------------------------------------------------------
 
@@ -2505,6 +2505,135 @@ describe('isBech32Address case sensitivity', () => {
 // ============================================================================
 // Gap 20: decodeCashAddr() no-prefix input
 // ============================================================================
+// ============================================================================
+// sweepAirdropClaims (audit #4/#5) — consolidate found claims into one wallet
+// ============================================================================
+describe('sweepAirdropClaims', () => {
+  // Derive the BCH2 P2PKH CashAddr for a given path (matches the app's derivation).
+  async function addrForPath(path: string): Promise<string> {
+    const seed = await bip39.mnemonicToSeed(TEST_MNEMONIC);
+    const root = bip32.fromSeed(seed);
+    const child = root.derivePath(path);
+    return encodeCashAddr(hash160(Buffer.from(child.publicKey)), 0);
+  }
+  // Parse a tx hex and return [outputValue, scriptHex] for its single output.
+  function singleOutput(hex: string): { value: number; scriptHex: string } {
+    const b = Buffer.from(hex, 'hex');
+    let o = 4; // version
+    const readVarInt = () => {
+      const first = b[o]; o += 1;
+      if (first < 0xfd) return first;
+      if (first === 0xfd) { const v = b.readUInt16LE(o); o += 2; return v; }
+      const v = b.readUInt32LE(o); o += 4; return v;
+    };
+    const nIn = readVarInt();
+    for (let i = 0; i < nIn; i++) {
+      o += 36; // outpoint(32+4)
+      const sl = readVarInt();
+      o += sl; // scriptSig
+      o += 4;  // sequence
+    }
+    const nOut = readVarInt();
+    expect(nOut).toBe(1);
+    const value = Number(b.readBigUInt64LE(o)); o += 8;
+    const sl = readVarInt();
+    const scriptHex = b.slice(o, o + sl).toString('hex');
+    return { value, scriptHex };
+  }
+
+  beforeEach(() => {
+    mockGetUtxosByAddress.mockReset();
+    mockBroadcastTransaction.mockReset().mockResolvedValue('ff'.repeat(32));
+  });
+
+  it('sweeps 2 UTXOs from one derived address into the destination (fee-correct)', async () => {
+    const path = "m/44'/145'/0'/0/5";
+    const srcAddr = await addrForPath(path);
+    mockGetUtxosByAddress.mockResolvedValue([
+      { txid: fakeTxid(1), vout: 0, value: 100_000 },
+      { txid: fakeTxid(2), vout: 1, value: 200_000 },
+    ]);
+    const feePerByte = 2;
+    const res = await sweepAirdropClaims(TEST_MNEMONIC, '', [
+      { bch2Address: srcAddr, derivationPath: path, addressType: 'legacy', balance: 300_000 },
+    ], DEST_CASHADDR, feePerByte);
+
+    expect(res.txid).toBe('ff'.repeat(32));
+    expect(res.swept.length).toBe(2);
+    expect(res.skipped.length).toBe(0);
+    // fee = feePerByte * (10 + 148*2 + 34) = 2 * 340 = 680
+    expect(res.fee).toBe(feePerByte * (10 + 148 * 2 + 34));
+    expect(res.sweptSats).toBe(300_000 - res.fee);
+    // The single output pays sweptSats to the destination P2PKH.
+    const hex = mockBroadcastTransaction.mock.calls[0][0];
+    const out = singleOutput(hex);
+    expect(out.value).toBe(res.sweptSats);
+    const destScript = decodeCashAddr(DEST_CASHADDR, true).hash.toString('hex');
+    expect(out.scriptHex).toBe(`76a914${destScript}88ac`);
+    expect(hex.startsWith('02000000')).toBe(true);
+  });
+
+  it('aggregates UTXOs across multiple derived addresses', async () => {
+    const pathA = "m/44'/145'/0'/0/1";
+    const pathB = "m/44'/145'/0'/0/2";
+    const addrA = await addrForPath(pathA);
+    const addrB = await addrForPath(pathB);
+    mockGetUtxosByAddress.mockImplementation(async (a: string) => {
+      if (a === addrA) return [{ txid: fakeTxid(3), vout: 0, value: 50_000 }];
+      if (a === addrB) return [{ txid: fakeTxid(4), vout: 0, value: 60_000 }];
+      return [];
+    });
+    const res = await sweepAirdropClaims(TEST_MNEMONIC, '', [
+      { bch2Address: addrA, derivationPath: pathA, addressType: 'legacy', balance: 50_000 },
+      { bch2Address: addrB, derivationPath: pathB, addressType: 'legacy', balance: 60_000 },
+    ], DEST_CASHADDR, 1);
+    expect(res.swept.length).toBe(2);
+    expect(res.sweptSats).toBe(110_000 - res.fee);
+  });
+
+  it('reports non-legacy (unsupported) claims as skipped, not swept', async () => {
+    const path = "m/44'/145'/0'/0/1";
+    const addr = await addrForPath(path);
+    mockGetUtxosByAddress.mockResolvedValue([{ txid: fakeTxid(5), vout: 0, value: 100_000 }]);
+    const res = await sweepAirdropClaims(TEST_MNEMONIC, '', [
+      { bch2Address: addr, derivationPath: path, addressType: 'legacy', balance: 100_000 },
+      { bch2Address: 'bc1qexampleexampleexampleexampleexampleee', derivationPath: "m/84'/0'/0'/0/0", addressType: 'bc1', balance: 42_000 },
+    ], DEST_CASHADDR, 1);
+    expect(res.swept.length).toBe(1);
+    expect(res.skipped.length).toBe(1);
+    expect(res.skipped[0].balance).toBe(42_000);
+  });
+
+  it('returns no tx when there are no spendable UTXOs', async () => {
+    const path = "m/44'/145'/0'/0/9";
+    const addr = await addrForPath(path);
+    mockGetUtxosByAddress.mockResolvedValue([]);
+    const res = await sweepAirdropClaims(TEST_MNEMONIC, '', [
+      { bch2Address: addr, derivationPath: path, addressType: 'legacy', balance: 0 },
+    ], DEST_CASHADDR, 1);
+    expect(res.txid).toBeNull();
+    expect(res.swept.length).toBe(0);
+    expect(mockBroadcastTransaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-CashAddr destination (never signs to a bad output)', async () => {
+    await expect(
+      sweepAirdropClaims(TEST_MNEMONIC, '', [], 'bc1qnotacashaddr', 1),
+    ).rejects.toThrow();
+  });
+
+  it('throws when the swept amount would be below dust after fees', async () => {
+    const path = "m/44'/145'/0'/0/1";
+    const addr = await addrForPath(path);
+    mockGetUtxosByAddress.mockResolvedValue([{ txid: fakeTxid(6), vout: 0, value: 600 }]);
+    await expect(
+      sweepAirdropClaims(TEST_MNEMONIC, '', [
+        { bch2Address: addr, derivationPath: path, addressType: 'legacy', balance: 600 },
+      ], DEST_CASHADDR, 5),
+    ).rejects.toThrow(/dust/i);
+  });
+});
+
 describe('decodeCashAddr no-prefix input', () => {
   it('decodes address without prefix by assuming bitcoincashii:', () => {
     // Strip the prefix from a valid address and verify it decodes the same

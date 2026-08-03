@@ -29,6 +29,7 @@ import {
   AirdropScanResult,
 } from '../../class/bch2-airdrop';
 import { saveWallet } from '../../class/bch2-wallet-storage';
+import { sweepAirdropClaims, SweepResult } from '../../class/bch2-transaction';
 import { setAppPassword, isAppPasswordSet } from './BCH2AppPassword';
 import { useNavigation } from '@react-navigation/native';
 import { PasswordInput, PasswordInputHandle } from '../../components/PasswordInput';
@@ -210,6 +211,7 @@ export const ClaimAirdropScreen: React.FC = () => {
 
   // Scan results
   const [scanResult, setScanResult] = useState<AirdropScanResult | null>(null);
+  const [sweepResult, setSweepResult] = useState<SweepResult | null>(null);
   const [scanProgress, setScanProgress] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -437,7 +439,7 @@ export const ClaimAirdropScreen: React.FC = () => {
 
     setImporting(true);
     try {
-      await saveWallet('Claimed BCH2 Wallet', storedCredentials!.value, 'bch2');
+      const wallet = await saveWallet('Claimed BCH2 Wallet', storedCredentials!.value, 'bch2');
       // The recovery phrase itself is stored in the device Keystore by
       // saveWallet. Use the password the user chose here to set the app lock so
       // it actually protects something (previously it was collected and
@@ -446,6 +448,26 @@ export const ClaimAirdropScreen: React.FC = () => {
       try {
         if (!(await isAppPasswordSet())) await setAppPassword(walletPassword);
       } catch {}
+
+      // AUDIT #4/#5: the mnemonic scan finds funds across many derivation paths,
+      // but the imported wallet only controls m/44'/145'/0'/0/0. Consolidate the
+      // found (legacy P2PKH) funds INTO the imported wallet so they are actually
+      // spendable, instead of showing a total the wallet cannot access. Only for
+      // a mnemonic import (WIF is a single key with no multi-path gap). Best-
+      // effort: the wallet is already saved; a sweep failure never blocks import
+      // (funds stay safely at their addresses, recoverable later).
+      if (storedCredentials!.type === 'phrase' && scanResult && scanResult.claims.length > 0) {
+        try {
+          const claims = scanResult.claims
+            .filter(c => c.success && c.balance > 0)
+            .map(c => ({ bch2Address: c.bch2Address, derivationPath: c.derivationPath, addressType: c.addressType, balance: c.balance }));
+          const res = await sweepAirdropClaims(storedCredentials!.value, passphrase || '', claims, wallet.address, 2);
+          setSweepResult(res);
+        } catch (sweepErr) {
+          // Import still succeeds; surface that consolidation did not complete.
+          setSweepResult({ txid: null, sweptSats: 0, fee: 0, swept: [], skipped: scanResult.claims.map(c => ({ address: c.bch2Address, balance: c.balance, reason: 'Consolidation could not complete — funds remain at their addresses and can be swept later' })) });
+        }
+      }
       // Clear sensitive data
       setWifInput('');
       setPhraseInput('');
@@ -461,7 +483,7 @@ export const ClaimAirdropScreen: React.FC = () => {
     } finally {
       setImporting(false);
     }
-  }, [walletPassword, walletConfirmPassword, storedCredentials, navigation]);
+  }, [walletPassword, walletConfirmPassword, storedCredentials, scanResult, passphrase, navigation]);
 
   // ============================================================================
   // Step 0: Wallet Selection
@@ -926,10 +948,33 @@ export const ClaimAirdropScreen: React.FC = () => {
         <View style={styles.successContainer}>
           <Image source={BCH2_LOGO} style={styles.successLogo} resizeMode="contain" />
           <Text style={styles.successTitle}>Wallet Imported!</Text>
-          <Text style={styles.successSubtitle}>
-            Your BCH2 wallet has been imported with{' '}
-            {formatBalance(scanResult?.totalBalance ?? 0)} BCH2
-          </Text>
+          {sweepResult ? (
+            <>
+              {sweepResult.txid ? (
+                <Text style={styles.successSubtitle}>
+                  Consolidated {formatBalance(sweepResult.sweptSats)} BCH2 into your new wallet
+                  (network fee {formatBalance(sweepResult.fee)}). It will appear once the
+                  transaction confirms.
+                </Text>
+              ) : (
+                <Text style={styles.successSubtitle}>
+                  Your wallet is ready. No funds were consolidated automatically.
+                </Text>
+              )}
+              {sweepResult.skipped.length > 0 && (
+                <Text style={[styles.successSubtitle, { marginTop: 8 }]}>
+                  {formatBalance(sweepResult.skipped.reduce((s, x) => s + x.balance, 0))} BCH2 at
+                  {' '}{sweepResult.skipped.length} address(es) could not be auto-consolidated and
+                  remains recoverable from your recovery phrase.
+                </Text>
+              )}
+            </>
+          ) : (
+            <Text style={styles.successSubtitle}>
+              Your BCH2 wallet has been imported with{' '}
+              {formatBalance(scanResult?.totalBalance ?? 0)} BCH2
+            </Text>
+          )}
         </View>
 
         <TouchableOpacity
