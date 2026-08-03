@@ -1,5 +1,25 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+// In-memory Keystore mock (react-native-keychain is a native module).
+jest.mock('react-native-keychain', () => {
+  const store: Record<string, { username: string; password: string; service: string }> = {};
+  const svc = (o: any) => (typeof o === 'string' ? o : o && o.service) || 'default';
+  return {
+    ACCESSIBLE: { WHEN_UNLOCKED_THIS_DEVICE_ONLY: 'AccessibleWhenUnlockedThisDeviceOnly' },
+    setGenericPassword: jest.fn(async (username: string, password: string, opts: any) => {
+      const service = svc(opts);
+      store[service] = { username, password, service };
+      return { service, storage: 'mock' };
+    }),
+    getGenericPassword: jest.fn(async (opts: any) => store[svc(opts)] || false),
+    resetGenericPassword: jest.fn(async (opts: any) => { delete store[svc(opts)]; return true; }),
+    hasGenericPassword: jest.fn(async (opts: any) => !!store[svc(opts)]),
+    __clear: () => { for (const k of Object.keys(store)) delete store[k]; },
+  };
+});
+// eslint-disable-next-line import/first
+import * as Keychain from 'react-native-keychain';
+
 import {
   saveWallet,
   getWallets,
@@ -14,12 +34,15 @@ const WALLETS_KEY = '@bch2_wallets';
 
 beforeEach(async () => {
   await AsyncStorage.clear();
+  (Keychain as any).__clear?.();
 });
 
 describe('Mnemonic Storage', () => {
-  it('saveWallet stores mnemonic in plaintext (app-level encryption handles security)', async () => {
+  it('saveWallet keeps the mnemonic out of AsyncStorage (stored in the Keystore)', async () => {
     const wallet = await saveWallet('Test', TEST_MNEMONIC, 'bch2');
-    expect(wallet.mnemonic).toBe(TEST_MNEMONIC);
+    expect(wallet.mnemonic).toBe(TEST_MNEMONIC); // returned in-memory to the caller
+    const raw = await AsyncStorage.getItem(WALLETS_KEY);
+    expect(raw).not.toContain(TEST_MNEMONIC);    // but never persisted in plaintext
   });
 
   it('getWalletMnemonic returns original mnemonic', async () => {

@@ -97,11 +97,16 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
 
   const handleBiometricToggle = useCallback(async (value: boolean) => {
     // Verify identity before changing the lock state in EITHER direction —
-    // turning protection OFF is as sensitive as turning it ON.
-    const success = await authenticateWithBiometric();
-    if (!success) {
-      Alert.alert('Authentication Failed', 'Could not verify your identity. Please try again.');
-      return;
+    // turning protection OFF is as sensitive as turning it ON. Skip the check
+    // only when the sensor is unavailable AND we are disabling, so a user whose
+    // sensor died is not stranded with a lock they can never turn off.
+    const { available } = await isBiometricAvailable();
+    if (available || value) {
+      const success = await authenticateWithBiometric();
+      if (!success) {
+        Alert.alert('Authentication Failed', 'Could not verify your identity. Please try again.');
+        return;
+      }
     }
     await setBiometricEnabled(value);
     setBiometricOn(value);

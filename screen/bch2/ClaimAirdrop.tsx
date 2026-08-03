@@ -29,7 +29,7 @@ import {
   AirdropScanResult,
 } from '../../class/bch2-airdrop';
 import { saveWallet } from '../../class/bch2-wallet-storage';
-import { setAppPassword } from './BCH2AppPassword';
+import { setAppPassword, isAppPasswordSet } from './BCH2AppPassword';
 import { useNavigation } from '@react-navigation/native';
 import { PasswordInput, PasswordInputHandle } from '../../components/PasswordInput';
 import { useScreenProtect } from '../../hooks/useScreenProtect';
@@ -441,8 +441,11 @@ export const ClaimAirdropScreen: React.FC = () => {
       // The recovery phrase itself is stored in the device Keystore by
       // saveWallet. Use the password the user chose here to set the app lock so
       // it actually protects something (previously it was collected and
-      // silently discarded).
-      try { await setAppPassword(walletPassword); } catch {}
+      // silently discarded). Do NOT overwrite an existing app password — a user
+      // who already set one keeps it.
+      try {
+        if (!(await isAppPasswordSet())) await setAppPassword(walletPassword);
+      } catch {}
       // Clear sensitive data
       setWifInput('');
       setPhraseInput('');

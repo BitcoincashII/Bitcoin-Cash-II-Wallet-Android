@@ -18,21 +18,31 @@ const DEBUG = __DEV__ || false;
 //
 // react-native-tcp-socket validates the certificate chain but does NOT perform
 // hostname verification, so chain validation alone is MITM-able by anyone
-// holding any CA-issued cert. We therefore enforce SPKI pinning in JS after the
-// handshake and fail the connection closed on mismatch. `getPeerCertificate()`
-// returns `pubkey` = base64(SubjectPublicKeyInfo DER); the pin is
-// base64(sha256(SPKI DER)).
+// holding any CA-issued cert. We therefore pin in JS after the handshake and
+// fail the connection closed on mismatch.
 //
-// electrum.bch2.org uses a Let's Encrypt cert whose key rotates on renewal —
-// its pin MUST be refreshed each app release (or LE key-reuse enabled server
-// side). bc2electrum uses a long-lived self-signed cert (stable). Keep the
-// hex mirror in android/app/src/main/java/org/bch2/wallet/ElectrumClient.kt in
-// sync when these change.
+// Two pin materials, because getPeerCertificate() exposes different fields by
+// OS version:
+//  - `pubkey` (base64 SPKI DER) is ONLY populated on API >= 26; the SPKI pin is
+//    base64(sha256(SPKI DER)). Renewal-resilient when the key is reused.
+//  - `fingerprint256` (full-cert SHA-256, colon hex) is populated on ALL API
+//    levels (incl. Android 7.0/7.1 = API 24/25, our minSdk). Full-cert pin —
+//    changes on every cert renewal.
+// A connection is trusted if EITHER the SPKI pin OR the cert fingerprint
+// matches its pinned set, so pinning works on every supported OS.
+//
+// electrum.bch2.org uses a Let's Encrypt cert whose key+cert rotate on renewal —
+// BOTH pins MUST be refreshed each app release (or LE key-reuse enabled server
+// side). bc2electrum uses a long-lived self-signed cert (stable). Keep the hex
+// mirror in android/app/src/main/java/org/bch2/wallet/ElectrumClient.kt in sync.
 const PINNED_SPKI_SHA256: Record<'bch2' | 'bc2', string[]> = {
-  // electrum.bch2.org:50002 (+ 144.202.73.66) — Let's Encrypt, rotates ~90d.
-  bch2: ['jEqLYdEKOrXjztqypG3B5S9+bsnZmiR0b29juuC6+hE='],
-  // bc2electrum.bch2.org:50011 (+ 144.202.73.66) — self-signed, 10y.
-  bc2: ['7RZ1HtI370pp2Re06xJ0W1/QGupIq+X94GdRzPY7aT4='],
+  bch2: ['jEqLYdEKOrXjztqypG3B5S9+bsnZmiR0b29juuC6+hE='], // electrum.bch2.org (LE, ~90d)
+  bc2: ['7RZ1HtI370pp2Re06xJ0W1/QGupIq+X94GdRzPY7aT4='],  // bc2electrum (self-signed, 10y)
+};
+// Full-certificate SHA-256 (lowercase hex, no colons) — the API<26 fallback.
+const PINNED_CERT_SHA256: Record<'bch2' | 'bc2', string[]> = {
+  bch2: ['c127e21e768c222bee1e12454801a043d33e32b167bd5c1bb7aeda4afbdd4034'],
+  bc2: ['64660131e5ad82b54c6c88b8131c8931283b197a382fc08c698c73ddc3d58c61'],
 };
 
 function b64FromBytes(bytes: Uint8Array): string {
@@ -70,20 +80,31 @@ function b64ToBytes(b64: string): Uint8Array {
  * electrum-client; getPeerCertificate() resolves after the handshake.
  */
 async function verifyPinnedSpki(client: any, serverType: 'bch2' | 'bc2', host: string): Promise<void> {
-  const pins = PINNED_SPKI_SHA256[serverType];
   const conn = client?.conn;
   if (!conn || typeof conn.getPeerCertificate !== 'function') {
     throw new Error(`Cannot read peer certificate for ${host} — refusing to trust connection`);
   }
   const cert = await conn.getPeerCertificate();
+
+  // Preferred: SPKI pin (API >= 26, where getPeerCertificate exposes `pubkey`).
   const pubkeyB64: string | undefined = cert && cert.pubkey;
-  if (!pubkeyB64) {
-    throw new Error(`No peer public key for ${host} — refusing to trust connection`);
+  if (pubkeyB64) {
+    const spkiPin = b64FromBytes(sha256(b64ToBytes(pubkeyB64)));
+    if (PINNED_SPKI_SHA256[serverType].includes(spkiPin)) return;
   }
-  const spkiPin = b64FromBytes(sha256(b64ToBytes(pubkeyB64)));
-  if (!pins.includes(spkiPin)) {
-    throw new Error(`Certificate pin mismatch for ${host} (got ${spkiPin}) — possible MITM, connection refused`);
+
+  // Fallback (works on all API levels, incl. 24/25 where `pubkey` is absent):
+  // full-certificate SHA-256 fingerprint.
+  const fp: string | undefined = cert && cert.fingerprint256;
+  if (fp) {
+    const fpNorm = fp.replace(/:/g, '').toLowerCase();
+    if (PINNED_CERT_SHA256[serverType].includes(fpNorm)) return;
   }
+
+  if (!pubkeyB64 && !fp) {
+    throw new Error(`No peer certificate fingerprint for ${host} — refusing to trust connection`);
+  }
+  throw new Error(`Certificate pin mismatch for ${host} — possible MITM, connection refused`);
 }
 
 // RPC fallback configuration
