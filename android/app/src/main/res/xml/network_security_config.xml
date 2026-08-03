@@ -16,4 +16,20 @@
             <certificates src="system" />
         </trust-anchors>
     </domain-config>
+
+    <!-- BC2 explorer (fund path: getBC2Balance/Utxos/History/broadcast use fetch()). -->
+    <!-- Pin the Let's Encrypt ROOTS, not the ~90-day leaf: this defeats a rogue/ -->
+    <!-- compromised non-LE CA (the real MITM threat) while surviving LE leaf and -->
+    <!-- intermediate rotation. explorer.bitcoin-ii.org currently chains to ISRG -->
+    <!-- Root X2; X1 is pinned as a backup in case a future cert uses the RSA root. -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="false">explorer.bitcoin-ii.org</domain>
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+        <pin-set>
+            <pin digest="SHA-256">diGVwiVYbubAI3RW4hB9xU8e/CH2GnkuvVFZE8zmgzI=</pin><!-- ISRG Root X2 -->
+            <pin digest="SHA-256">C5+lpZ7tcVwmwQIMcRtPbsQtWLABXhQzejna0wHFr8M=</pin><!-- ISRG Root X1 (backup) -->
+        </pin-set>
+    </domain-config>
 </network-security-config>
