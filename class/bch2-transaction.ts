@@ -139,7 +139,7 @@ export async function sendTransaction(
     ? await getBC2Utxos(fromAddress)
     : await getUtxosByAddress(fromAddress);
 
-  const utxos: UTXO[] = await filterMatureUtxos(rawUtxos);
+  const utxos: UTXO[] = await filterMatureUtxos(rawUtxos, isBC2);
   DEBUG && console.log(`[TX] Found ${rawUtxos.length} UTXOs, ${utxos.length} mature (${rawUtxos.length - utxos.length} immature coinbase excluded)`);
   if (utxos.length > 0) {
     DEBUG && console.log(`[TX] UTXOs:`, JSON.stringify(utxos.slice(0, 5))); // Log first 5
@@ -1033,7 +1033,7 @@ async function sendTransactionWithKey(
     ? await getBC2Utxos(fromAddress)
     : await getUtxosByAddress(fromAddress);
 
-  const utxos: UTXO[] = await filterMatureUtxos(rawUtxos);
+  const utxos: UTXO[] = await filterMatureUtxos(rawUtxos, isBC2);
   DEBUG && console.log(`[TX] Found ${rawUtxos.length} UTXOs, ${utxos.length} mature (${rawUtxos.length - utxos.length} immature coinbase excluded)`);
 
   if (utxos.length === 0) {
@@ -1532,8 +1532,14 @@ function buildSegwitRecoveryTransaction(
   if (changeAddress && changeAmount > 0) {
     outputCount++;
     let changeScript: Buffer;
-    // BCH2: Always send change to P2PKH (CashAddr) — not back to SegWit/P2SH
-    // which would require another recovery spend. P2PKH is natively spendable.
+    // BCH2: send change to the recovery key's P2PKH (CashAddr), NOT back to the
+    // bc1/P2SH SegWit address — on BCH2 (no SegWit consensus) a SegWit output is
+    // anyone-can-spend, so returning change there would let anyone take it. The
+    // P2PKH change is SECURE and spendable, and recoverable from the same seed.
+    // KNOWN LIMITATION (audit #30, not fund loss): a 'bc1'-type wallet view keys
+    // off the bc1 address and does not yet display this P2PKH change, so change
+    // from a partial recovery send is not shown until re-recovered. The proper
+    // fix is app-side: have the bc1 wallet also track/derive this P2PKH address.
     // OP_DUP OP_HASH160 <pubkeyhash> OP_EQUALVERIFY OP_CHECKSIG
     changeScript = Buffer.concat([
       Buffer.from([0x76, 0xa9, 0x14]),

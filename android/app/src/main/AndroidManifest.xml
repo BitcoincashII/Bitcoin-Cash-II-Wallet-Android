@@ -168,12 +168,11 @@
                 <data android:scheme="blue" />
             </intent-filter>
 
-            <!-- Intent filter for importing other file types (but not launching the app) -->
-            <intent-filter tools:ignore="AppLinkUrlError">
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <data android:scheme="file" android:mimeType="application/octet-stream" android:pathPattern=".*\\.*" />
-            </intent-filter>
+            <!-- LOW #37 fix: removed dead catch-all file intent (scheme=file, mimeType=application/octet-stream,
+                 pathPattern=.*\\.* ). It claimed EVERY file type in the OS "open with" list but the app has no handler
+                 for arbitrary files: the only file types actually consumed by navigationRouteFor (class/deeplink-schema-match.ts)
+                 are .psbt and .bwcosigner, and in-app file import goes through react-native-document-picker, not this filter.
+                 The remaining scheme=file/.psbt and content-mimeType/.psbt filters below keep genuine PSBT open-with working. -->
 
             <!-- Intent filter for handling PSBT files -->
             <intent-filter>

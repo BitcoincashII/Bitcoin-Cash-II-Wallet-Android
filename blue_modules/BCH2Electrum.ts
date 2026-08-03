@@ -426,8 +426,17 @@ export async function isCoinbaseTx(txid: string): Promise<boolean> {
 /**
  * Filter out immature coinbase UTXOs (need 100 confirmations).
  * Coinbase outputs cannot be spent until 100 blocks have passed.
+ *
+ * This uses the BCH2 chain height (latestBlock) and BCH2 raw-tx lookups
+ * (isCoinbaseTx via mainClient), so it is only valid for BCH2 UTXOs. For BC2
+ * we have no BC2 height/raw-tx tracking, and applying BCH2 data to BC2 UTXOs
+ * would mis-classify them; instead we skip the client-side filter for BC2 —
+ * the BC2 node still rejects any premature-coinbase spend at broadcast, so this
+ * cannot cause an invalid spend (BC2 recovery UTXOs are user P2PKH funds, not
+ * coinbase, in practice).
  */
-export async function filterMatureUtxos(utxos: any[]): Promise<any[]> {
+export async function filterMatureUtxos(utxos: any[], isBC2: boolean = false): Promise<any[]> {
+  if (isBC2) return utxos; // BC2 maturity is enforced by the BC2 node at broadcast
   const COINBASE_MATURITY = 100;
   const currentHeight = latestBlock.height;
   if (!currentHeight) return utxos; // Can't filter without block height

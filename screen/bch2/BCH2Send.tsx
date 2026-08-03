@@ -17,7 +17,37 @@ import {
 } from 'react-native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2Shadows, BCH2BorderRadius } from '../../components/BCH2Theme';
 import { decodeCashAddr } from '../../class/bch2-transaction';
+import { getUtxosByAddress, getBC2Utxos, filterMatureUtxos } from '../../blue_modules/BCH2Electrum';
 const bs58check = require('bs58check');
+
+// Tx-size estimate replicated (read-only) from class/bch2-transaction.ts:
+// ~10 bytes overhead + 148 per input + 34 per output.
+const estimateTxSize = (inputCount: number, outputCount: number): number =>
+  10 + 148 * inputCount + 34 * outputCount;
+
+// Replicates the coin-selection in class/bch2-transaction.ts sendTransaction() so
+// the confirm screen's fee/total reflect the REAL number of inputs that will be
+// signed (not a fixed 1-input assumption). utxoValues must be sorted largest-first
+// to match the tx builder's ordering.
+const computeSelectedFee = (
+  utxoValues: number[],
+  amountSats: number,
+  feePerByte: number,
+): { fee: number; sufficient: boolean } => {
+  let totalInput = 0;
+  let count = 0;
+  for (const v of utxoValues) {
+    count++;
+    totalInput += v;
+    const runningFee = estimateTxSize(count, 2) * feePerByte;
+    if (totalInput >= amountSats + runningFee || count >= 500) break;
+  }
+  const fee2out = estimateTxSize(count, 2) * feePerByte;
+  const tentativeChange = totalInput - amountSats - fee2out;
+  const hasChange = tentativeChange > 546; // matches builder dust threshold
+  const fee = estimateTxSize(count, hasChange ? 2 : 1) * feePerByte;
+  return { fee, sufficient: totalInput >= amountSats + fee };
+};
 
 interface BCH2SendProps {
   walletBalance: number;
@@ -40,7 +70,35 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
   const [loading, setLoading] = useState(false);
   const [step, setStep] = useState<'input' | 'confirm' | 'success'>('input');
   const [txid, setTxid] = useState('');
+  // Mature UTXO values (largest-first) for this wallet; null until loaded/unavailable.
+  // Fetched here so fee/total and MAX can be computed from the ACTUAL input count.
+  const [utxoValues, setUtxoValues] = useState<number[] | null>(null);
   const sendingRef = useRef(false);
+
+  // Load the wallet's mature UTXO set the same way class/bch2-transaction.ts does,
+  // so the confirm total matches what actually gets signed.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = isBC2
+          ? await getBC2Utxos(walletAddress)
+          : await getUtxosByAddress(walletAddress);
+        const mature = await filterMatureUtxos(raw);
+        if (cancelled) return;
+        const vals = mature
+          .map((u: any) => u.value)
+          .filter((v: any) => Number.isInteger(v) && v > 0)
+          .sort((a: number, b: number) => b - a); // largest-first, matching the builder
+        setUtxoValues(vals);
+      } catch {
+        if (!cancelled) setUtxoValues(null); // fall back to a labeled single-input estimate
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [walletAddress, isBC2]);
 
   const primaryColor = isBC2 ? BCH2Colors.bc2Primary : BCH2Colors.primary;
   const coinSymbol = isBC2 ? 'BC2' : 'BCH2';
@@ -63,11 +121,17 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
   };
 
   const amountInSats = parseAmount(amount);
-  // Estimate tx size: ~148 bytes/input + ~34 bytes/output + ~10 overhead
-  // Assume 1 input for display; actual fee computed during signing
   const feePerByte = Math.min(1000, Math.max(1, parseInt(fee) || 1));
-  const estimatedSize = 1 * 148 + 2 * 34 + 10; // 226 for single-input
-  const feeInSats = feePerByte * estimatedSize;
+  // Compute fee/total from the ACTUAL inputs coin-selection will pick for this
+  // amount (mirrors class/bch2-transaction.ts) so the approved total matches the
+  // signed tx. Until the UTXO set loads we fall back to a single-input estimate
+  // that is clearly labeled as "may increase".
+  const selection =
+    utxoValues !== null && utxoValues.length > 0 && amountInSats > 0
+      ? computeSelectedFee(utxoValues, amountInSats, feePerByte)
+      : null;
+  const feeIsExact = selection !== null;
+  const feeInSats = selection ? selection.fee : feePerByte * estimateTxSize(1, 2);
   const totalInSats = amountInSats + feeInSats;
 
   const validateAddress = (addr: string): boolean => {
@@ -104,11 +168,22 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
   };
 
   const handleMaxAmount = useCallback(() => {
-    const maxSats = walletBalance - feeInSats;
+    if (utxoValues && utxoValues.length > 0) {
+      // MAX spends ALL mature UTXOs into one recipient output (no change), so
+      // subtract the fee for the ACTUAL input count. A 1-input fee underestimates
+      // and makes MAX fail for wallets with 2+ UTXOs (LOW #32).
+      const total = utxoValues.reduce((s, v) => s + v, 0);
+      const maxFee = estimateTxSize(utxoValues.length, 1) * feePerByte;
+      const maxSats = total - maxFee;
+      if (maxSats > 0) setAmount(formatBalance(maxSats));
+      return;
+    }
+    // Fallback (UTXO set unavailable): conservative single-input estimate.
+    const maxSats = walletBalance - feePerByte * estimateTxSize(1, 1);
     if (maxSats > 0) {
       setAmount(formatBalance(maxSats));
     }
-  }, [walletBalance, feeInSats]);
+  }, [utxoValues, walletBalance, feePerByte]);
 
   const handleContinue = useCallback(() => {
     Keyboard.dismiss();
@@ -123,7 +198,9 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
       return;
     }
 
-    if (totalInSats > walletBalance) {
+    // Block if the real (multi-input) total exceeds balance, or coin-selection
+    // cannot cover amount+fee with the available UTXOs.
+    if (totalInSats > walletBalance || (selection !== null && !selection.sufficient)) {
       Alert.alert('Insufficient Balance', 'You do not have enough balance for this transaction');
       return;
     }
@@ -134,7 +211,7 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
     }
 
     setStep('confirm');
-  }, [toAddress, amountInSats, totalInSats, walletBalance, coinSymbol]);
+  }, [toAddress, amountInSats, totalInSats, walletBalance, coinSymbol, selection]);
 
   const handleSend = useCallback(async () => {
     if (!onSend) {
@@ -251,7 +328,7 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
             ))}
           </View>
           <Text style={styles.feeEstimate}>
-            Estimated fee: ~{feeInSats} sats ({formatBalance(feeInSats)} {coinSymbol})
+            Estimated fee: ~{feeInSats} sats ({formatBalance(feeInSats)} {coinSymbol}){!feeIsExact ? ' (may increase)' : ''}
           </Text>
         </View>
 
@@ -308,7 +385,7 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
             </View>
             <View style={styles.confirmRow}>
               <Text style={styles.confirmLabel}>Fee</Text>
-              <Text style={styles.confirmValue}>{formatBalance(feeInSats)} {coinSymbol}</Text>
+              <Text style={styles.confirmValue}>{formatBalance(feeInSats)} {coinSymbol}{!feeIsExact ? ' (est.)' : ''}</Text>
             </View>
             <View style={[styles.confirmRow, styles.confirmTotal]}>
               <Text style={styles.confirmTotalLabel}>Total</Text>

@@ -55,6 +55,10 @@ export interface AirdropScanResult {
   airdropBalance: number;    // Balance that likely existed at fork (min of BCH2, BC2 per address)
   postForkBalance: number;   // Excess BCH2 over BC2 (received after fork)
   claims: AirdropClaimResult[];
+  // MEDIUM #24: set when the scan aborted due to repeated network errors rather
+  // than confirming the wallet is empty. Lets the UI say "network error, try again"
+  // instead of "no funds found".
+  error?: string;
 }
 
 export interface AntiGamingResult {
@@ -224,6 +228,9 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
 
     const results: AirdropClaimResult[] = [];
     const seenClaimKeys = new Set<string>();
+    // MEDIUM #24: tracks whether any chain scan gave up due to repeated network
+    // errors, so an aborted scan isn't reported as a confirmed-empty result.
+    let networkAborted = false;
     const GAP_LIMIT = 20;
     const MAX_INDEX = 200; // Hard cap to prevent infinite scanning
     const MAX_ACCOUNTS = 5; // Scan accounts 0-4
@@ -248,7 +255,7 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
       while (consecutiveEmpty < GAP_LIMIT && index < MAX_INDEX && consecutiveNetErrors < MAX_CONSECUTIVE_NET_ERRORS) {
         // Batch BATCH_SIZE addresses at a time for performance
         const batchEnd = Math.min(index + BATCH_SIZE, MAX_INDEX);
-        const batchPromises: Promise<{ idx: number; claims: AirdropClaimResult[]; networkError: boolean }>[] = [];
+        const batchPromises: Promise<{ idx: number; claims: AirdropClaimResult[]; networkError: boolean; usedButEmpty: boolean }>[] = [];
 
         for (let i = index; i < batchEnd; i++) {
           const idx = i;
@@ -292,13 +299,19 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
               if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
               if (chainNode.privateKey) { crypto.randomFillSync(chainNode.privateKey); chainNode.privateKey.fill(0); }
             }
-            return { idx, claims: foundClaims, networkError: hadNetworkError && foundClaims.length === 0 };
+            // HIGH #6: if no balance and no network error, probe transaction
+            // history so spent-but-used addresses reset the gap counter.
+            let usedButEmpty = false;
+            if (foundClaims.length === 0 && !hadNetworkError) {
+              usedButEmpty = await hasSpendableHistory(pubkeyHash, publicKey);
+            }
+            return { idx, claims: foundClaims, networkError: hadNetworkError && foundClaims.length === 0, usedButEmpty };
           })());
         }
 
         const batchResults = await Promise.all(batchPromises);
 
-        for (const { claims: foundClaims, networkError } of batchResults) {
+        for (const { claims: foundClaims, networkError, usedButEmpty } of batchResults) {
           if (foundClaims.length > 0) {
             results.push(...foundClaims);
             consecutiveEmpty = 0;
@@ -307,8 +320,14 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
             // Network errors don't count toward gap limit (address may have funds)
             // but we cap consecutive network errors to avoid infinite scanning
             consecutiveNetErrors++;
+          } else if (usedButEmpty) {
+            // HIGH #6: address has BCH2 history but zero balance (funds spent).
+            // It is USED, not part of a gap — reset the counter so higher indices
+            // are still scanned.
+            consecutiveEmpty = 0;
+            consecutiveNetErrors = 0;
           } else {
-            // Confirmed empty address
+            // Confirmed empty (never used) address
             consecutiveEmpty++;
             consecutiveNetErrors = 0;
           }
@@ -316,6 +335,9 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
 
         index = batchEnd;
       }
+      // MEDIUM #24: chain scan gave up because the server was unreachable, not
+      // because addresses were confirmed empty.
+      if (consecutiveNetErrors >= MAX_CONSECUTIVE_NET_ERRORS) networkAborted = true;
     }
 
     // All derivation path configs: [BIP standard, coin types, address type]
@@ -369,7 +391,10 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
         address: '',
         bch2Address: '',
         balance: 0,
-        error: 'No BCH2 balance found for this seed',
+        // MEDIUM #24: distinguish an aborted (network) scan from a confirmed-empty one.
+        error: networkAborted
+          ? 'Network error — could not reach Electrum server. Please check your connection and try again.'
+          : 'No BCH2 balance found for this seed',
       }];
     }
 
@@ -986,6 +1011,42 @@ function getP2PKScripthash(publicKey: Buffer): string {
 }
 
 /**
+ * Get scripthash for a P2PKH (legacy) output (for Electrum queries)
+ * scriptPubKey for P2PKH: OP_DUP OP_HASH160 PUSH_20 <hash> OP_EQUALVERIFY OP_CHECKSIG
+ */
+function getP2PKHScripthash(pubkeyHash: Buffer): string {
+  const scriptPubKey = Buffer.concat([
+    Buffer.from([0x76, 0xa9, 0x14]),  // OP_DUP OP_HASH160 PUSH_20
+    pubkeyHash,
+    Buffer.from([0x88, 0xac]),        // OP_EQUALVERIFY OP_CHECKSIG
+  ]);
+  const hash = crypto.createHash('sha256').update(scriptPubKey).digest();
+  return Buffer.from(hash).reverse().toString('hex');
+}
+
+/**
+ * HIGH #6: detect an address that is USED but currently empty (e.g. an early
+ * address whose funds were spent). Gap-limit scanning must treat such addresses
+ * as used — otherwise a wallet that spent its early addresses would trip the gap
+ * limit and miss funds at higher indices. Only the BCH2-spendable script types
+ * (legacy P2PKH and P2PK; BCH2 has no SegWit) are probed. Best-effort: this only
+ * runs when the balance is already known to be zero, and a probe failure falls
+ * through to the normal empty-address handling (no worse than before).
+ */
+async function hasSpendableHistory(pubkeyHash: Buffer, publicKey: Buffer): Promise<boolean> {
+  const scripthashes = [getP2PKHScripthash(pubkeyHash), getP2PKScripthash(publicKey)];
+  for (const sh of scripthashes) {
+    try {
+      const history = await BCH2Electrum.getTransactionsByScripthash(sh);
+      if (Array.isArray(history) && history.length > 0) return true;
+    } catch {
+      // Probe failed (e.g. network error) — fall through; do not treat as used.
+    }
+  }
+  return false;
+}
+
+/**
  * Get scripthash for a P2TR address (for Electrum queries)
  * scriptPubKey for P2TR: OP_1 PUSH_32 <32-byte-x-only-tweaked-pubkey>
  */
@@ -1190,12 +1251,14 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
   const descriptors = parseDescriptorInput(input);
   const claims: AirdropClaimResult[] = [];
   const seenKeys = new Set<string>();
+  // MEDIUM #24: set when a chain scan gives up due to repeated network errors.
+  let descriptorNetworkAborted = false;
 
   const DESCRIPTOR_MAX_NET_ERRORS = 10;
 
   async function scanChainGapLimit(
     parentNode: BIP32Interface,
-    chain: number,
+    chain: number | null,   // LOW #33: null = parentNode is already chain-level; derive index directly
     pathPrefix: string,
     primaryType: NonNullable<AirdropClaimResult['addressType']>,
     minScan: number = 0,
@@ -1203,18 +1266,22 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
     let consecutiveEmpty = 0;
     let consecutiveNetErrors = 0;
     let index = 0;
+    // MEDIUM #22: raise the ceiling so next_index + gap is always covered even
+    // when next_index approaches or exceeds the default cap.
+    const scanCeiling = Math.max(DESCRIPTOR_MAX_INDEX, minScan);
 
-    while ((consecutiveEmpty < DESCRIPTOR_GAP_LIMIT || index < minScan) && index < DESCRIPTOR_MAX_INDEX && consecutiveNetErrors < DESCRIPTOR_MAX_NET_ERRORS) {
-      const batchEnd = Math.min(index + DESCRIPTOR_BATCH_SIZE, DESCRIPTOR_MAX_INDEX);
-      const batchPromises: Promise<{ found: AirdropClaimResult[]; networkError: boolean }>[] = [];
+    while ((consecutiveEmpty < DESCRIPTOR_GAP_LIMIT || index < minScan) && index < scanCeiling && consecutiveNetErrors < DESCRIPTOR_MAX_NET_ERRORS) {
+      const batchEnd = Math.min(index + DESCRIPTOR_BATCH_SIZE, scanCeiling);
+      const batchPromises: Promise<{ found: AirdropClaimResult[]; networkError: boolean; usedButEmpty: boolean }>[] = [];
 
       for (let i = index; i < batchEnd; i++) {
         const idx = i;
         batchPromises.push((async () => {
-          const chainNode = parentNode.derive(chain);
+          const chainNode = chain === null ? parentNode : parentNode.derive(chain);
           const child = chainNode.derive(idx);
           const pubkeyHash = hash160(Buffer.from(child.publicKey));
-          const derivPath = `${pathPrefix}/${chain}/${idx}`;
+          const publicKey = Buffer.from(child.publicKey);
+          const derivPath = chain === null ? `${pathPrefix}/${idx}` : `${pathPrefix}/${chain}/${idx}`;
           const found: AirdropClaimResult[] = [];
           let hadNetworkError = false;
           try {
@@ -1223,7 +1290,7 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
             typesToCheck.push('p2pk');
             for (const addrType of typesToCheck) {
               try {
-                const claim = await scanSingleAddress(pubkeyHash, Buffer.from(child.publicKey), addrType, derivPath);
+                const claim = await scanSingleAddress(pubkeyHash, publicKey, addrType, derivPath);
                 if (claim) {
                   const key = `${claim.address}:${claim.addressType}`;
                   if (!seenKeys.has(key)) {
@@ -1236,22 +1303,33 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
               }
             }
           } finally {
-            // Zero derived child private keys
+            // Zero derived child private keys. When chain === null, chainNode IS
+            // parentNode (needed for later indices), so only zero it via the
+            // caller's finally — never here.
             if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
-            if (chainNode.privateKey) { crypto.randomFillSync(chainNode.privateKey); chainNode.privateKey.fill(0); }
+            if (chain !== null && chainNode.privateKey) { crypto.randomFillSync(chainNode.privateKey); chainNode.privateKey.fill(0); }
           }
-          return { found, networkError: hadNetworkError && found.length === 0 };
+          // HIGH #6: probe history so spent-but-used addresses reset the gap counter.
+          let usedButEmpty = false;
+          if (found.length === 0 && !hadNetworkError) {
+            usedButEmpty = await hasSpendableHistory(pubkeyHash, publicKey);
+          }
+          return { found, networkError: hadNetworkError && found.length === 0, usedButEmpty };
         })());
       }
 
       const batchResults = await Promise.all(batchPromises);
-      for (const { found, networkError } of batchResults) {
+      for (const { found, networkError, usedButEmpty } of batchResults) {
         if (found.length > 0) {
           claims.push(...found);
           consecutiveEmpty = 0;
           consecutiveNetErrors = 0;
         } else if (networkError) {
           consecutiveNetErrors++;
+        } else if (usedButEmpty) {
+          // HIGH #6: used but empty (funds spent) — reset the gap counter.
+          consecutiveEmpty = 0;
+          consecutiveNetErrors = 0;
         } else {
           consecutiveEmpty++;
           consecutiveNetErrors = 0;
@@ -1259,6 +1337,8 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
       }
       index = batchEnd;
     }
+    // MEDIUM #24: scan gave up because the server was unreachable.
+    if (consecutiveNetErrors >= DESCRIPTOR_MAX_NET_ERRORS) descriptorNetworkAborted = true;
   }
 
   for (const desc of descriptors) {
@@ -1270,13 +1350,45 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
     }
 
     const minScan = desc.nextIndex ? desc.nextIndex + DESCRIPTOR_GAP_LIMIT : 0;
+    const originPrefix = desc.originPath ? `m/${desc.originPath}` : '';
     try {
-      if (node.depth >= 3) {
-        const pathPrefix = desc.originPath ? `m/${desc.originPath}` : '';
+      if (node.depth >= 5) {
+        // MEDIUM #23 / LOW #33: an address-level (or deeper) key cannot be scanned
+        // over an index range. Fail loudly rather than derive nonsense paths.
+        throw new Error(`Descriptor extended key is at depth ${node.depth} (address-level or deeper); cannot scan an index range. Provide a master, account (depth 3), or chain (depth 4) key.`);
+      } else if (node.depth === 4) {
+        // LOW #33: chain-level key — the chain step is already applied. Derive the
+        // index directly (chain === null) instead of deriving the chain again.
+        await scanChainGapLimit(node, null, originPrefix, desc.addressType, minScan);
+      } else if (node.depth === 3) {
+        // Account-level key (the common listdescriptors case): derive chain then index.
         for (const chain of [0, 1]) {
-          await scanChainGapLimit(node, chain, pathPrefix, desc.addressType, minScan);
+          await scanChainGapLimit(node, chain, originPrefix, desc.addressType, minScan);
+        }
+      } else if (desc.originPath) {
+        // MEDIUM #23: master/partial key that carries an explicit origin path
+        // (e.g. account >= 1). Honor the descriptor's actual account instead of the
+        // hardcoded account-0 paths. Only well-defined from a master key (depth 0);
+        // a partial key with an origin is ambiguous, so fail loudly.
+        if (node.depth !== 0) {
+          throw new Error(`Descriptor has origin path ${desc.originPath} but its extended key is at depth ${node.depth}, not a master key — cannot resolve the account unambiguously.`);
+        }
+        let accountNode: BIP32Interface;
+        try {
+          accountNode = node.derivePath(originPrefix);
+        } catch (e: any) {
+          throw new Error(`Cannot derive descriptor origin path ${originPrefix}: ${e.message || e}`);
+        }
+        try {
+          for (const chain of [0, 1]) {
+            await scanChainGapLimit(accountNode, chain, originPrefix, desc.addressType, minScan);
+          }
+        } finally {
+          if (accountNode.privateKey) { crypto.randomFillSync(accountNode.privateKey); accountNode.privateKey.fill(0); }
         }
       } else {
+        // Bare master/partial key with no origin info: scan the standard account
+        // paths to discover funds.
         const accountPaths = DESCRIPTOR_ACCOUNT_PATHS[desc.addressType] || [];
         const accountNodes: BIP32Interface[] = [];
         for (const accountPath of accountPaths) {
@@ -1315,12 +1427,18 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
     return sum + Math.min(c.balance, bc2);
   }, 0);
 
-  return {
+  const result: AirdropScanResult = {
     totalBalance,
     airdropBalance,
     postForkBalance: totalBalance - airdropBalance,
     claims,
   };
+  // MEDIUM #24: if we found nothing but the scan was cut short by network errors,
+  // signal that so the UI reports a network problem instead of "no funds".
+  if (claims.length === 0 && descriptorNetworkAborted) {
+    result.error = 'Network error — could not reach Electrum server. Please check your connection and try again.';
+  }
+  return result;
 }
 
 /**
