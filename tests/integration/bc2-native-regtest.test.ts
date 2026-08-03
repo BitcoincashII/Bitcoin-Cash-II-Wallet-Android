@@ -199,4 +199,33 @@ run('native BC2 SegWit / Taproot spends — real regtest consensus', () => {
     // The output key committed in the UTXO is exactly what we signed for.
     expect(decoded.vout[0].scriptPubKey.hex).toBe(RECIPIENT.toString('hex'));
   });
+
+  it("fee estimate covers the real vsize of a Taproot-output tx at 1 sat/vByte (regression: 43-byte outputs)", () => {
+    // Regression for the 34-byte-output fee bug: a P2TR/P2WSH output is 43 bytes,
+    // so a taproot send with change must be charged >= its true vsize at 1 sat/vB.
+    const child = root.derivePath("m/86'/0'/0'/0/0");
+    const pub = Buffer.from(child.publicKey);
+    const xonly = pub.subarray(1, 33);
+    const tweak = taggedHash('TapTweak', xonly);
+    const tweakedXonly = Buffer.from(ecc.xOnlyPointAddTweak(xonly, tweak)!.xOnlyPubkey);
+    const effective = pub[0] === 0x02 ? Buffer.from(child.privateKey!) : Buffer.from(ecc.privateNegate(Buffer.from(child.privateKey!)));
+    const tweakedPriv = Buffer.from(ecc.privateAdd(effective, tweak)!);
+    const spk = Buffer.concat([Buffer.from([0x51, 0x20]), tweakedXonly]); // P2TR, 34-byte script
+
+    const utxo = fundScript(spk, 100_000_000);
+    // Mirror sendBC2Native's estimate: perInput(taproot)=58, outputs sized by real script length.
+    const outBytes = (s: Buffer) => 8 + (s.length < 0xfd ? 1 : 3) + s.length;
+    const estimate = 11 + 58 * 1 + outBytes(spk) + outBytes(spk); // 1 input, P2TR recipient + P2TR change
+    const amount = 40_000_000;
+    const fee = estimate * 1; // feePerByte = 1 (the default/min)
+    const hex = buildBC2TaprootTx([utxo], spk, amount, spk, 100_000_000 - amount - fee, tweakedPriv, tweakedXonly);
+    // BC2 is Bitcoin-Core lineage: min-relay uses BIP141 weight/vsize (NOT the BCH
+    // regtest node's un-discounted size). Compute the real vsize node-independently.
+    // Witness portion for 1 input with a single 64-byte Schnorr item = marker+flag
+    // (2) + stack-count (1) + len (1) + sig (64) = 68.
+    const full = Buffer.from(hex, 'hex').length;
+    const base = full - 68;
+    const vsize = Math.ceil((base * 3 + full) / 4);
+    expect(estimate).toBeGreaterThanOrEqual(vsize); // fee >= vsize*1 ⇒ meets BC2 min-relay
+  });
 });

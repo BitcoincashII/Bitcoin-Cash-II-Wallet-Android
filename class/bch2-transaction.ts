@@ -2978,13 +2978,20 @@ export async function sendBC2Native(
           if (tr && Buffer.from(tr.xOnlyPubkey).equals(targetTweakedXonly!)) {
             // Compute the tweaked private key (BIP341): negate d if internal pubkey has odd Y, then add tweak.
             const priv = Buffer.from(child.privateKey!);
-            const effective = pubkey[0] === 0x02 ? priv : Buffer.from(ecc.privateNegate(priv));
+            // noble's privateNegate/privateAdd each return a FRESH Uint8Array of
+            // secret bytes (Buffer.from copies them), so capture the raw returns
+            // and wipe them too — otherwise cleartext copies of the taproot
+            // spending key survive on the heap, defeating this branch's zeroing.
+            const negRaw = pubkey[0] === 0x02 ? null : ecc.privateNegate(priv);
+            const effective = negRaw ? Buffer.from(negRaw) : priv;
             const added = ecc.privateAdd(effective, tweak);
             if (added) {
               tweakedPrivkey = Buffer.from(added);
               tweakedXonly = Buffer.from(tr.xOnlyPubkey);
               matched = child;
             }
+            if (added) { try { crypto.randomFillSync(added); } catch {} added.fill(0); }
+            if (negRaw) { try { crypto.randomFillSync(negRaw); } catch {} negRaw.fill(0); }
             if (effective !== priv) { crypto.randomFillSync(effective); effective.fill(0); }
             crypto.randomFillSync(priv); priv.fill(0);
             if (matched) break outer;
@@ -3014,19 +3021,23 @@ export async function sendBC2Native(
     if (utxos.length === 0) throw new Error(`No UTXOs available for ${scriptType} address ${expectedAddress}`);
     utxos.sort((a, b) => b.value - a.value);
 
-    // Coin selection.
+    // Coin selection. Size the outputs by their ACTUAL scriptPubKey length — a
+    // P2TR/P2WSH output is 43 bytes, not the 34 of a P2PKH — otherwise a taproot
+    // send at the default 1 sat/vByte underpays below min-relay and is rejected.
     const perInput = estimateBytes(scriptType);
-    const size = (ins: number, outs: number) => 11 + perInput * ins + 34 * outs;
+    const outBytes = (s: Buffer) => 8 + encodeVarInt(s.length).length + s.length; // value + varint len + script
+    const size = (ins: number, withChange: boolean) =>
+      11 + perInput * ins + outBytes(recipientScript) + (withChange ? outBytes(changeScript) : 0);
     const selected: UTXO[] = [];
     let totalInput = 0;
     for (const u of utxos) {
       selected.push(u); totalInput += u.value;
       if (totalInput > Number.MAX_SAFE_INTEGER) throw new Error('UTXO total exceeds safe integer range');
-      if (totalInput >= amountSats + size(selected.length, 2) * feePerByte || selected.length >= 500) break;
+      if (totalInput >= amountSats + size(selected.length, true) * feePerByte || selected.length >= 500) break;
     }
-    const fee2 = size(selected.length, 2) * feePerByte;
+    const fee2 = size(selected.length, true) * feePerByte;
     const hasChange = totalInput - amountSats - fee2 > 546;
-    const fee = size(selected.length, hasChange ? 2 : 1) * feePerByte;
+    const fee = size(selected.length, hasChange) * feePerByte;
     const changeAmount = hasChange ? totalInput - amountSats - fee : 0;
     if (totalInput < amountSats + fee) {
       if (selected.length >= 500) throw new Error('Too many UTXOs required. Please consolidate UTXOs first.');
