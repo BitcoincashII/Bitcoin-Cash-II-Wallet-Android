@@ -45,8 +45,24 @@ jest.mock('../../blue_modules/BCH2Electrum', () => ({
   getBalanceByScripthash: (...args: any[]) => mockGetBalanceByScripthash(...args),
   getBC2Balance: (...args: any[]) => mockGetBC2Balance(...args),
   getBC2BalanceByScripthash: (...args: any[]) => mockGetBC2BalanceByScripthash(...args),
+  filterMatureUtxos: async (utxos: any[]) => utxos, // passthrough (maturity tested elsewhere)
   connectMain: jest.fn(),
 }));
+
+// Stateful Keystore mock so saveWallet -> getWalletMnemonic round-trips (seed).
+jest.mock('react-native-keychain', () => {
+  const store: Record<string, { username: string; password: string; service: string }> = {};
+  const svc = (o: any) => (typeof o === 'string' ? o : o && o.service) || 'default';
+  return {
+    ACCESSIBLE: { WHEN_UNLOCKED_THIS_DEVICE_ONLY: 'AccessibleWhenUnlockedThisDeviceOnly' },
+    setGenericPassword: jest.fn(async (username: string, password: string, opts: any) => {
+      const service = svc(opts); store[service] = { username, password, service }; return { service, storage: 'mock' };
+    }),
+    getGenericPassword: jest.fn(async (opts: any) => store[svc(opts)] || false),
+    resetGenericPassword: jest.fn(async (opts: any) => { delete store[svc(opts)]; return true; }),
+    hasGenericPassword: jest.fn(async (opts: any) => !!store[svc(opts)]),
+  };
+});
 
 // Mock BCH2Wallet class for airdrop tests
 jest.mock('../../class/wallets/bch2-wallet', () => {
@@ -61,6 +77,9 @@ jest.mock('../../class/wallets/bch2-wallet', () => {
     })),
   };
 });
+
+// eslint-disable-next-line import/first
+import * as Keychain from 'react-native-keychain';
 
 // Import modules under test AFTER mocks
 import { sendTransaction, decodeCashAddr } from '../../class/bch2-transaction';
@@ -542,18 +561,16 @@ describe('Storage operations: save multiple, list, update, delete, verify', () =
 
     AsyncStorage.setItem = origSetItem;
 
-    // Phase 1 write should overwrite mnemonic with random data
-    expect(capturedWrites.length).toBeGreaterThanOrEqual(2);
-    const phase1 = JSON.parse(capturedWrites[0]);
-    const overwritten = phase1.find((w: StoredWallet) => w.id === wallet.id);
-    if (overwritten) {
-      expect(overwritten.mnemonic).not.toBe(originalMnemonic);
-      expect(overwritten.mnemonic.length).toBe(originalMnemonic.length);
-    }
+    // The seed lives in the hardware Keystore (not AsyncStorage), so secure deletion
+    // means: the Keystore entry is cleared, the mnemonic is no longer retrievable,
+    // and the plaintext was never written into the AsyncStorage metadata.
+    expect(Keychain.resetGenericPassword).toHaveBeenCalled();
+    expect(await getWalletMnemonic(wallet.id)).toBeNull();
+    for (const w of capturedWrites) expect(w).not.toContain(originalMnemonic);
 
-    // Phase 2 write should not contain the wallet
-    const phase2 = JSON.parse(capturedWrites[capturedWrites.length - 1]);
-    expect(phase2.find((w: StoredWallet) => w.id === wallet.id)).toBeUndefined();
+    // The final metadata no longer contains the wallet.
+    const final = JSON.parse(capturedWrites[capturedWrites.length - 1] || '[]');
+    expect(final.find((w: StoredWallet) => w.id === wallet.id)).toBeUndefined();
   });
 
   it('wallet IDs are unique across creation calls', async () => {
