@@ -910,6 +910,49 @@ export async function getBC2Transactions(address: string): Promise<any[]> {
   }
 }
 
+function readVarIntBC2(buf: Buffer, o: number): { value: number; size: number } {
+  const f = buf[o];
+  if (f < 0xfd) return { value: f, size: 1 };
+  if (f === 0xfd) return { value: buf.readUInt16LE(o + 1), size: 3 };
+  if (f === 0xfe) return { value: buf.readUInt32LE(o + 1), size: 5 };
+  return { value: Number(buf.readBigUInt64LE(o + 1)), size: 9 };
+}
+
+/** Re-serialize a BIP144 SegWit tx without marker/flag/witness (the txid preimage). */
+function stripWitnessForTxid(buf: Buffer): Buffer {
+  let o = 0;
+  const version = buf.subarray(o, o + 4); o += 4;
+  o += 2; // marker + flag
+  const vinStart = o;
+  const vin = readVarIntBC2(buf, o); o += vin.size;
+  for (let i = 0; i < vin.value; i++) {
+    o += 36; const s = readVarIntBC2(buf, o); o += s.size + s.value; o += 4;
+  }
+  const vout = readVarIntBC2(buf, o); o += vout.size;
+  for (let i = 0; i < vout.value; i++) {
+    o += 8; const s = readVarIntBC2(buf, o); o += s.size + s.value;
+  }
+  const inputsOutputs = buf.subarray(vinStart, o);
+  for (let i = 0; i < vin.value; i++) {
+    const items = readVarIntBC2(buf, o); o += items.size;
+    for (let j = 0; j < items.value; j++) { const it = readVarIntBC2(buf, o); o += it.size + it.value; }
+  }
+  const locktime = buf.subarray(o, o + 4);
+  return Buffer.concat([version, inputsOutputs, locktime]);
+}
+
+/**
+ * Compute a transaction's txid from its raw hex. For SegWit txs (BIP144
+ * marker/flag) the txid excludes the witness, so it is stripped first. Exported so
+ * broadcast can verify the server returned the txid of the tx we actually signed.
+ * Validated against real BC2 SegWit + legacy tx vectors.
+ */
+export function computeTxid(rawHex: string): string {
+  const buf = Buffer.from(rawHex, 'hex');
+  const body = (buf.length > 6 && buf[4] === 0x00 && buf[5] !== 0x00) ? stripWitnessForTxid(buf) : buf;
+  return Buffer.from(sha256(sha256(body))).reverse().toString('hex');
+}
+
 // Broadcast BC2 transaction using explorer API
 export async function broadcastBC2Transaction(hex: string): Promise<string> {
   // Max 32MB block = 64M hex chars; cap at 2MB tx (4M hex) as practical limit
@@ -949,7 +992,16 @@ export async function broadcastBC2Transaction(hex: string): Promise<string> {
       throw new Error(`Broadcast may have failed: ${responseText}`);
     }
 
-    return txidResult;
+    // Verify the server returned the txid of the tx we actually signed. A server
+    // (or MITM) that drops the tx and echoes a bogus/other txid is caught here,
+    // rather than leaving the user with a false "sent". computeTxid should never
+    // throw for our own well-formed txs; if it somehow does, don't block the send.
+    let expectedTxid: string | null = null;
+    try { expectedTxid = computeTxid(hex); } catch { /* skip verification on parse failure */ }
+    if (expectedTxid && txidResult.toLowerCase() !== expectedTxid.toLowerCase()) {
+      throw new Error(`Broadcast returned a txid that does not match the signed transaction — refusing to trust it`);
+    }
+    return expectedTxid || txidResult;
   } catch (apiError: any) {
     DEBUG && console.log('[BC2] Explorer broadcast failed:', apiError.message);
 
@@ -962,7 +1014,12 @@ export async function broadcastBC2Transaction(hex: string): Promise<string> {
       if (typeof txid !== 'string' || !/^[a-fA-F0-9]{64}$/.test(txid)) {
         throw new Error(`Unexpected Electrum response: ${String(txid).substring(0, 200)}`);
       }
-      return txid;
+      let expectedTxid: string | null = null;
+      try { expectedTxid = computeTxid(hex); } catch { /* skip verification on parse failure */ }
+      if (expectedTxid && txid.toLowerCase() !== expectedTxid.toLowerCase()) {
+        throw new Error(`Electrum broadcast returned a txid that does not match the signed transaction — refusing to trust it`);
+      }
+      return expectedTxid || txid;
     } catch (electrumError: any) {
       DEBUG && console.log('[BC2] Electrum broadcast also failed:', electrumError.message);
       DEBUG && console.log(`[BC2] Full broadcast errors - API: ${apiError.message}, Electrum: ${electrumError.message}`);

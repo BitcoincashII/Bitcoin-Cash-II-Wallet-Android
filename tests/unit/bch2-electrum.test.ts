@@ -47,7 +47,7 @@ const mockFetch = jest.fn();
 (global as any).fetch = mockFetch;
 
 // We import these for types/constants only; actual function tests use fresh modules
-import { hardcodedPeers, bc2Peers } from '../../blue_modules/BCH2Electrum';
+import { hardcodedPeers, bc2Peers, computeTxid } from '../../blue_modules/BCH2Electrum';
 
 // ---------------------------------------------------------------------------
 // CashAddr encoder (same algorithm as bch2-wallet.test.ts) for generating
@@ -1919,5 +1919,28 @@ describe('BCH2Electrum', () => {
 
       expect(fee).toBe(1);
     });
+  });
+});
+
+describe('computeTxid (broadcast txid verification)', () => {
+  // Real BC2 tx vectors fetched from the explorer (block 57545).
+  const SEGWIT_HEX =
+    '020000000001010000000000000000000000000000000000000000000000000000000000000000ffffffff3703c9e000044bd36f6a2f706f6f6c2e6b7279707465782e636f6d2f6336623062636632633636373666666300003714c77b8b6fa86fc401ffffffff02b2f6052a010000001976a91439e3788f7c3a5c3ec31e3e68ca4d3c5a1888924388ac0000000000000000266a24aa21a9ed6cea9d32d4c7ce283d94cec250945786e1ce3d809eaa3f192410b52ba135daa10120000000000000000000000000000000000000000000000000000000000000000000000000';
+  const SEGWIT_TXID = '98c285f0c122822cd5fbcb5d60c8548127d1949af5d1c942a4a76599a72fade7';
+  const LEGACY_HEX =
+    '0200000001c257fc0059cc360dd3e93c495b8b2daca06a8dcb740f721a996a4760f1adec4f010000006a4730440220716cff0d9f79f662aed47bd7ef38a9ae11fdb612b336f644a68aec0de4f71ec40220663fa8ec699e61a0e2b44356823fdd0ca33cefaad79aecef7343a94aa96e5b1c01210231a1bc6e5328c8c5abc5c5501d27f352e7e8e58d7a84af7f1c75e0c3ef17dfd1fdffffff029df67101000000001976a914f63b01a980933a814efd0af25103c92408d51f4988aca0690f0400000000160014bd01a19927956467fe8b8c69fb50619e3a155329c8e00000';
+  const LEGACY_TXID = 'a4d42079b4037a9d55ef27958b88f8479c3d73e06a5607579a7d9c0f412ee12f';
+
+  it('computes the txid of a SegWit tx (witness stripped)', () => {
+    expect(computeTxid(SEGWIT_HEX)).toBe(SEGWIT_TXID);
+  });
+
+  it('computes the txid of a legacy tx', () => {
+    expect(computeTxid(LEGACY_HEX)).toBe(LEGACY_TXID);
+  });
+
+  it('a tampered tx yields a different txid (so a substituted-txid broadcast is caught)', () => {
+    const tampered = LEGACY_HEX.slice(0, -8) + 'deadbeef'; // change the locktime
+    expect(computeTxid(tampered)).not.toBe(LEGACY_TXID);
   });
 });
