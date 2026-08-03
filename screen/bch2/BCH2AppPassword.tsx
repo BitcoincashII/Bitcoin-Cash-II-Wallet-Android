@@ -121,6 +121,11 @@ export async function isAppPasswordSet(): Promise<boolean> {
   return !!(await AsyncStorage.getItem(APP_PASSWORD_KEY));
 }
 
+/** Set (or replace) the app-lock password. Stored as a salted scrypt record. */
+export async function setAppPassword(password: string): Promise<void> {
+  await persistPassword(password);
+}
+
 export async function verifyAppPassword(input: string): Promise<boolean> {
   const stored = await AsyncStorage.getItem(APP_PASSWORD_KEY);
   if (!stored) return false; // Fail closed — no password means the password path cannot unlock.

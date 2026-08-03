@@ -33,6 +33,8 @@ jest.mock('../../blue_modules/BCH2Electrum', () => ({
   getUtxosByScripthash: (...args: any[]) => mockGetUtxosByScripthash(...args),
   broadcastTransaction: (...args: any[]) => mockBroadcastTransaction(...args),
   broadcastBC2Transaction: (...args: any[]) => mockBroadcastBC2Transaction(...args),
+  // Passthrough — maturity filtering is exercised in BCH2Electrum's own tests.
+  filterMatureUtxos: async (utxos: any[]) => utxos,
 }));
 
 // Import after mocking
@@ -1289,7 +1291,7 @@ describe('decodeCashAddr insufficient hash data', () => {
     // while only 20 bytes of hash data are present.
     expect(() => {
       decodeCashAddr(addr, true);
-    }).toThrow(/insufficient hash data/);
+    }).toThrow(/hash length \d+ != expected|insufficient hash data/);
   });
 });
 

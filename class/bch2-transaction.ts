@@ -681,6 +681,11 @@ export function decodeCashAddr(address: string, returnType: true): { type: numbe
 export function decodeCashAddr(address: string, returnType?: boolean): Buffer | { type: number; hash: Buffer } {
   const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 
+  // CashAddr must not mix letter case (spec: all-lowercase or all-uppercase).
+  if (address !== address.toLowerCase() && address !== address.toUpperCase()) {
+    throw new Error('Invalid CashAddr: mixed case');
+  }
+
   // Determine prefix
   let addr = address.toLowerCase();
   let prefix: string;
@@ -755,10 +760,12 @@ export function decodeCashAddr(address: string, returnType?: boolean): Buffer | 
     throw new Error(`Invalid CashAddr encoding size: ${encodedSize}`);
   }
   const expectedSize = expectedSizes[encodedSize];
-  if (hashBytes.length < expectedSize) {
-    throw new Error('Invalid CashAddr: insufficient hash data');
+  // Must match exactly — reject both short AND oversized payloads (do not
+  // silently truncate an over-long hash to 20 bytes).
+  if (hashBytes.length !== expectedSize) {
+    throw new Error(`Invalid CashAddr: hash length ${hashBytes.length} != expected ${expectedSize}`);
   }
-  const hash = Buffer.from(hashBytes.slice(0, expectedSize));
+  const hash = Buffer.from(hashBytes);
 
   if (returnType) {
     return { type, hash };
