@@ -16,9 +16,20 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2BorderRadius, BCH2Shadows } from '../../components/BCH2Theme';
 import BCH2WalletCard from '../../components/BCH2WalletCard';
-import { getWallets, StoredWallet, updateWalletBalance } from '../../class/bch2-wallet-storage';
+import { getWallets, StoredWallet, updateWalletBalance, getWalletMnemonic } from '../../class/bch2-wallet-storage';
 import { getBalanceByAddress, getBC2Balance, getBalanceByScripthash, isConnected as isElectrumConnected } from '../../blue_modules/BCH2Electrum';
+import { getBC2HdBalance, bc2ScriptTypeFromAddress } from '../../class/bch2-transaction';
 import { bc1AddressToScripthash } from '../../class/bch2-airdrop';
+
+// HD-aggregate BC2 balance across the whole account; falls back to the primary
+// address if the seed can't be read or the scan fails.
+async function bc2WalletBalance(wallet: StoredWallet): Promise<{ confirmed: number; unconfirmed: number }> {
+  try {
+    const mnemonic = await getWalletMnemonic(wallet.id);
+    if (mnemonic) return await getBC2HdBalance(mnemonic, bc2ScriptTypeFromAddress(wallet.address));
+  } catch { /* fall through */ }
+  return getBC2Balance(wallet.address);
+}
 
 interface Wallet {
   id: string;
@@ -62,7 +73,7 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
           try {
             let balance;
             if (wallet.type === 'bc2') {
-              balance = await getBC2Balance(wallet.address);
+              balance = await bc2WalletBalance(wallet);
             } else if (wallet.type === 'bc1' || wallet.address.toLowerCase().startsWith('bc1')) {
               const scripthash = bc1AddressToScripthash(wallet.address);
               if (!scripthash) throw new Error('Invalid bc1 address');
@@ -92,7 +103,7 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
         try {
           let balance;
           if (wallet.type === 'bc2') {
-            balance = await getBC2Balance(wallet.address);
+            balance = await bc2WalletBalance(wallet);
           } else if (wallet.type === 'bc1' || wallet.address.toLowerCase().startsWith('bc1')) {
             const scripthash = bc1AddressToScripthash(wallet.address);
             if (!scripthash) throw new Error('Invalid bc1 address');

@@ -20,7 +20,7 @@ import AddWallet from '../screen/bch2/AddWallet';
 import BCH2AppPassword from '../screen/bch2/BCH2AppPassword';
 import { getWallet, getWalletMnemonic, updateWalletBalance, StoredWallet } from '../class/bch2-wallet-storage';
 import { getTransactionsByAddress, getBC2Transactions, getBalanceByAddress, getBC2Balance, getBalanceByScripthash, getTransactionsByScripthash } from '../blue_modules/BCH2Electrum';
-import { sendTransaction, sendFromBech32, sendFromP2SH, sendBC2Native, BC2ScriptType } from '../class/bch2-transaction';
+import { sendTransaction, sendFromBech32, sendFromP2SH, sendBC2NativeHd, bc2ScriptTypeFromAddress, getBC2HdBalance, scanBC2Hd } from '../class/bch2-transaction';
 import { bc1AddressToScripthash } from '../class/bch2-airdrop';
 
 const Stack = createNativeStackNavigator<BCH2RootStackParamList>();
@@ -128,11 +128,28 @@ import { BCH2ReceiveRouteProp, BCH2SendRouteProp, WalletDetailRouteProp } from '
 
 const BCH2ReceiveWrapper: React.FC = () => {
   const route = useRoute<BCH2ReceiveRouteProp>();
-  const { address, walletLabel, isBC2 } = route.params;
+  const { address, walletLabel, isBC2, walletId } = route.params;
+  // For BC2 (HD) wallets, show the next UNUSED receive address instead of always
+  // reusing the primary one. Falls back to the stored address on any failure.
+  const [displayAddress, setDisplayAddress] = React.useState(address);
+  React.useEffect(() => {
+    let cancelled = false;
+    if (isBC2 && walletId) {
+      (async () => {
+        try {
+          const mnemonic = await getWalletMnemonic(walletId);
+          if (!mnemonic || cancelled) return;
+          const scan = await scanBC2Hd(mnemonic, bc2ScriptTypeFromAddress(address));
+          if (!cancelled && scan.receiveAddress) setDisplayAddress(scan.receiveAddress);
+        } catch { /* keep the stored address */ }
+      })();
+    }
+    return () => { cancelled = true; };
+  }, [isBC2, walletId, address]);
 
   return (
     <BCH2Receive
-      address={address}
+      address={displayAddress}
       walletLabel={walletLabel}
       isBC2={isBC2}
     />
@@ -156,13 +173,10 @@ const BCH2SendWrapper: React.FC = () => {
 
     let result;
     if (isBC2) {
-      // Native BC2 (real SegWit/Taproot witness). Script type is unambiguous from
-      // the address prefix. sendBC2Native delegates legacy (1xxx) to sendTransaction.
-      const scriptType: BC2ScriptType =
-        addr.startsWith('bc1p') ? 'taproot' :
-        addr.startsWith('bc1') ? 'native-segwit' :
-        walletAddress.startsWith('3') ? 'p2sh-segwit' : 'legacy';
-      result = await sendBC2Native(mnemonic, scriptType, walletAddress, toAddress, amount, feePerByte);
+      // Native BC2 (real SegWit/Taproot witness), full HD: spends across every
+      // address of the account and sends change to a fresh change address. Script
+      // type is inferred from the wallet address prefix.
+      result = await sendBC2NativeHd(mnemonic, bc2ScriptTypeFromAddress(walletAddress), toAddress, amount, feePerByte);
     } else if (isBech32Source) {
       // BCH2 SegWit *recovery* of pre-fork coins (scriptSig + FORKID).
       result = await sendFromBech32(mnemonic, walletAddress, toAddress, amount, feePerByte);
@@ -212,8 +226,16 @@ const BCH2WalletDetailWrapper: React.FC = () => {
       let txHistory: any[];
 
       if (isBC2) {
-        balance = await getBC2Balance(w.address);
-        txHistory = await getBC2Transactions(w.address);
+        // HD-aggregate balance across the whole account; fall back to the primary
+        // address if the seed can't be read (e.g. locked) or the scan fails.
+        const scriptType = bc2ScriptTypeFromAddress(w.address);
+        try {
+          const mnemonic = await getWalletMnemonic(w.id);
+          balance = mnemonic ? await getBC2HdBalance(mnemonic, scriptType) : await getBC2Balance(w.address);
+        } catch {
+          balance = await getBC2Balance(w.address);
+        }
+        txHistory = await getBC2Transactions(w.address); // history shown for the primary address
       } else if (isBC1) {
         // bc1 addresses need scripthash-based queries
         const scripthash = bc1AddressToScripthash(w.address);

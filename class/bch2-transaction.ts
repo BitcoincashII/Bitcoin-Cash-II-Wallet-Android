@@ -2719,6 +2719,15 @@ export async function sweepAirdropClaims(
 
 export type BC2ScriptType = 'legacy' | 'p2sh-segwit' | 'native-segwit' | 'taproot';
 
+/** Infer a BC2 wallet's script type from its address prefix (unambiguous). */
+export function bc2ScriptTypeFromAddress(address: string): BC2ScriptType {
+  const a = (address || '').toLowerCase();
+  if (a.startsWith('bc1p')) return 'taproot';
+  if (a.startsWith('bc1')) return 'native-segwit';
+  if (address.startsWith('3')) return 'p2sh-segwit';
+  return 'legacy';
+}
+
 interface SegwitInput {
   txid: string;
   vout: number;
@@ -3213,6 +3222,12 @@ export async function scanBC2Hd(mnemonic: string, scriptType: BC2ScriptType): Pr
   }
 }
 
+/** HD-aggregate balance for a BC2 wallet (sum across all used addresses). */
+export async function getBC2HdBalance(mnemonic: string, scriptType: BC2ScriptType): Promise<{ confirmed: number; unconfirmed: number }> {
+  const scan = await scanBC2Hd(mnemonic, scriptType);
+  return { confirmed: scan.confirmed, unconfirmed: scan.unconfirmed };
+}
+
 /**
  * HD send for BC2: gather UTXOs across the whole account, sign EACH input with
  * its own address key, send change to a fresh change address, broadcast to BC2.
@@ -3323,6 +3338,8 @@ export default {
   sendBC2Native,
   sendBC2NativeHd,
   scanBC2Hd,
+  getBC2HdBalance,
+  bc2ScriptTypeFromAddress,
   buildBC2SegwitTx,
   buildBC2TaprootTx,
 };

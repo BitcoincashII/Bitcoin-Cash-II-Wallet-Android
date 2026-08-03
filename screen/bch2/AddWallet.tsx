@@ -17,8 +17,8 @@ import {
 } from 'react-native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2BorderRadius, BCH2Shadows } from '../../components/BCH2Theme';
 import * as bip39 from 'bip39';
-import { saveWallet, deriveBC2Address, BC2ScriptType } from '../../class/bch2-wallet-storage';
-import { getBC2Balance } from '../../blue_modules/BCH2Electrum';
+import { saveWallet, BC2ScriptType } from '../../class/bch2-wallet-storage';
+import { getBC2HdBalance } from '../../class/bch2-transaction';
 import { useScreenProtect } from '../../hooks/useScreenProtect';
 
 // BC2 script-type choices shown in the create/import picker. Native SegWit is the
@@ -31,18 +31,17 @@ const BC2_SCRIPT_TYPES: { key: BC2ScriptType; label: string; hint: string }[] = 
 ];
 
 /**
- * BlueWallet-style import discovery: derive the first receive address for each BC2
- * script type and return the one that holds funds (largest balance wins). Returns
- * null when nothing is found or the network is unreachable, so the caller can fall
- * back to the user's chosen type. Network/derivation errors per type are ignored so
- * one failure never blocks the import.
+ * BlueWallet-style import discovery: HD-scan the seed across every address (gap
+ * limit) for each BC2 script type and return the one holding the most funds.
+ * Returns null when nothing is found or the network is unreachable, so the caller
+ * falls back to the user's chosen type. Per-type failures never block the import.
  */
 async function discoverBc2ScriptType(mnemonic: string): Promise<BC2ScriptType | null> {
   const types: BC2ScriptType[] = ['native-segwit', 'legacy', 'p2sh-segwit', 'taproot'];
   let best: { type: BC2ScriptType; total: number } | null = null;
   for (const t of types) {
     try {
-      const bal = await getBC2Balance(deriveBC2Address(mnemonic, t));
+      const bal = await getBC2HdBalance(mnemonic, t);
       const total = (bal.confirmed || 0) + (bal.unconfirmed || 0);
       if (total > 0 && (!best || total > best.total)) best = { type: t, total };
     } catch {
