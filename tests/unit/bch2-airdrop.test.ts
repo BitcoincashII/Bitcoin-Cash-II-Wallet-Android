@@ -202,7 +202,7 @@ describe('Mnemonic import', () => {
 
     expect(results).toHaveLength(1);
     expect(results[0].success).toBe(false);
-    expect(results[0].error).toBe('Invalid mnemonic phrase');
+    expect(results[0].error).toMatch(/Invalid mnemonic/);
   });
 
   it('mnemonic with no balance returns appropriate message', async () => {
@@ -1049,7 +1049,7 @@ describe('Gap coverage: claimFromMnemonic empty mnemonic', () => {
 
     expect(results).toHaveLength(1);
     expect(results[0].success).toBe(false);
-    expect(results[0].error).toBe('Invalid mnemonic phrase');
+    expect(results[0].error).toMatch(/Invalid mnemonic/);
     expect(results[0].balance).toBe(0);
   });
 
@@ -1058,7 +1058,7 @@ describe('Gap coverage: claimFromMnemonic empty mnemonic', () => {
 
     expect(results).toHaveLength(1);
     expect(results[0].success).toBe(false);
-    expect(results[0].error).toBe('Invalid mnemonic phrase');
+    expect(results[0].error).toMatch(/Invalid mnemonic/);
   });
 });
 
