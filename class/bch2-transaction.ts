@@ -2978,166 +2978,6 @@ function estimateBytes(scriptType: BC2ScriptType): number {
   }
 }
 
-/**
- * Resolve the private key + output scripts for a native BC2 wallet address, spend
- * its UTXOs, and broadcast to BC2. Handles native-segwit, p2sh-segwit and taproot.
- * Legacy is delegated to sendTransaction (existing P2PKH path).
- *
- * Change returns to the wallet's own address (same script type) — never to a
- * different type, which the wallet's single-address model could not later find.
- */
-export async function sendBC2Native(
-  mnemonic: string,
-  scriptType: BC2ScriptType,
-  expectedAddress: string,
-  toAddress: string,
-  amountSats: number,
-  feePerByte: number
-): Promise<TransactionResult> {
-  if (scriptType === 'legacy') {
-    return sendTransaction(mnemonic, toAddress, amountSats, feePerByte, true, expectedAddress);
-  }
-  feePerByte = Math.ceil(feePerByte);
-  if (!Number.isFinite(feePerByte) || feePerByte < 1) feePerByte = 1;
-  if (feePerByte > 1000) throw new Error('Fee rate too high (max 1000 sat/byte)');
-  if (!Number.isInteger(amountSats) || amountSats < 0) throw new Error('Invalid amount');
-  if (amountSats < 546) throw new Error('Amount below dust threshold (546 sats)');
-
-  // Recipient + change (self) scripts. addressToScript(_, true) accepts BC2
-  // base58 + bc1 (v0) + bc1p (v1) and rejects nothing valid on BC2.
-  const recipientScript = addressToScript(toAddress, true);
-  const changeScript = addressToScript(expectedAddress, true); // self, same type
-
-  const seed = await bip39.mnemonicToSeed(mnemonic);
-  const root = bip32.fromSeed(seed);
-  let matched: BIP32Interface | null = null;
-  let tweakedPrivkey: Buffer | null = null;
-  let tweakedXonly: Buffer | null = null;
-  let privkeyCopy: Buffer | null = null;
-
-  try {
-    const purpose = scriptType === 'p2sh-segwit' ? 49 : scriptType === 'taproot' ? 86 : 84;
-    const basePaths = [`m/${purpose}'/0'/0'/0`, `m/${purpose}'/0'/0'/1`];
-
-    // Decode the target so matching is independent of address hrp/version encoding.
-    let targetHash: Buffer | null = null;      // 20-byte pubkeyhash (native) or scripthash (p2sh)
-    let targetTweakedXonly: Buffer | null = null;
-    if (scriptType === 'native-segwit') {
-      const d = decodeBech32(expectedAddress);
-      if (!d || d.version !== 0 || d.program.length !== 20) throw new Error('Invalid native SegWit (bc1) address');
-      targetHash = d.program;
-    } else if (scriptType === 'p2sh-segwit') {
-      const dec = bs58check.decode(expectedAddress); // version(1) || scriptHash(20)
-      if (dec.length !== 21) throw new Error('Invalid P2SH address');
-      targetHash = Buffer.from(dec.slice(1));
-    } else { // taproot
-      const d = decodeBech32m(expectedAddress);
-      if (!d || d.version !== 1 || d.program.length !== 32) throw new Error('Invalid Taproot (bc1p) address');
-      targetTweakedXonly = d.program;
-    }
-
-    outer:
-    for (const basePath of basePaths) {
-      for (let i = 0; i < 100; i++) {
-        const child = root.derivePath(`${basePath}/${i}`);
-        const pubkey = Buffer.from(child.publicKey);
-        if (scriptType === 'native-segwit') {
-          if (hash160(pubkey).equals(targetHash!)) { matched = child; break outer; }
-        } else if (scriptType === 'p2sh-segwit') {
-          const rs = Buffer.concat([Buffer.from([0x00, 0x14]), hash160(pubkey)]);
-          if (hash160(rs).equals(targetHash!)) { matched = child; break outer; }
-        } else { // taproot
-          const xonly = pubkey.subarray(1, 33);
-          const tweak = taggedHashBuf('TapTweak', xonly);
-          const tr = ecc.xOnlyPointAddTweak(xonly, tweak);
-          if (tr && Buffer.from(tr.xOnlyPubkey).equals(targetTweakedXonly!)) {
-            // Compute the tweaked private key (BIP341): negate d if internal pubkey has odd Y, then add tweak.
-            const priv = Buffer.from(child.privateKey!);
-            // noble's privateNegate/privateAdd each return a FRESH Uint8Array of
-            // secret bytes (Buffer.from copies them), so capture the raw returns
-            // and wipe them too — otherwise cleartext copies of the taproot
-            // spending key survive on the heap, defeating this branch's zeroing.
-            const negRaw = pubkey[0] === 0x02 ? null : ecc.privateNegate(priv);
-            const effective = negRaw ? Buffer.from(negRaw) : priv;
-            const added = ecc.privateAdd(effective, tweak);
-            if (added) {
-              tweakedPrivkey = Buffer.from(added);
-              tweakedXonly = Buffer.from(tr.xOnlyPubkey);
-              matched = child;
-            }
-            if (added) { try { crypto.randomFillSync(added); } catch {} added.fill(0); }
-            if (negRaw) { try { crypto.randomFillSync(negRaw); } catch {} negRaw.fill(0); }
-            if (effective !== priv) { crypto.randomFillSync(effective); effective.fill(0); }
-            crypto.randomFillSync(priv); priv.fill(0);
-            if (matched) break outer;
-          }
-        }
-        if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
-      }
-    }
-
-    if (!matched || !matched.privateKey) throw new Error(`Could not find private key for ${scriptType} address ${expectedAddress} in wallet`);
-    if (scriptType === 'taproot' && (!tweakedPrivkey || !tweakedXonly)) throw new Error('Failed to derive Taproot signing key');
-
-    // Fetch + validate BC2 UTXOs for the address.
-    const rawUtxos: UTXO[] = await getBC2Utxos(expectedAddress);
-    const utxos: UTXO[] = await filterMatureUtxos(rawUtxos, true);
-    const txidRegex = /^[0-9a-fA-F]{64}$/;
-    const seen = new Set<string>();
-    const MAX_UTXO_VALUE = 21_000_000 * 100_000_000;
-    for (let i = utxos.length - 1; i >= 0; i--) {
-      const u = utxos[i];
-      if (!txidRegex.test(u.txid) || !Number.isInteger(u.value) || u.value <= 0 || u.value > MAX_UTXO_VALUE ||
-          !Number.isInteger(u.vout) || u.vout < 0 || u.vout > 0xFFFFFFFF || seen.has(`${u.txid}:${u.vout}`)) {
-        utxos.splice(i, 1); continue;
-      }
-      seen.add(`${u.txid}:${u.vout}`);
-    }
-    if (utxos.length === 0) throw new Error(`No UTXOs available for ${scriptType} address ${expectedAddress}`);
-    utxos.sort((a, b) => b.value - a.value);
-
-    // Coin selection. Size the outputs by their ACTUAL scriptPubKey length — a
-    // P2TR/P2WSH output is 43 bytes, not the 34 of a P2PKH — otherwise a taproot
-    // send at the default 1 sat/vByte underpays below min-relay and is rejected.
-    const perInput = estimateBytes(scriptType);
-    const outBytes = (s: Buffer) => 8 + encodeVarInt(s.length).length + s.length; // value + varint len + script
-    const size = (ins: number, withChange: boolean) =>
-      11 + perInput * ins + outBytes(recipientScript) + (withChange ? outBytes(changeScript) : 0);
-    const selected: UTXO[] = [];
-    let totalInput = 0;
-    for (const u of utxos) {
-      selected.push(u); totalInput += u.value;
-      if (totalInput > Number.MAX_SAFE_INTEGER) throw new Error('UTXO total exceeds safe integer range');
-      if (totalInput >= amountSats + size(selected.length, true) * feePerByte || selected.length >= 500) break;
-    }
-    const fee2 = size(selected.length, true) * feePerByte;
-    const hasChange = totalInput - amountSats - fee2 > 546;
-    const fee = size(selected.length, hasChange) * feePerByte;
-    const changeAmount = hasChange ? totalInput - amountSats - fee : 0;
-    if (totalInput < amountSats + fee) {
-      if (selected.length >= 500) throw new Error('Too many UTXOs required. Please consolidate UTXOs first.');
-      throw new Error(`Insufficient funds. Need ${amountSats + fee} sats, have ${totalInput} sats`);
-    }
-
-    let txHex: string;
-    if (scriptType === 'taproot') {
-      txHex = buildBC2TaprootTx(selected, recipientScript, amountSats, hasChange ? changeScript : null, changeAmount, tweakedPrivkey!, tweakedXonly!);
-    } else {
-      privkeyCopy = Buffer.from(matched.privateKey);
-      txHex = buildBC2SegwitTx(scriptType === 'p2sh-segwit', selected, recipientScript, amountSats, hasChange ? changeScript : null, changeAmount, privkeyCopy, Buffer.from(matched.publicKey));
-    }
-
-    const txid = await broadcastBC2Transaction(txHex);
-    return { txid, hex: txHex };
-  } finally {
-    if (seed instanceof Buffer || seed instanceof Uint8Array) { try { crypto.randomFillSync(seed); } catch {} seed.fill(0); }
-    if (root.privateKey) { try { crypto.randomFillSync(root.privateKey); } catch {} root.privateKey.fill(0); }
-    if (matched && matched.privateKey) { try { crypto.randomFillSync(matched.privateKey); } catch {} matched.privateKey.fill(0); }
-    if (privkeyCopy) { try { crypto.randomFillSync(privkeyCopy); } catch {} privkeyCopy.fill(0); }
-    if (tweakedPrivkey) { try { crypto.randomFillSync(tweakedPrivkey); } catch {} tweakedPrivkey.fill(0); }
-  }
-}
-
 // ============================================================================
 // BC2 HD wallets (BlueWallet-style): gap-limit scan across receive + change
 // chains, balance aggregation, multi-address spending, fresh change addresses.
@@ -3171,6 +3011,7 @@ export interface HdScanResult {
   confirmed: number;
   unconfirmed: number;
   utxos: HdUtxo[];
+  usedAddresses: string[]; // every address with on-chain history (for tx-history aggregation)
   nextReceiveIndex: number;
   nextChangeIndex: number;
   receiveAddress: string; // next unused receive address (chain 0)
@@ -3192,6 +3033,7 @@ export async function scanBC2Hd(mnemonic: string, scriptType: BC2ScriptType): Pr
     let confirmed = 0;
     let unconfirmed = 0;
     const utxos: HdUtxo[] = [];
+    const usedAddresses: string[] = [];
     const nextIndex: [number, number] = [0, 0];
     for (const chain of [0, 1] as const) {
       const acct = root.derivePath(`m/${purpose}'/0'/0'/${chain}`);
@@ -3206,6 +3048,7 @@ export async function scanBC2Hd(mnemonic: string, scriptType: BC2ScriptType): Pr
         const info = await hdFetchWithRetries(() => getBC2AddressInfo(address));
         if (info.txCount > 0) {
           consecutiveEmpty = 0;
+          usedAddresses.push(address);
           confirmed += info.confirmed;
           unconfirmed += info.unconfirmed;
           if (info.confirmed > 0 || info.unconfirmed > 0) {
@@ -3226,7 +3069,7 @@ export async function scanBC2Hd(mnemonic: string, scriptType: BC2ScriptType): Pr
     const recvNode = root.derivePath(`m/${purpose}'/0'/0'/0/${nextIndex[0]}`);
     nodes.push(recvNode);
     const receiveAddress = bc2AddressFromPubkey(scriptType, Buffer.from(recvNode.publicKey));
-    return { confirmed, unconfirmed, utxos, nextReceiveIndex: nextIndex[0], nextChangeIndex: nextIndex[1], receiveAddress };
+    return { confirmed, unconfirmed, utxos, usedAddresses, nextReceiveIndex: nextIndex[0], nextChangeIndex: nextIndex[1], receiveAddress };
   } finally {
     if (seed instanceof Buffer || seed instanceof Uint8Array) { try { crypto.randomFillSync(seed); } catch {} seed.fill(0); }
     if (root.privateKey) { try { crypto.randomFillSync(root.privateKey); } catch {} root.privateKey.fill(0); }
@@ -3351,7 +3194,6 @@ export default {
   sendFromP2WSH,
   sendFromP2TR,
   sweepAirdropClaims,
-  sendBC2Native,
   sendBC2NativeHd,
   scanBC2Hd,
   getBC2HdBalance,

@@ -226,16 +226,35 @@ const BCH2WalletDetailWrapper: React.FC = () => {
       let txHistory: any[];
 
       if (isBC2) {
-        // HD-aggregate balance across the whole account; fall back to the primary
-        // address if the seed can't be read (e.g. locked) or the scan fails.
+        // HD: one account scan drives both the aggregate balance AND the tx history
+        // (across every used address, deduped). Fall back to the primary address if
+        // the seed can't be read (e.g. locked) or the scan fails.
         const scriptType = bc2ScriptTypeFromAddress(w.address);
-        try {
-          const mnemonic = await getWalletMnemonic(w.id);
-          balance = mnemonic ? await getBC2HdBalance(mnemonic, scriptType) : await getBC2Balance(w.address);
-        } catch {
+        let mnemonic: string | null = null;
+        try { mnemonic = await getWalletMnemonic(w.id); } catch { /* locked / unavailable */ }
+        if (mnemonic) {
+          try {
+            const scan = await scanBC2Hd(mnemonic, scriptType);
+            balance = { confirmed: scan.confirmed, unconfirmed: scan.unconfirmed };
+            const seen = new Set<string>();
+            const merged: any[] = [];
+            for (const addr of scan.usedAddresses) {
+              try {
+                for (const t of await getBC2Transactions(addr)) {
+                  if (t.tx_hash && !seen.has(t.tx_hash)) { seen.add(t.tx_hash); merged.push(t); }
+                }
+              } catch { /* skip one address's history, don't block */ }
+            }
+            merged.sort((a, b) => (b.height || Number.MAX_SAFE_INTEGER) - (a.height || Number.MAX_SAFE_INTEGER));
+            txHistory = merged;
+          } catch {
+            balance = await getBC2Balance(w.address);
+            txHistory = await getBC2Transactions(w.address);
+          }
+        } else {
           balance = await getBC2Balance(w.address);
+          txHistory = await getBC2Transactions(w.address);
         }
-        txHistory = await getBC2Transactions(w.address); // history shown for the primary address
       } else if (isBC1) {
         // bc1 addresses need scripthash-based queries
         const scripthash = bc1AddressToScripthash(w.address);

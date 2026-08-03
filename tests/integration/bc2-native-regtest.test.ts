@@ -76,7 +76,11 @@ function taggedHash(tag: string, data: Buffer): Buffer {
  *  0-input SegWit tx (version + 0x00 would read as the witness marker); then
  *  lets fundrawtransaction add change + fee. */
 function fundScript(spk: Buffer, valueSats: number): { txid: string; vout: number; value: number } {
-  const u = (jcli(['listunspent', '1']) as any[]).find(x => x.spendable);
+  // Prefer a single spendable UTXO large enough to cover the target (a coinbase),
+  // so repeated runs on a stateful node don't pick a tiny low-conf change output.
+  const unspent = jcli(['listunspent', '1']) as any[];
+  const u = unspent.find(x => x.spendable && Math.round(x.amount * 1e8) >= valueSats + 100000)
+    || unspent.find(x => x.spendable);
   if (!u) throw new Error('no spendable wallet UTXO to fund from');
   const prev = Buffer.concat([Buffer.from(u.txid, 'hex').reverse(), (() => { const b = Buffer.alloc(4); b.writeUInt32LE(u.vout); return b; })()]);
   const partial = Buffer.concat([
@@ -288,7 +292,7 @@ run('native BC2 SegWit / Taproot spends — real regtest consensus', () => {
     const spk = Buffer.concat([Buffer.from([0x51, 0x20]), tweakedXonly]); // P2TR, 34-byte script
 
     const utxo = fundScript(spk, 100_000_000);
-    // Mirror sendBC2Native's estimate: perInput(taproot)=58, outputs sized by real script length.
+    // Mirror sendBC2NativeHd's estimate: perInput(taproot)=58, outputs sized by real script length.
     const outBytes = (s: Buffer) => 8 + (s.length < 0xfd ? 1 : 3) + s.length;
     const estimate = 11 + 58 * 1 + outBytes(spk) + outBytes(spk); // 1 input, P2TR recipient + P2TR change
     const amount = 40_000_000;
