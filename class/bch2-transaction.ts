@@ -2571,7 +2571,16 @@ export async function sweepAirdropClaims(
     for (const claim of claims) {
       // Only legacy P2PKH is swept here (see scope note above).
       if ((claim.addressType || 'legacy') !== 'legacy' || !claim.derivationPath) {
-        if (claim.balance > 0) skipped.push({ address: claim.bch2Address, balance: claim.balance, reason: `Unsupported script type for auto-sweep (${claim.addressType || 'unknown'}) — recover manually` });
+        if (claim.balance > 0) {
+          const t = claim.addressType || 'unknown';
+          // Honest reason: SegWit-typed BCH2 outputs are anyone-can-spend on a
+          // no-SegWit chain and cannot be safely recovered; P2PK is recoverable
+          // but not by this legacy-only sweep.
+          const reason = (t === 'bc1' || t === 'p2sh-segwit' || t === 'p2tr')
+            ? `Held at a SegWit-type address (${t}); on BCH2 (no SegWit) these outputs are anyone-can-spend and cannot be safely recovered`
+            : `Script type ${t} not handled by auto-consolidation — recoverable from your recovery phrase with other tooling`;
+          skipped.push({ address: claim.bch2Address, balance: claim.balance, reason });
+        }
         continue;
       }
       let child: BIP32Interface;

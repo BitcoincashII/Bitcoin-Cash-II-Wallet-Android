@@ -18,39 +18,11 @@ import {
   isBiometricEnabled,
   authenticateWithBiometric,
   getAutoLockTimeout,
+  readUnlockAttempts,
+  readLockedUntil,
+  recordFailedAttempt,
+  clearFailedAttempts,
 } from './screen/bch2/BCH2AppPassword';
-
-// Persistent brute-force state (survives app restart, unlike React state).
-const UNLOCK_ATTEMPTS_KEY = '@bch2_unlock_attempts';
-const LOCKED_UNTIL_KEY = '@bch2_locked_until';
-const BACKOFF_AFTER = 5;           // free attempts before backoff kicks in
-const BACKOFF_BASE_SEC = 30;       // first backoff delay
-const BACKOFF_MAX_SEC = 3600;      // cap at 1 hour
-
-async function readUnlockAttempts(): Promise<number> {
-  const v = parseInt((await AsyncStorage.getItem(UNLOCK_ATTEMPTS_KEY)) || '0', 10);
-  return Number.isFinite(v) && v > 0 ? v : 0;
-}
-async function readLockedUntil(): Promise<number> {
-  const v = parseInt((await AsyncStorage.getItem(LOCKED_UNTIL_KEY)) || '0', 10);
-  return Number.isFinite(v) && v > 0 ? v : 0;
-}
-// Record a failed attempt and compute the lockout expiry. Persisted so it
-// cannot be reset by killing or backgrounding the app.
-async function recordFailedAttempt(): Promise<{ attempts: number; lockedUntil: number }> {
-  const attempts = (await readUnlockAttempts()) + 1;
-  await AsyncStorage.setItem(UNLOCK_ATTEMPTS_KEY, String(attempts));
-  let lockedUntil = 0;
-  if (attempts >= BACKOFF_AFTER) {
-    const delaySec = Math.min(BACKOFF_BASE_SEC * 2 ** (attempts - BACKOFF_AFTER), BACKOFF_MAX_SEC);
-    lockedUntil = Date.now() + delaySec * 1000;
-    await AsyncStorage.setItem(LOCKED_UNTIL_KEY, String(lockedUntil));
-  }
-  return { attempts, lockedUntil };
-}
-async function clearFailedAttempts(): Promise<void> {
-  await AsyncStorage.multiRemove([UNLOCK_ATTEMPTS_KEY, LOCKED_UNTIL_KEY]);
-}
 
 // BCH2 Dark Theme
 const BCH2Theme = {
@@ -129,7 +101,15 @@ const BCH2App: React.FC = () => {
           }
         }
       } catch (e) {
+        // FAIL CLOSED: if we can't determine lock status on resume and a lock
+        // was ever configured, re-lock rather than leave the wallet open.
         console.log('Auto-lock error:', e);
+        if (lockConfiguredRef.current && !lockedRef.current) {
+          setPasswordConfigured(true);
+          setLocked(true);
+          setPasswordInput('');
+          setPasswordError('');
+        }
       }
       appState.current = nextAppState;
     });
@@ -146,6 +126,10 @@ const BCH2App: React.FC = () => {
 
   const initializeApp = async () => {
     setIsConnecting(true);
+    // FAIL CLOSED: assume locked until we POSITIVELY determine no lock is
+    // configured. If the lock-status probe throws (AsyncStorage error/corruption),
+    // the app must NOT fall through to an unlocked wallet.
+    setLocked(true);
     try {
       const passwordSet = await isAppPasswordSet();
       const bioEnabled = await isBiometricEnabled();
@@ -162,18 +146,19 @@ const BCH2App: React.FC = () => {
       if (passwordSet || bioEnabled) {
         setUnlockAttempts(await readUnlockAttempts());
         setLockedUntil(await readLockedUntil());
-        setLocked(true);
-        // Auto-trigger biometric if available
+        // stays locked (set above); auto-trigger biometric if available
         if (available && bioEnabled) {
           setTimeout(() => tryBiometricUnlock(), 400);
         }
       } else {
-        // No lock configured — the session is effectively unlocked.
+        // Definitive result: no lock configured — unlock the session.
         unlockedRef.current = true;
+        setLocked(false);
       }
       setConnectionStatus('connected');
     } catch (error) {
-      console.log('Initial connection attempt failed, will retry on demand');
+      // Could not determine lock status — stay LOCKED (fail closed), never open.
+      console.log('Lock-status probe failed; staying locked (fail-closed)');
       setConnectionStatus('offline');
     } finally {
       setIsConnecting(false);

@@ -113,6 +113,37 @@ export async function setAutoLockTimeout(seconds: number): Promise<void> {
   await AsyncStorage.setItem(AUTO_LOCK_TIMEOUT_KEY, String(seconds));
 }
 
+// --- Persistent brute-force lockout (shared by the app-lock AND the seed-export
+// re-auth prompt). Survives app restart, unlike React state. ---
+const UNLOCK_ATTEMPTS_KEY = '@bch2_unlock_attempts';
+const LOCKED_UNTIL_KEY = '@bch2_locked_until';
+const BACKOFF_AFTER = 5;      // free attempts before backoff kicks in
+const BACKOFF_BASE_SEC = 30;  // first backoff delay
+const BACKOFF_MAX_SEC = 3600; // cap at 1 hour
+
+export async function readUnlockAttempts(): Promise<number> {
+  const v = parseInt((await AsyncStorage.getItem(UNLOCK_ATTEMPTS_KEY)) || '0', 10);
+  return Number.isFinite(v) && v > 0 ? v : 0;
+}
+export async function readLockedUntil(): Promise<number> {
+  const v = parseInt((await AsyncStorage.getItem(LOCKED_UNTIL_KEY)) || '0', 10);
+  return Number.isFinite(v) && v > 0 ? v : 0;
+}
+export async function recordFailedAttempt(): Promise<{ attempts: number; lockedUntil: number }> {
+  const attempts = (await readUnlockAttempts()) + 1;
+  await AsyncStorage.setItem(UNLOCK_ATTEMPTS_KEY, String(attempts));
+  let lockedUntil = 0;
+  if (attempts >= BACKOFF_AFTER) {
+    const delaySec = Math.min(BACKOFF_BASE_SEC * 2 ** (attempts - BACKOFF_AFTER), BACKOFF_MAX_SEC);
+    lockedUntil = Date.now() + delaySec * 1000;
+    await AsyncStorage.setItem(LOCKED_UNTIL_KEY, String(lockedUntil));
+  }
+  return { attempts, lockedUntil };
+}
+export async function clearFailedAttempts(): Promise<void> {
+  await AsyncStorage.multiRemove([UNLOCK_ATTEMPTS_KEY, LOCKED_UNTIL_KEY]);
+}
+
 export async function getAppPassword(): Promise<string | null> {
   return AsyncStorage.getItem(APP_PASSWORD_KEY);
 }

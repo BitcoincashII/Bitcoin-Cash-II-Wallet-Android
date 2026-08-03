@@ -18,7 +18,7 @@ import {
 } from 'react-native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2Shadows, BCH2BorderRadius } from '../../components/BCH2Theme';
 import { getWalletMnemonic } from '../../class/bch2-wallet-storage';
-import { requireReauth, verifyAppPassword } from './BCH2AppPassword';
+import { requireReauth, verifyAppPassword, readLockedUntil, recordFailedAttempt, clearFailedAttempts } from './BCH2AppPassword';
 import { useScreenProtect } from '../../hooks/useScreenProtect';
 import { getBCH2TransactionUrl, getBC2TransactionUrl, getBCH2BlockUrl, getBC2BlockUrl } from '../../class/bch2-constants';
 
@@ -159,13 +159,29 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
   };
 
   const submitReauthPassword = async () => {
+    // Share the app-lock's persistent brute-force lockout so seed-reveal guesses
+    // are throttled (exponential backoff), not unlimited.
+    const until = await readLockedUntil();
+    if (until > Date.now()) {
+      const secs = Math.ceil((until - Date.now()) / 1000);
+      setReauthError(`Too many attempts. Try again in ${secs}s.`);
+      setReauthPassword('');
+      return;
+    }
     if (await verifyAppPassword(reauthPassword)) {
+      await clearFailedAttempts();
       setReauthVisible(false);
       setReauthPassword('');
       await revealMnemonic();
     } else {
-      setReauthError('Incorrect password');
+      const { lockedUntil } = await recordFailedAttempt();
       setReauthPassword('');
+      if (lockedUntil > Date.now()) {
+        const secs = Math.ceil((lockedUntil - Date.now()) / 1000);
+        setReauthError(`Incorrect password. Locked for ${secs}s.`);
+      } else {
+        setReauthError('Incorrect password');
+      }
     }
   };
 
