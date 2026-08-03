@@ -1652,10 +1652,11 @@ describe('sendTransaction UTXO dedup - invalid txid regex', () => {
     ];
     mockGetUtxosByAddress.mockResolvedValue(utxos);
 
-    // All UTXOs invalid => after filtering, empty => insufficient funds
+    // All UTXOs have invalid txids => filtered out => "No valid UTXOs after
+    // validation" (a data-quality error, distinct from genuine "Insufficient funds").
     await expect(
       sendTransaction(TEST_MNEMONIC, DEST_CASHADDR, 50_000, 1, false),
-    ).rejects.toThrow(/Insufficient funds/);
+    ).rejects.toThrow(/No valid UTXOs/);
   });
 
   it('filters out UTXOs with wrong length txid (32 hex chars instead of 64)', async () => {

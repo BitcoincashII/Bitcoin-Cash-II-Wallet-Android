@@ -18,7 +18,14 @@ const mockBlockchainTransaction_broadcast = jest.fn();
 const mockBlockchainTransaction_get = jest.fn();
 const mockBlockchainEstimatefee = jest.fn();
 
-function createMockClient() {
+function createMockClient(host?: string) {
+  // connectMain/connectBC2 call verifyPinnedSpki(client.conn.getPeerCertificate()).
+  // Provide the pinned full-cert fingerprint for the requested server so pinning
+  // PASSES — otherwise it throws on every attempt and connectMain spins its
+  // retry-delay loop, which the tests' fake timers can't advance (→ 5s hangs).
+  const fingerprint256 = host && host.includes('bc2')
+    ? '64660131e5ad82b54c6c88b8131c8931283b197a382fc08c698c73ddc3d58c61'  // bc2electrum.bch2.org
+    : '622849af0ced546f3ab24870eda5d63e36df7f302892b1cb36a89a73228a8fc6'; // electrum.bch2.org
   return {
     initElectrum: mockInitElectrum,
     blockchainHeaders_subscribe: mockBlockchainHeaders_subscribe,
@@ -28,13 +35,15 @@ function createMockClient() {
     blockchainTransaction_broadcast: mockBlockchainTransaction_broadcast,
     blockchainTransaction_get: mockBlockchainTransaction_get,
     blockchainEstimatefee: mockBlockchainEstimatefee,
+    conn: { getPeerCertificate: () => ({ fingerprint256 }) },
+    close: () => {},
     onError: null as any,
     onClose: null as any,
   };
 }
 
 jest.mock('electrum-client', () => {
-  return jest.fn().mockImplementation(() => createMockClient());
+  return jest.fn().mockImplementation((_net: any, _tls: any, _port: any, host: string) => createMockClient(host));
 });
 
 jest.mock('react-native-default-preference', () => ({
@@ -961,11 +970,13 @@ describe('BCH2Electrum', () => {
     });
 
     describe('broadcastBC2Transaction', () => {
-      // Valid hex string >= 20 chars for broadcastBC2Transaction input validation
-      const VALID_BC2_TX_HEX = '0200000001abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890';
+      // A REAL legacy tx + its txid, so the broadcast txid-verification passes when
+      // the mocked server returns the matching id.
+      const VALID_BC2_TX_HEX = '0200000001c257fc0059cc360dd3e93c495b8b2daca06a8dcb740f721a996a4760f1adec4f010000006a4730440220716cff0d9f79f662aed47bd7ef38a9ae11fdb612b336f644a68aec0de4f71ec40220663fa8ec699e61a0e2b44356823fdd0ca33cefaad79aecef7343a94aa96e5b1c01210231a1bc6e5328c8c5abc5c5501d27f352e7e8e58d7a84af7f1c75e0c3ef17dfd1fdffffff029df67101000000001976a914f63b01a980933a814efd0af25103c92408d51f4988aca0690f0400000000160014bd01a19927956467fe8b8c69fb50619e3a155329c8e00000';
+      const REAL_BC2_TXID = 'a4d42079b4037a9d55ef27958b88f8479c3d73e06a5607579a7d9c0f412ee12f';
 
       it('broadcasts via explorer API and returns txid', async () => {
-        const validTxid = 'a'.repeat(64);
+        const validTxid = REAL_BC2_TXID;
         mockFetch.mockResolvedValueOnce({
           ok: true,
           text: () => Promise.resolve(validTxid),
@@ -986,7 +997,7 @@ describe('BCH2Electrum', () => {
       });
 
       it('extracts txid from JSON-wrapped response', async () => {
-        const validTxid = 'b'.repeat(64);
+        const validTxid = REAL_BC2_TXID;
         mockFetch.mockResolvedValueOnce({
           ok: true,
           text: () => Promise.resolve(JSON.stringify({ txid: validTxid })),
@@ -1004,7 +1015,7 @@ describe('BCH2Electrum', () => {
           status: 500,
           text: () => Promise.resolve('Internal Server Error'),
         });
-        const validTxid = 'c'.repeat(64);
+        const validTxid = REAL_BC2_TXID;
         mockBlockchainTransaction_broadcast.mockResolvedValue(validTxid);
         const mod = getFreshModule();
 
