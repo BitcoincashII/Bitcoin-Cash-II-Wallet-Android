@@ -3100,10 +3100,13 @@ export async function sendBC2NativeHd(
   const keyBuffers: Buffer[] = [];
   try {
     // Private account node; its neutered xpub drives the (watch-only) scan and its
-    // children sign. Deriving each chain node once lets us wipe them all in finally.
+    // children sign. Register each node for wiping AS it is derived, so nothing
+    // escapes the finally-block zeroing even if a derivation throws.
     const account = root.derivePath(`m/${purpose}'/0'/0'`);
-    const chainNodes = [account.derive(0), account.derive(1)];
-    derivedNodes.push(account, chainNodes[0], chainNodes[1]);
+    derivedNodes.push(account);
+    const chain0 = account.derive(0); derivedNodes.push(chain0);
+    const chain1 = account.derive(1); derivedNodes.push(chain1);
+    const chainNodes = [chain0, chain1];
 
     const scan = await scanBC2Hd(account.neutered().toBase58(), scriptType);
     const available = scan.utxos.slice().sort((a, b) => b.value - a.value);

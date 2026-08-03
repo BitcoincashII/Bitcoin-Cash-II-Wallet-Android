@@ -226,6 +226,7 @@ const BCH2WalletDetailWrapper: React.FC = () => {
 
       let balance: { confirmed: number; unconfirmed: number };
       let txHistory: any[];
+      let resolvedXpub: string | undefined; // cache a backfilled xpub into state so refresh doesn't re-read the seed
 
       if (isBC2) {
         // HD: one account scan drives both the aggregate balance AND the tx history
@@ -236,6 +237,7 @@ const BCH2WalletDetailWrapper: React.FC = () => {
           // Watch-only: derive/read the account xpub (seed touched at most once, to
           // backfill an older wallet), then scan without the seed.
           const xpub = await getBC2AccountXpub(w, scriptType);
+          resolvedXpub = xpub;
           const scan = await scanBC2Hd(xpub, scriptType);
           balance = { confirmed: scan.confirmed, unconfirmed: scan.unconfirmed };
           const seen = new Set<string>();
@@ -278,11 +280,14 @@ const BCH2WalletDetailWrapper: React.FC = () => {
 
       setTransactions(formattedTxs);
 
-      // Update wallet with new balance (both React state and persistent storage)
+      // Update wallet with new balance (both React state and persistent storage).
+      // Also cache a freshly-backfilled xpub so pull-to-refresh short-circuits the
+      // getBC2AccountXpub seed read instead of re-reading the Keystore each time.
       setWallet(prev => prev ? {
         ...prev,
         balance: balance.confirmed,
         unconfirmedBalance: balance.unconfirmed,
+        ...(resolvedXpub && !prev.xpub ? { xpub: resolvedXpub } : {}),
       } : null);
       updateWalletBalance(w.id, balance.confirmed, balance.unconfirmed).catch(() => {});
     } catch (error) {
