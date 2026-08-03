@@ -2563,6 +2563,10 @@ export async function sweepAirdropClaims(
 
   const inputs: Array<{ utxo: UTXO; publicKey: Buffer; privateKey: Buffer }> = [];
   const skipped: SweepResult['skipped'] = [];
+  // Track EVERY derived private-key buffer (incl. those on skip paths) so they
+  // are all zeroed in the finally, matching buildTransaction's key hygiene.
+  const derivedKeys: Buffer[] = [];
+  const derivedNodes: BIP32Interface[] = [];
   try {
     for (const claim of claims) {
       // Only legacy P2PKH is swept here (see scope note above).
@@ -2577,8 +2581,10 @@ export async function sweepAirdropClaims(
         skipped.push({ address: claim.bch2Address, balance: claim.balance, reason: 'Could not derive key for path' });
         continue;
       }
+      derivedNodes.push(child);
       const publicKey = Buffer.from(child.publicKey);
       const privateKey = child.privateKey ? Buffer.from(child.privateKey) : null;
+      if (privateKey) derivedKeys.push(privateKey);
       // Sanity: the derived key must actually control the claimed address, else
       // we would sign for the wrong output. Compare normalized (prefixed) forms.
       const norm = (a: string) => (a.toLowerCase().startsWith('bitcoincashii:') ? a.toLowerCase() : 'bitcoincashii:' + a.toLowerCase());
@@ -2592,6 +2598,12 @@ export async function sweepAirdropClaims(
         utxos = await getUtxosByAddress(claim.bch2Address);
       } catch {
         skipped.push({ address: claim.bch2Address, balance: claim.balance, reason: 'Could not fetch UTXOs (network)' });
+        continue;
+      }
+      // Empty resolve (funds moved/spent between scan and sweep, or a transient
+      // indexer gap): account for the balance so the honest UI still reports it.
+      if (utxos.length === 0) {
+        if (claim.balance > 0) skipped.push({ address: claim.bch2Address, balance: claim.balance, reason: 'No spendable UTXOs found at sweep time — recoverable from your recovery phrase' });
         continue;
       }
       for (const u of utxos) inputs.push({ utxo: u, publicKey, privateKey });
@@ -2656,9 +2668,11 @@ export async function sweepAirdropClaims(
       skipped,
     };
   } finally {
-    // Zero key material.
+    // Zero ALL key material (seed, master key, every derived node + key copy).
     if (seed instanceof Buffer || seed instanceof Uint8Array) seed.fill(0);
-    for (const i of inputs) { try { i.privateKey.fill(0); } catch {} }
+    try { if (root.privateKey) { crypto.randomFillSync(root.privateKey); root.privateKey.fill(0); } } catch {}
+    for (const n of derivedNodes) { try { if (n.privateKey) { crypto.randomFillSync(n.privateKey); n.privateKey.fill(0); } } catch {} }
+    for (const k of derivedKeys) { try { crypto.randomFillSync(k); k.fill(0); } catch {} }
   }
 }
 

@@ -1349,7 +1349,11 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
       continue;
     }
 
-    const minScan = desc.nextIndex ? desc.nextIndex + DESCRIPTOR_GAP_LIMIT : 0;
+    // Clamp a (possibly malformed/huge) next_index so it can't drive an
+    // effectively unbounded scan now that scanCeiling honors minScan (#22).
+    const DESCRIPTOR_HARD_MAX = 100000;
+    const rawNext = desc.nextIndex && desc.nextIndex > 0 ? Math.min(desc.nextIndex, DESCRIPTOR_HARD_MAX) : 0;
+    const minScan = rawNext ? rawNext + DESCRIPTOR_GAP_LIMIT : 0;
     const originPrefix = desc.originPath ? `m/${desc.originPath}` : '';
     try {
       if (node.depth >= 5) {
@@ -1546,12 +1550,21 @@ export function buildScanResult(results: AirdropClaimResult[]): AirdropScanResul
     return sum + Math.min(c.balance, bc2);
   }, 0);
 
-  return {
+  const result: AirdropScanResult = {
     totalBalance,
     airdropBalance,
     postForkBalance: totalBalance - airdropBalance,
     claims,
   };
+  // MEDIUM #24: if nothing spendable was found but the scan reported a network
+  // error (aborted, not confirmed-empty), propagate it so the UI can say
+  // "network error, try again" instead of "no funds". Without this the error
+  // set by claimFromMnemonic/claimFromWIF is filtered out above and lost.
+  if (claims.length === 0) {
+    const netErr = results.find(r => !r.success && r.error && /network/i.test(r.error));
+    if (netErr) result.error = netErr.error;
+  }
+  return result;
 }
 
 export default {

@@ -225,6 +225,10 @@ export const ClaimAirdropScreen: React.FC = () => {
   const [walletConfirmPassword, setWalletConfirmPassword] = useState('');
   const [passwordError, setPasswordError] = useState('');
   const [importing, setImporting] = useState(false);
+  // Synchronous in-flight guard — the state flag alone can't stop a second
+  // trigger (keyboard "Done" onSubmit) firing before React re-renders, which
+  // would import twice and broadcast the sweep twice.
+  const importingRef = useRef(false);
 
   const claimPasswordRef = useRef<PasswordInputHandle>(null);
   const claimConfirmPasswordRef = useRef<PasswordInputHandle>(null);
@@ -421,6 +425,7 @@ export const ClaimAirdropScreen: React.FC = () => {
   }, [storedCredentials, scanResult]);
 
   const handleClaimWithPassword = useCallback(async () => {
+    if (importingRef.current) return; // already importing — ignore re-entry
     setPasswordError('');
 
     if (walletPassword.length < 8) {
@@ -437,6 +442,7 @@ export const ClaimAirdropScreen: React.FC = () => {
       return;
     }
 
+    importingRef.current = true;
     setImporting(true);
     try {
       const wallet = await saveWallet('Claimed BCH2 Wallet', storedCredentials!.value, 'bch2');
@@ -481,6 +487,7 @@ export const ClaimAirdropScreen: React.FC = () => {
     } catch (error: any) {
       Alert.alert('Import Failed', 'Failed to import wallet');
     } finally {
+      importingRef.current = false;
       setImporting(false);
     }
   }, [walletPassword, walletConfirmPassword, storedCredentials, scanResult, passphrase, navigation]);
@@ -843,7 +850,11 @@ export const ClaimAirdropScreen: React.FC = () => {
         {!hasClaims && (
           <View style={styles.emptyCard}>
             <Text style={styles.emptyText}>
-              No BCH2 balance found for this wallet. Make sure you had BC2 balance at fork block 53,200.
+              {/* MEDIUM #24: a scan aborted by network errors must NOT read as a
+                  confirmed-empty wallet — show the network error and prompt retry. */}
+              {scanResult?.error
+                ? scanResult.error
+                : 'No BCH2 balance found for this wallet. Make sure you had BC2 balance at fork block 53,200.'}
             </Text>
           </View>
         )}
@@ -965,7 +976,8 @@ export const ClaimAirdropScreen: React.FC = () => {
                 <Text style={[styles.successSubtitle, { marginTop: 8 }]}>
                   {formatBalance(sweepResult.skipped.reduce((s, x) => s + x.balance, 0))} BCH2 at
                   {' '}{sweepResult.skipped.length} address(es) could not be auto-consolidated and
-                  remains recoverable from your recovery phrase.
+                  remains recoverable from your recovery phrase
+                  {passphrase ? ' plus the BIP39 passphrase you entered (this wallet does not store the passphrase — keep it safe)' : ''}.
                 </Text>
               )}
             </>
