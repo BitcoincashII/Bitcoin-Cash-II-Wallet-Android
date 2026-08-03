@@ -1,0 +1,21 @@
+diff --git a/node_modules/react-native-tcp-socket/android/src/main/java/com/asterinet/react/tcpsocket/SSLCertificateHelper.java b/node_modules/react-native-tcp-socket/android/src/main/java/com/asterinet/react/tcpsocket/SSLCertificateHelper.java
+--- a/node_modules/react-native-tcp-socket/android/src/main/java/com/asterinet/react/tcpsocket/SSLCertificateHelper.java
++++ b/node_modules/react-native-tcp-socket/android/src/main/java/com/asterinet/react/tcpsocket/SSLCertificateHelper.java
+@@ -262,9 +262,14 @@
+                     certDetails.putMap("subject", parseDN(cert.getSubjectDN().getName()));
+                     certDetails.putMap("issuer", parseDN(cert.getIssuerDN().getName()));
+                     certDetails.putBoolean("ca", cert.getBasicConstraints() != -1);
+-                    certDetails.putString("modulus", getModulus(cert));
+-                    certDetails.putInt("bits", getModulusBitLength(cert));
+-                    certDetails.putString("exponent", "0x" + getExponent(cert));
++                    // modulus/bits/exponent are RSA-only; guard the RSA cast so an
++                    // EC (e.g. ECDSA Let's Encrypt) leaf cert does not throw and
++                    // wipe out pubkey/fingerprint256 (needed for SPKI pinning).
++                    if (cert.getPublicKey() instanceof java.security.interfaces.RSAPublicKey) {
++                        certDetails.putString("modulus", getModulus(cert));
++                        certDetails.putInt("bits", getModulusBitLength(cert));
++                        certDetails.putString("exponent", "0x" + getExponent(cert));
++                    }
+                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                         certDetails.putString("pubkey", Base64.getEncoder().encodeToString(cert.getPublicKey().getEncoded()));
+                     }
