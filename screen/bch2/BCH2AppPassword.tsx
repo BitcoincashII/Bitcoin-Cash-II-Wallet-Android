@@ -15,15 +15,40 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { sha256 } from '@noble/hashes/sha256';
-import { bytesToHex } from '@noble/hashes/utils';
+import { scrypt } from '@noble/hashes/scrypt';
+import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import ReactNativeBiometrics from 'react-native-biometrics';
+import { randomBytes } from '../../class/rng';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2BorderRadius } from '../../components/BCH2Theme';
 
 const APP_PASSWORD_KEY = '@bch2_app_password';
 const BIOMETRIC_ENABLED_KEY = '@bch2_biometric_enabled';
 const AUTO_LOCK_TIMEOUT_KEY = '@bch2_auto_lock_timeout';
 
+const MIN_PASSWORD_LENGTH = 6;
+// scrypt params: memory-hard, ~sub-second on-device for a one-shot unlock.
+const SCRYPT_PARAMS = { N: 2 ** 14, r: 8, p: 1, dkLen: 32 } as const;
+
 const rnBiometrics = new ReactNativeBiometrics({ allowDeviceCredentials: true });
+
+// Constant-time comparison of two equal-length hex strings.
+function timingSafeEqualHex(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+function derivePasswordHash(password: string, saltHex: string): string {
+  return bytesToHex(scrypt(new TextEncoder().encode(password), hexToBytes(saltHex), SCRYPT_PARAMS));
+}
+
+// Persist a password as a salted scrypt record: {"v":2,"salt":hex,"hash":hex}.
+async function persistPassword(password: string): Promise<void> {
+  const salt = bytesToHex(await randomBytes(16));
+  const hash = derivePasswordHash(password, salt);
+  await AsyncStorage.setItem(APP_PASSWORD_KEY, JSON.stringify({ v: 2, salt, hash }));
+}
 
 // --- Biometric helpers ---
 
@@ -56,6 +81,26 @@ export async function authenticateWithBiometric(): Promise<boolean> {
   }
 }
 
+/**
+ * Gate a sensitive action (e.g. revealing the recovery phrase) behind re-auth.
+ * Returns:
+ *  - 'ok'            — authenticated (biometric/device credential) or no lock configured
+ *  - 'need-password' — biometric unavailable but an app password is set; the
+ *                      caller must collect and verify the password
+ *  - 'denied'        — a lock is configured but authentication failed
+ */
+export async function requireReauth(): Promise<'ok' | 'need-password' | 'denied'> {
+  const bioEnabled = await isBiometricEnabled();
+  const passwordSet = await isAppPasswordSet();
+  if (!bioEnabled && !passwordSet) return 'ok'; // nothing to authenticate against
+  if (bioEnabled) {
+    return (await authenticateWithBiometric()) ? 'ok' : (passwordSet ? 'need-password' : 'denied');
+  }
+  // Password-only: try device credential first (covers most devices), else prompt.
+  if (await authenticateWithBiometric()) return 'ok';
+  return 'need-password';
+}
+
 // --- Auto-lock timeout helpers ---
 // Values in seconds: 0 = immediate, 30, 60, 300, -1 = never
 export async function getAutoLockTimeout(): Promise<number> {
@@ -72,11 +117,31 @@ export async function getAppPassword(): Promise<string | null> {
   return AsyncStorage.getItem(APP_PASSWORD_KEY);
 }
 
+export async function isAppPasswordSet(): Promise<boolean> {
+  return !!(await AsyncStorage.getItem(APP_PASSWORD_KEY));
+}
+
 export async function verifyAppPassword(input: string): Promise<boolean> {
   const stored = await AsyncStorage.getItem(APP_PASSWORD_KEY);
-  if (!stored) return true; // No password set
-  const hash = bytesToHex(sha256(new TextEncoder().encode(input)));
-  return hash === stored;
+  if (!stored) return false; // Fail closed — no password means the password path cannot unlock.
+  // v2: salted scrypt.
+  try {
+    const parsed = JSON.parse(stored);
+    if (parsed && parsed.v === 2 && typeof parsed.salt === 'string' && typeof parsed.hash === 'string') {
+      const hash = derivePasswordHash(input, parsed.salt);
+      return timingSafeEqualHex(hash, parsed.hash);
+    }
+  } catch {
+    // not JSON — fall through to legacy check
+  }
+  // Legacy v1: unsalted single-round SHA-256 hex. Verify, then transparently
+  // upgrade to a salted scrypt record on success.
+  const legacyHash = bytesToHex(sha256(new TextEncoder().encode(input)));
+  if (stored.length === legacyHash.length && timingSafeEqualHex(legacyHash, stored)) {
+    try { await persistPassword(input); } catch {}
+    return true;
+  }
+  return false;
 }
 
 interface Props {
@@ -101,16 +166,15 @@ const BCH2AppPassword: React.FC<Props> = ({ navigation }) => {
   };
 
   const handleSetPassword = async () => {
-    if (newPassword.length < 4) {
-      Alert.alert('Error', 'Password must be at least 4 characters');
+    if (newPassword.length < MIN_PASSWORD_LENGTH) {
+      Alert.alert('Error', `Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
       return;
     }
     if (newPassword !== confirmPassword) {
       Alert.alert('Error', 'Passwords do not match');
       return;
     }
-    const hash = bytesToHex(sha256(new TextEncoder().encode(newPassword)));
-    await AsyncStorage.setItem(APP_PASSWORD_KEY, hash);
+    await persistPassword(newPassword);
     setHasPassword(true);
     setNewPassword('');
     setConfirmPassword('');
@@ -118,9 +182,8 @@ const BCH2AppPassword: React.FC<Props> = ({ navigation }) => {
   };
 
   const handleRemovePassword = async () => {
-    const hash = bytesToHex(sha256(new TextEncoder().encode(currentPassword)));
-    const stored = await AsyncStorage.getItem(APP_PASSWORD_KEY);
-    if (hash !== stored) {
+    // Require the current password before removing the lock (fail closed).
+    if (!(await verifyAppPassword(currentPassword))) {
       Alert.alert('Error', 'Current password is incorrect');
       return;
     }

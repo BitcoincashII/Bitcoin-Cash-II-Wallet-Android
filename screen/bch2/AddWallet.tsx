@@ -37,18 +37,18 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
   const [mnemonic, setMnemonic] = useState('');
   const [importMnemonic, setImportMnemonic] = useState('');
   const [walletLabel, setWalletLabel] = useState('');
-  const { enableScreenProtect, disableScreenProtect } = useScreenProtect();
+  const { enableScreenProtect } = useScreenProtect();
 
-  // Enable screenshot protection when mnemonic is displayed or being imported
+  // Ensure screenshot protection while a mnemonic is displayed or imported.
+  // NOTE: we never call disableScreenProtect() here — MainActivity sets
+  // FLAG_SECURE app-wide, and toggling it off would clear that baseline
+  // protection for the entire app (not just this screen).
   useEffect(() => {
     const showsMnemonic = mnemonic && (mode === 'create-bch2' || mode === 'create-bc2');
     const importingMnemonic = importMnemonic && (mode === 'import-bch2' || mode === 'import-bc2');
     if (showsMnemonic || importingMnemonic) {
       enableScreenProtect();
-    } else {
-      disableScreenProtect();
     }
-    return () => { disableScreenProtect(); };
   }, [mnemonic, importMnemonic, mode]);
 
   // Clear sensitive state on unmount

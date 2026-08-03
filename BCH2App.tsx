@@ -4,7 +4,7 @@
  */
 
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { StatusBar, View, Text, TextInput, TouchableOpacity, StyleSheet, ActivityIndicator, AppState, Alert } from 'react-native';
+import { StatusBar, View, Text, TextInput, TouchableOpacity, StyleSheet, ActivityIndicator, AppState } from 'react-native';
 import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { BCH2Navigator } from './navigation/BCH2Navigator';
@@ -12,7 +12,7 @@ import { BCH2Colors } from './components/BCH2Theme';
 import BCH2Electrum from './blue_modules/BCH2Electrum';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
-  getAppPassword,
+  isAppPasswordSet,
   verifyAppPassword,
   isBiometricAvailable,
   isBiometricEnabled,
@@ -20,7 +20,37 @@ import {
   getAutoLockTimeout,
 } from './screen/bch2/BCH2AppPassword';
 
-const MAX_UNLOCK_ATTEMPTS = 10;
+// Persistent brute-force state (survives app restart, unlike React state).
+const UNLOCK_ATTEMPTS_KEY = '@bch2_unlock_attempts';
+const LOCKED_UNTIL_KEY = '@bch2_locked_until';
+const BACKOFF_AFTER = 5;           // free attempts before backoff kicks in
+const BACKOFF_BASE_SEC = 30;       // first backoff delay
+const BACKOFF_MAX_SEC = 3600;      // cap at 1 hour
+
+async function readUnlockAttempts(): Promise<number> {
+  const v = parseInt((await AsyncStorage.getItem(UNLOCK_ATTEMPTS_KEY)) || '0', 10);
+  return Number.isFinite(v) && v > 0 ? v : 0;
+}
+async function readLockedUntil(): Promise<number> {
+  const v = parseInt((await AsyncStorage.getItem(LOCKED_UNTIL_KEY)) || '0', 10);
+  return Number.isFinite(v) && v > 0 ? v : 0;
+}
+// Record a failed attempt and compute the lockout expiry. Persisted so it
+// cannot be reset by killing or backgrounding the app.
+async function recordFailedAttempt(): Promise<{ attempts: number; lockedUntil: number }> {
+  const attempts = (await readUnlockAttempts()) + 1;
+  await AsyncStorage.setItem(UNLOCK_ATTEMPTS_KEY, String(attempts));
+  let lockedUntil = 0;
+  if (attempts >= BACKOFF_AFTER) {
+    const delaySec = Math.min(BACKOFF_BASE_SEC * 2 ** (attempts - BACKOFF_AFTER), BACKOFF_MAX_SEC);
+    lockedUntil = Date.now() + delaySec * 1000;
+    await AsyncStorage.setItem(LOCKED_UNTIL_KEY, String(lockedUntil));
+  }
+  return { attempts, lockedUntil };
+}
+async function clearFailedAttempts(): Promise<void> {
+  await AsyncStorage.multiRemove([UNLOCK_ATTEMPTS_KEY, LOCKED_UNTIL_KEY]);
+}
 
 // BCH2 Dark Theme
 const BCH2Theme = {
@@ -45,12 +75,16 @@ const BCH2App: React.FC = () => {
   const [passwordError, setPasswordError] = useState('');
   const [biometricType, setBiometricType] = useState<string | undefined>(undefined);
   const [biometricReady, setBiometricReady] = useState(false);
+  const [passwordConfigured, setPasswordConfigured] = useState(false);
   const [unlockAttempts, setUnlockAttempts] = useState(0);
+  const [lockedUntil, setLockedUntil] = useState(0);
+  const [now, setNow] = useState(Date.now());
 
   // Background re-lock refs (avoid stale closures)
   const appState = useRef(AppState.currentState);
   const backgroundTimestamp = useRef<number | null>(null);
-  const hasUnlockedOnce = useRef(false);
+  const unlockedRef = useRef(false);           // true once the user has unlocked this session
+  const lockConfiguredRef = useRef(false);     // password set OR biometric enabled
   const lockedRef = useRef(locked);
   lockedRef.current = locked;
 
@@ -58,27 +92,34 @@ const BCH2App: React.FC = () => {
     initializeApp();
   }, []);
 
-  // Auto-lock on background — single listener, uses refs to avoid stale state
+  // Auto-lock on background — single listener, uses refs to avoid stale state.
+  // Locking is driven by whether a lock is CONFIGURED, not by whether the user
+  // happened to pass through an unlock this session (so enabling a lock and then
+  // backgrounding always re-locks).
   useEffect(() => {
     const subscription = AppState.addEventListener('change', async (nextAppState) => {
       try {
         if (appState.current === 'active' && (nextAppState === 'inactive' || nextAppState === 'background')) {
           backgroundTimestamp.current = Date.now();
         } else if (appState.current !== 'active' && nextAppState === 'active') {
-          if (hasUnlockedOnce.current && !lockedRef.current) {
-            const hasPassword = await getAppPassword();
+          if (!lockedRef.current) {
+            const passwordSet = await isAppPasswordSet();
             const bioEnabled = await isBiometricEnabled();
-            if (hasPassword || bioEnabled) {
+            const lockConfigured = passwordSet || bioEnabled;
+            lockConfiguredRef.current = lockConfigured;
+            if (lockConfigured) {
               const timeout = await getAutoLockTimeout();
               if (timeout !== -1) {
                 const elapsed = backgroundTimestamp.current
                   ? (Date.now() - backgroundTimestamp.current) / 1000
                   : Infinity;
                 if (elapsed >= timeout) {
+                  setPasswordConfigured(passwordSet);
+                  setUnlockAttempts(await readUnlockAttempts());
+                  setLockedUntil(await readLockedUntil());
                   setLocked(true);
                   setPasswordInput('');
                   setPasswordError('');
-                  setUnlockAttempts(0);
                   if (bioEnabled) {
                     setTimeout(() => tryBiometricUnlock(), 300);
                   }
@@ -95,24 +136,40 @@ const BCH2App: React.FC = () => {
     return () => subscription.remove();
   }, []);
 
+  // While locked out, tick every second so the countdown updates and the
+  // Unlock button re-enables when the lockout expires.
+  useEffect(() => {
+    if (!locked || lockedUntil <= now) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [locked, lockedUntil, now]);
+
   const initializeApp = async () => {
     setIsConnecting(true);
     try {
-      const hasPassword = await getAppPassword();
+      const passwordSet = await isAppPasswordSet();
       const bioEnabled = await isBiometricEnabled();
       const { available, biometryType } = await isBiometricAvailable();
+
+      setPasswordConfigured(passwordSet);
+      lockConfiguredRef.current = passwordSet || bioEnabled;
 
       if (available && bioEnabled) {
         setBiometricType(biometryType);
         setBiometricReady(true);
       }
 
-      if (hasPassword || bioEnabled) {
+      if (passwordSet || bioEnabled) {
+        setUnlockAttempts(await readUnlockAttempts());
+        setLockedUntil(await readLockedUntil());
         setLocked(true);
         // Auto-trigger biometric if available
         if (available && bioEnabled) {
           setTimeout(() => tryBiometricUnlock(), 400);
         }
+      } else {
+        // No lock configured — the session is effectively unlocked.
+        unlockedRef.current = true;
       }
       setConnectionStatus('connected');
     } catch (error) {
@@ -123,54 +180,47 @@ const BCH2App: React.FC = () => {
     }
   };
 
+  const onUnlocked = async () => {
+    await clearFailedAttempts();
+    setLocked(false);
+    setPasswordInput('');
+    setPasswordError('');
+    setUnlockAttempts(0);
+    setLockedUntil(0);
+    unlockedRef.current = true;
+  };
+
   const tryBiometricUnlock = useCallback(async () => {
     const success = await authenticateWithBiometric();
     if (success) {
-      setLocked(false);
-      setPasswordInput('');
-      setPasswordError('');
-      setUnlockAttempts(0);
-      hasUnlockedOnce.current = true;
+      await onUnlocked();
     }
   }, []);
 
   const handleUnlock = async () => {
+    // Enforce the persistent lockout before checking the password.
+    const until = await readLockedUntil();
+    if (until > Date.now()) {
+      setLockedUntil(until);
+      setNow(Date.now());
+      const secs = Math.ceil((until - Date.now()) / 1000);
+      setPasswordError(`Too many attempts. Try again in ${secs}s.`);
+      return;
+    }
     const ok = await verifyAppPassword(passwordInput);
     if (ok) {
-      setLocked(false);
-      setPasswordInput('');
-      setPasswordError('');
-      setUnlockAttempts(0);
-      hasUnlockedOnce.current = true;
+      await onUnlocked();
     } else {
-      const attempts = unlockAttempts + 1;
+      const { attempts, lockedUntil: newUntil } = await recordFailedAttempt();
       setUnlockAttempts(attempts);
-      setPasswordError(`Incorrect password (${attempts}/${MAX_UNLOCK_ATTEMPTS})`);
+      setLockedUntil(newUntil);
+      setNow(Date.now());
       setPasswordInput('');
-      if (attempts >= MAX_UNLOCK_ATTEMPTS) {
-        Alert.alert(
-          'Too Many Attempts',
-          'You have entered the wrong password 10 times. For security, you can wipe app data and start fresh.',
-          [
-            { text: 'Cancel', style: 'cancel' },
-            {
-              text: 'Wipe Data',
-              style: 'destructive',
-              onPress: async () => {
-                try {
-                  await AsyncStorage.clear();
-                  setLocked(false);
-                  setUnlockAttempts(0);
-                  setPasswordError('');
-                  hasUnlockedOnce.current = false;
-                  Alert.alert('Data Wiped', 'All wallet data has been removed. Please restart the app.');
-                } catch (e) {
-                  Alert.alert('Error', 'Failed to wipe data.');
-                }
-              },
-            },
-          ],
-        );
+      if (newUntil > Date.now()) {
+        const secs = Math.ceil((newUntil - Date.now()) / 1000);
+        setPasswordError(`Incorrect password. Locked for ${secs}s (${attempts} attempts).`);
+      } else {
+        setPasswordError(`Incorrect password (${attempts} attempts).`);
       }
     }
   };
@@ -190,7 +240,10 @@ const BCH2App: React.FC = () => {
   }
 
   if (locked) {
-    const hasPasswordSet = unlockAttempts > 0 || passwordInput.length > 0 || !biometricReady;
+    // Only offer the password path when a password is actually configured.
+    const hasPasswordSet = passwordConfigured;
+    const lockedOut = lockedUntil > now;
+    const lockoutSecs = lockedOut ? Math.ceil((lockedUntil - now) / 1000) : 0;
     return (
       <View style={styles.loadingContainer}>
         <StatusBar barStyle="light-content" backgroundColor={BCH2Colors.background} />
@@ -201,17 +254,15 @@ const BCH2App: React.FC = () => {
 
         {biometricReady && (
           <TouchableOpacity style={styles.biometricButton} onPress={tryBiometricUnlock}>
-            <Text style={styles.biometricIcon}>
-              {biometricType === 'FaceID' ? '🔓' : '🔓'}
-            </Text>
+            <Text style={styles.biometricIcon}>🔓</Text>
             <Text style={styles.biometricButtonText}>
               Unlock with {biometricType === 'FaceID' ? 'Face' : biometricType === 'TouchID' ? 'Touch ID' : 'Biometrics'}
             </Text>
           </TouchableOpacity>
         )}
 
-        {/* Show password input if password is set */}
-        {(hasPasswordSet || !biometricReady) && (
+        {/* Password path — only when a password is actually configured. */}
+        {hasPasswordSet && (
           <>
             {biometricReady && (
               <Text style={styles.orText}>or enter password</Text>
@@ -221,14 +272,32 @@ const BCH2App: React.FC = () => {
               placeholder="Enter password"
               placeholderTextColor={BCH2Colors.textMuted}
               secureTextEntry
+              editable={!lockedOut}
               value={passwordInput}
               onChangeText={(t) => { setPasswordInput(t); setPasswordError(''); }}
               onSubmitEditing={handleUnlock}
               autoFocus={!biometricReady}
             />
             {passwordError ? <Text style={styles.errorText}>{passwordError}</Text> : null}
-            <TouchableOpacity style={styles.unlockButton} onPress={handleUnlock}>
-              <Text style={styles.unlockButtonText}>Unlock</Text>
+            <TouchableOpacity
+              style={[styles.unlockButton, lockedOut && styles.unlockButtonDisabled]}
+              onPress={handleUnlock}
+              disabled={lockedOut}
+            >
+              <Text style={styles.unlockButtonText}>
+                {lockedOut ? `Locked (${lockoutSecs}s)` : 'Unlock'}
+              </Text>
+            </TouchableOpacity>
+          </>
+        )}
+
+        {/* Biometric configured but the sensor is currently unavailable and no
+            password is set — offer a retry that falls back to device credentials. */}
+        {!hasPasswordSet && !biometricReady && (
+          <>
+            <Text style={styles.orText}>Biometric unlock is unavailable right now.</Text>
+            <TouchableOpacity style={styles.unlockButton} onPress={tryBiometricUnlock}>
+              <Text style={styles.unlockButtonText}>Retry unlock</Text>
             </TouchableOpacity>
           </>
         )}
@@ -323,6 +392,9 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingVertical: 14,
     paddingHorizontal: 48,
+  },
+  unlockButtonDisabled: {
+    opacity: 0.5,
   },
   unlockButtonText: {
     color: '#FFFFFF',

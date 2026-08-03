@@ -7,6 +7,8 @@ import React, { useState, useCallback } from 'react';
 import {
   View,
   Text,
+  TextInput,
+  Modal,
   StyleSheet,
   ScrollView,
   TouchableOpacity,
@@ -16,6 +18,7 @@ import {
 } from 'react-native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2Shadows, BCH2BorderRadius } from '../../components/BCH2Theme';
 import { getWalletMnemonic } from '../../class/bch2-wallet-storage';
+import { requireReauth, verifyAppPassword } from './BCH2AppPassword';
 import { useScreenProtect } from '../../hooks/useScreenProtect';
 import { getBCH2TransactionUrl, getBC2TransactionUrl, getBCH2BlockUrl, getBC2BlockUrl } from '../../class/bch2-constants';
 
@@ -54,6 +57,9 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
   refreshing: externalRefreshing,
 }) => {
   const [internalRefreshing, setInternalRefreshing] = useState(false);
+  const [reauthVisible, setReauthVisible] = useState(false);
+  const [reauthPassword, setReauthPassword] = useState('');
+  const [reauthError, setReauthError] = useState('');
   const refreshing = externalRefreshing ?? internalRefreshing;
   const primaryColor = isBC2 ? BCH2Colors.bc2Primary : BCH2Colors.primary;
   const coinSymbol = isBC2 ? 'BC2' : 'BCH2';
@@ -106,21 +112,22 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
     });
   };
 
-  const { enableScreenProtect, disableScreenProtect } = useScreenProtect();
+  const { enableScreenProtect } = useScreenProtect();
 
   const showMnemonicAlert = (mnemonic: string) => {
+    // Keep the app-wide FLAG_SECURE in place — never call disableScreenProtect()
+    // here, or the whole app becomes screenshottable (see AddWallet).
     enableScreenProtect();
     Alert.alert(
       '⚠️ Backup Recovery Phrase',
       `WRITE THIS DOWN AND KEEP IT SAFE!\n\nYour recovery phrase:\n\n${mnemonic}\n\nAnyone with this phrase can access your funds. Never share it.`,
       [
-        { text: 'I\'ve Saved It', style: 'default', onPress: () => disableScreenProtect() },
-      ],
-      { onDismiss: () => disableScreenProtect() }
+        { text: 'I\'ve Saved It', style: 'default' },
+      ]
     );
   };
 
-  const handleBackupWallet = async () => {
+  const revealMnemonic = async () => {
     try {
       const mnemonic = await getWalletMnemonic(walletId);
       if (mnemonic) {
@@ -130,6 +137,35 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
       }
     } catch (error) {
       Alert.alert('Error', 'Failed to export wallet backup.');
+    }
+  };
+
+  const handleBackupWallet = async () => {
+    // Require re-authentication before revealing the recovery phrase.
+    try {
+      const result = await requireReauth();
+      if (result === 'ok') {
+        await revealMnemonic();
+      } else if (result === 'need-password') {
+        setReauthError('');
+        setReauthPassword('');
+        setReauthVisible(true);
+      } else {
+        Alert.alert('Authentication required', 'Could not verify your identity.');
+      }
+    } catch {
+      Alert.alert('Authentication required', 'Could not verify your identity.');
+    }
+  };
+
+  const submitReauthPassword = async () => {
+    if (await verifyAppPassword(reauthPassword)) {
+      setReauthVisible(false);
+      setReauthPassword('');
+      await revealMnemonic();
+    } else {
+      setReauthError('Incorrect password');
+      setReauthPassword('');
     }
   };
 
@@ -174,6 +210,33 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
 
   return (
     <>
+    <Modal visible={reauthVisible} transparent animationType="fade" onRequestClose={() => setReauthVisible(false)}>
+      <View style={styles.reauthOverlay}>
+        <View style={styles.reauthCard}>
+          <Text style={styles.reauthTitle}>Enter your app password</Text>
+          <Text style={styles.reauthSubtitle}>Required to reveal your recovery phrase.</Text>
+          <TextInput
+            style={styles.reauthInput}
+            placeholder="Password"
+            placeholderTextColor={BCH2Colors.textMuted}
+            secureTextEntry
+            autoFocus
+            value={reauthPassword}
+            onChangeText={(t) => { setReauthPassword(t); setReauthError(''); }}
+            onSubmitEditing={submitReauthPassword}
+          />
+          {reauthError ? <Text style={styles.reauthErrorText}>{reauthError}</Text> : null}
+          <View style={styles.reauthButtons}>
+            <TouchableOpacity onPress={() => { setReauthVisible(false); setReauthPassword(''); }}>
+              <Text style={styles.reauthCancel}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={submitReauthPassword}>
+              <Text style={styles.reauthConfirm}>Reveal</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
     <ScrollView
       style={styles.container}
       contentContainerStyle={styles.content}
@@ -293,6 +356,62 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
 };
 
 const styles = StyleSheet.create({
+  reauthOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: BCH2Spacing.lg,
+  },
+  reauthCard: {
+    width: '100%',
+    backgroundColor: BCH2Colors.backgroundCard,
+    borderRadius: BCH2BorderRadius.lg,
+    padding: BCH2Spacing.lg,
+    borderWidth: 1,
+    borderColor: BCH2Colors.border,
+  },
+  reauthTitle: {
+    fontSize: BCH2Typography.fontSize.lg,
+    fontWeight: BCH2Typography.fontWeight.bold as any,
+    color: BCH2Colors.textPrimary,
+    marginBottom: BCH2Spacing.xs,
+  },
+  reauthSubtitle: {
+    fontSize: BCH2Typography.fontSize.sm,
+    color: BCH2Colors.textSecondary,
+    marginBottom: BCH2Spacing.md,
+  },
+  reauthInput: {
+    backgroundColor: BCH2Colors.backgroundSecondary,
+    borderRadius: BCH2BorderRadius.md,
+    padding: BCH2Spacing.md,
+    fontSize: BCH2Typography.fontSize.md,
+    color: BCH2Colors.textPrimary,
+    borderWidth: 1,
+    borderColor: BCH2Colors.border,
+  },
+  reauthErrorText: {
+    color: BCH2Colors.error,
+    fontSize: BCH2Typography.fontSize.sm,
+    marginTop: BCH2Spacing.sm,
+  },
+  reauthButtons: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: BCH2Spacing.lg,
+    marginTop: BCH2Spacing.lg,
+  },
+  reauthCancel: {
+    color: BCH2Colors.textSecondary,
+    fontSize: BCH2Typography.fontSize.md,
+    fontWeight: BCH2Typography.fontWeight.semibold as any,
+  },
+  reauthConfirm: {
+    color: BCH2Colors.primary,
+    fontSize: BCH2Typography.fontSize.md,
+    fontWeight: BCH2Typography.fontWeight.bold as any,
+  },
   container: {
     flex: 1,
     backgroundColor: BCH2Colors.background,
