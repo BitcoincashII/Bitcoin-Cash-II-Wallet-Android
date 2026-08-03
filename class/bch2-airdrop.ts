@@ -59,6 +59,10 @@ export interface AirdropScanResult {
   // than confirming the wallet is empty. Lets the UI say "network error, try again"
   // instead of "no funds found".
   error?: string;
+  // LOW #24 (partial): set when funds WERE found but the scan still aborted on
+  // network errors before finishing. The results are usable but possibly
+  // incomplete — the UI shows a soft "rescan to be sure" banner alongside them.
+  incomplete?: string;
 }
 
 export interface AntiGamingResult {
@@ -384,6 +388,20 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
 
     // Clean up: disconnect Electrum clients after scan
     try { BCH2Electrum.disconnectAll(); } catch {}
+
+    // LOW #24 (partial): the scan found funds but still aborted on repeated
+    // network errors before finishing. Record a non-success sentinel so
+    // buildScanResult can flag the (usable but possibly partial) results as
+    // incomplete — a partial scan must never be presented as a complete one.
+    if (networkAborted && results.some(r => r.success && r.balance > 0)) {
+      results.push({
+        success: false,
+        address: '',
+        bch2Address: '',
+        balance: 0,
+        error: 'Network error — some addresses could not be scanned. Results may be incomplete; rescan to be sure you found everything.',
+      });
+    }
 
     if (results.length === 0) {
       return [{
@@ -1439,8 +1457,15 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
   };
   // MEDIUM #24: if we found nothing but the scan was cut short by network errors,
   // signal that so the UI reports a network problem instead of "no funds".
-  if (claims.length === 0 && descriptorNetworkAborted) {
-    result.error = 'Network error — could not reach Electrum server. Please check your connection and try again.';
+  // LOW #24 (partial): if we DID find funds but still aborted, flag the result as
+  // incomplete so the descriptor path shows the same "rescan to be sure" banner as
+  // the mnemonic/WIF path (buildScanResult) — a partial scan must never look complete.
+  if (descriptorNetworkAborted) {
+    if (claims.length === 0) {
+      result.error = 'Network error — could not reach Electrum server. Please check your connection and try again.';
+    } else {
+      result.incomplete = 'Network error — some addresses could not be scanned. Results may be incomplete; rescan to be sure you found everything.';
+    }
   }
   return result;
 }
@@ -1560,9 +1585,15 @@ export function buildScanResult(results: AirdropClaimResult[]): AirdropScanResul
   // error (aborted, not confirmed-empty), propagate it so the UI can say
   // "network error, try again" instead of "no funds". Without this the error
   // set by claimFromMnemonic/claimFromWIF is filtered out above and lost.
-  if (claims.length === 0) {
-    const netErr = results.find(r => !r.success && r.error && /network/i.test(r.error));
-    if (netErr) result.error = netErr.error;
+  const netErr = results.find(r => !r.success && r.error && /network/i.test(r.error));
+  if (netErr) {
+    if (claims.length === 0) {
+      result.error = netErr.error; // hard failure: shown in the "No BCH2 found" card
+    } else {
+      // LOW #24 (partial): funds found but the scan aborted early — soft warning
+      // shown alongside the results so the user knows to rescan for completeness.
+      result.incomplete = netErr.error;
+    }
   }
   return result;
 }

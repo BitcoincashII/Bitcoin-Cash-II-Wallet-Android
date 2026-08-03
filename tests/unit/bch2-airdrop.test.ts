@@ -1748,3 +1748,42 @@ describe('Cross-type checking', () => {
     expect(bc1Result!.derivationPath).toContain("84'");
   });
 });
+
+describe('buildScanResult network-abort signalling (#24)', () => {
+  const claim = {
+    success: true,
+    address: 'bc1qexample',
+    bch2Address: 'bitcoincashii:qexample',
+    balance: 50000,
+    bc2Balance: 50000,
+  };
+  const netSentinel = {
+    success: false,
+    address: '',
+    bch2Address: '',
+    balance: 0,
+    error: 'Network error — some addresses could not be scanned. Results may be incomplete; rescan to be sure you found everything.',
+  };
+
+  it('HARD: no funds + network abort → error set (shown in the "no funds" card)', () => {
+    const r = buildScanResult([netSentinel]);
+    expect(r.claims).toHaveLength(0);
+    expect(r.error).toMatch(/network error/i);
+    expect(r.incomplete).toBeUndefined();
+  });
+
+  it('SOFT: funds found + network abort → incomplete set, NOT error (results still usable)', () => {
+    const r = buildScanResult([claim, netSentinel]);
+    expect(r.claims).toHaveLength(1);
+    expect(r.totalBalance).toBe(50000);
+    expect(r.incomplete).toMatch(/incomplete/i);
+    expect(r.error).toBeUndefined(); // must not read as a hard failure
+  });
+
+  it('CLEAN: funds found + no network error → neither error nor incomplete', () => {
+    const r = buildScanResult([claim]);
+    expect(r.claims).toHaveLength(1);
+    expect(r.error).toBeUndefined();
+    expect(r.incomplete).toBeUndefined();
+  });
+});

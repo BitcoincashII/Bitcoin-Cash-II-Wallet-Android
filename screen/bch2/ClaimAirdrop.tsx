@@ -777,6 +777,16 @@ export const ClaimAirdropScreen: React.FC = () => {
           </View>
         )}
 
+        {/* Incomplete-scan warning (LOW #24): funds found but the scan aborted on
+            network errors before finishing, so more may exist at unscanned addresses. */}
+        {hasClaims && scanResult?.incomplete && (
+          <View style={styles.warningCard}>
+            <Text style={styles.warningText}>
+              {scanResult.incomplete}
+            </Text>
+          </View>
+        )}
+
         {/* Anti-gaming Warning */}
         {antiGamingWarning && (
           <View style={[styles.warningCard, antiGamingBlocked && styles.errorCard]}>

@@ -278,6 +278,88 @@ describe('Edge cases', () => {
     expect(await getWalletMnemonic('bch2_legacy_migrate')).toBe(TEST_MNEMONIC);
   });
 
+  // --- Migration fail-safety: the seed is the user's ONLY copy of their funds.
+  // A Keystore hiccup during migration must never drop the plaintext before a
+  // verified Keystore copy exists (de-risks the on-device migration gate). ---
+
+  it('FAIL-SAFE: keeps the plaintext seed when the Keystore write fails mid-migration', async () => {
+    const legacy: StoredWallet = {
+      id: 'bch2_ks_write_fail',
+      type: 'bch2',
+      label: 'Legacy',
+      mnemonic: TEST_MNEMONIC,
+      address: 'bitcoincashii:qtest',
+      balance: 0,
+      unconfirmedBalance: 0,
+      createdAt: Date.now(),
+    };
+    await AsyncStorage.setItem(WALLETS_KEY, JSON.stringify([legacy]));
+
+    // Keystore write reports failure on the (single) migration attempt.
+    (Keychain.setGenericPassword as jest.Mock).mockImplementationOnce(async () => false);
+
+    await getWallets(); // triggers migration
+
+    // The user's only seed copy must survive an unwritable Keystore.
+    const raw = await AsyncStorage.getItem(WALLETS_KEY);
+    expect(raw).toContain(TEST_MNEMONIC);
+    expect(JSON.parse(raw!)[0].mnemonic).toBe(TEST_MNEMONIC);
+    // ...and still be retrievable (via the plaintext fallback).
+    expect(await getWalletMnemonic('bch2_ks_write_fail')).toBe(TEST_MNEMONIC);
+  });
+
+  it('FAIL-SAFE: keeps the plaintext seed when the Keystore read-back does not verify', async () => {
+    const legacy: StoredWallet = {
+      id: 'bch2_ks_verify_fail',
+      type: 'bch2',
+      label: 'Legacy',
+      mnemonic: TEST_MNEMONIC,
+      address: 'bitcoincashii:qtest',
+      balance: 0,
+      unconfirmedBalance: 0,
+      createdAt: Date.now(),
+    };
+    await AsyncStorage.setItem(WALLETS_KEY, JSON.stringify([legacy]));
+
+    // Write "succeeds" but the verify read returns a different value — the
+    // migration must NOT trust it and must keep the plaintext.
+    (Keychain.getGenericPassword as jest.Mock).mockImplementationOnce(async () => ({
+      username: 'bch2',
+      password: 'not-the-real-seed',
+      service: 'x',
+    }));
+
+    await getWallets();
+
+    const raw = await AsyncStorage.getItem(WALLETS_KEY);
+    expect(raw).toContain(TEST_MNEMONIC);
+    expect(JSON.parse(raw!)[0].mnemonic).toBe(TEST_MNEMONIC);
+    expect(await getWalletMnemonic('bch2_ks_verify_fail')).toBe(TEST_MNEMONIC);
+  });
+
+  it('migrates multiple legacy wallets and is idempotent across repeated reads', async () => {
+    const mk = (id: string): StoredWallet => ({
+      id,
+      type: 'bch2',
+      label: id,
+      mnemonic: TEST_MNEMONIC,
+      address: `bitcoincashii:q${id}`,
+      balance: 0,
+      unconfirmedBalance: 0,
+      createdAt: Date.now(),
+    });
+    await AsyncStorage.setItem(WALLETS_KEY, JSON.stringify([mk('walletA'), mk('walletB')]));
+
+    await getWallets();
+    await getWallets(); // repeated read must be stable, not corrupt or re-expose seeds
+
+    const raw = await AsyncStorage.getItem(WALLETS_KEY);
+    expect(raw).not.toContain(TEST_MNEMONIC); // both plaintext copies dropped
+    expect(JSON.parse(raw!).every((w: any) => w.mnemonic === '')).toBe(true);
+    expect(await getWalletMnemonic('walletA')).toBe(TEST_MNEMONIC);
+    expect(await getWalletMnemonic('walletB')).toBe(TEST_MNEMONIC);
+  });
+
   it('multiple wallets can be saved and retrieved independently', async () => {
     const w1 = await saveWallet('W1', TEST_MNEMONIC, 'bch2');
     const w2 = await saveWallet('W2', TEST_MNEMONIC, 'bc2');

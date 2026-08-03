@@ -962,6 +962,34 @@ export function computeTxid(rawHex: string): string {
   return Buffer.from(sha256(sha256(body))).reverse().toString('hex');
 }
 
+// Best-effort secondary relay of an already-accepted BC2 tx over the SPKI-pinned
+// bc2electrum socket. The explorer is our primary broadcaster (more reliable — the
+// BC2 Electrum server has indexing issues), and computeTxid verification already
+// rejects a server that echoes a *different* txid. This closes the narrower gap
+// where the explorer accepts our hex, returns the correct txid, but never actually
+// relays the tx: an independent, authenticated path still pushes it to the network.
+// Fire-and-forget, hard-bounded, and fully error-swallowing — a healthy explorer
+// broadcast is already a success, and "already in mempool" from the socket is the
+// expected happy path here, so no failure of this relay is user-visible.
+function relayBC2ViaPinnedSocket(hex: string): void {
+  (async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        (async () => {
+          await connectBC2();
+          await bc2Client.blockchainTransaction_broadcast(hex);
+        })(),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('relay timeout')), 12000); }),
+      ]);
+    } catch {
+      /* best-effort: the explorer already accepted the tx */
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  })();
+}
+
 // Broadcast BC2 transaction using explorer API
 export async function broadcastBC2Transaction(hex: string): Promise<string> {
   // Max 32MB block = 64M hex chars; cap at 2MB tx (4M hex) as practical limit
@@ -1010,6 +1038,9 @@ export async function broadcastBC2Transaction(hex: string): Promise<string> {
     if (expectedTxid && txidResult.toLowerCase() !== expectedTxid.toLowerCase()) {
       throw new Error(`Broadcast returned a txid that does not match the signed transaction — refusing to trust it`);
     }
+    // Belt-and-suspenders: also relay over the pinned socket so the tx still
+    // propagates if the explorer echoed our txid without actually broadcasting.
+    relayBC2ViaPinnedSocket(hex);
     return expectedTxid || txidResult;
   } catch (apiError: any) {
     DEBUG && console.log('[BC2] Explorer broadcast failed:', apiError.message);
