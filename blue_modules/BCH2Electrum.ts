@@ -432,8 +432,8 @@ export async function isCoinbaseTx(txid: string): Promise<boolean> {
  * we have no BC2 height/raw-tx tracking, and applying BCH2 data to BC2 UTXOs
  * would mis-classify them; instead we skip the client-side filter for BC2 —
  * the BC2 node still rejects any premature-coinbase spend at broadcast, so this
- * cannot cause an invalid spend (BC2 recovery UTXOs are user P2PKH funds, not
- * coinbase, in practice).
+ * cannot cause an invalid spend (ordinary user UTXOs are not coinbase; note BC2
+ * DOES have SegWit/Taproot, so BC2 UTXOs may be P2WPKH/P2TR, not only P2PKH).
  */
 export async function filterMatureUtxos(utxos: any[], isBC2: boolean = false): Promise<any[]> {
   if (isBC2) return utxos; // BC2 maturity is enforced by the BC2 node at broadcast

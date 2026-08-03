@@ -38,7 +38,7 @@ jest.mock('../../blue_modules/BCH2Electrum', () => ({
 }));
 
 // Import after mocking
-import { sendTransaction, sendFromBech32, sendFromP2SH, sendFromP2WSH, sendFromP2TR, decodeCashAddr, sweepAirdropClaims } from '../../class/bch2-transaction';
+import { sendTransaction, sendFromBech32, sendFromP2SH, sendFromP2WSH, sendFromP2TR, decodeCashAddr, sweepAirdropClaims, isValidRecipientAddress } from '../../class/bch2-transaction';
 
 // ---- Test Helpers ----------------------------------------------------------
 
@@ -2508,6 +2508,22 @@ describe('isBech32Address case sensitivity', () => {
 // ============================================================================
 // sweepAirdropClaims (audit #4/#5) — consolidate found claims into one wallet
 // ============================================================================
+describe('isValidRecipientAddress — SegWit allowed for BC2, rejected for BCH2', () => {
+  it('BC2 accepts legacy base58 AND bc1 SegWit recipients', () => {
+    expect(isValidRecipientAddress(BC2_LEGACY_ADDR, true)).toBe(true);
+    expect(isValidRecipientAddress(BC1_ADDRESS, true)).toBe(true); // BC2 has SegWit
+  });
+  it('BCH2 accepts CashAddr but REJECTS bc1 (no SegWit on BCH2)', () => {
+    expect(isValidRecipientAddress(DEST_CASHADDR, false)).toBe(true);
+    expect(isValidRecipientAddress(BC1_ADDRESS, false)).toBe(false); // would be anyone-can-spend
+  });
+  it('rejects empty and garbage input on both chains', () => {
+    expect(isValidRecipientAddress('', true)).toBe(false);
+    expect(isValidRecipientAddress('not-an-address', true)).toBe(false);
+    expect(isValidRecipientAddress('not-an-address', false)).toBe(false);
+  });
+});
+
 describe('sweepAirdropClaims', () => {
   // Derive the BCH2 P2PKH CashAddr for a given path (matches the app's derivation).
   async function addrForPath(path: string): Promise<string> {

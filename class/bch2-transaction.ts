@@ -642,6 +642,24 @@ function addressToScript(address: string, isBC2: boolean): Buffer {
 }
 
 /**
+ * Whether `address` is a valid recipient for the given chain, using the EXACT
+ * rules the transaction builder applies (single source of truth). This means:
+ *   - BC2 accepts base58 P2PKH/P2SH AND SegWit bc1 (P2WPKH/P2WSH) / bc1p (P2TR),
+ *     because BC2 has SegWit + Taproot active.
+ *   - BCH2 accepts CashAddr and REJECTS bc1/bc1p (BCH2 has no SegWit; such
+ *     outputs would be anyone-can-spend).
+ */
+export function isValidRecipientAddress(address: string, isBC2: boolean): boolean {
+  if (!address) return false;
+  try {
+    addressToScript(address.trim(), isBC2);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Decode legacy base58check address to pubkey hash
  */
 function decodeLegacyAddress(address: string): Buffer {

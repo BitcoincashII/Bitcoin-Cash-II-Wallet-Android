@@ -16,9 +16,8 @@ import {
   Keyboard,
 } from 'react-native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2Shadows, BCH2BorderRadius } from '../../components/BCH2Theme';
-import { decodeCashAddr } from '../../class/bch2-transaction';
+import { decodeCashAddr, isValidRecipientAddress } from '../../class/bch2-transaction';
 import { getUtxosByAddress, getBC2Utxos, filterMatureUtxos } from '../../blue_modules/BCH2Electrum';
-const bs58check = require('bs58check');
 
 // Tx-size estimate replicated (read-only) from class/bch2-transaction.ts:
 // ~10 bytes overhead + 148 per input + 34 per output.
@@ -137,15 +136,10 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
   const validateAddress = (addr: string): boolean => {
     if (!addr) return false;
     if (isBC2) {
-      // Validate with full Base58Check checksum verification
-      try {
-        const decoded = bs58check.decode(addr);
-        if (decoded.length !== 21) return false;
-        // Version byte: 0x00 = P2PKH (starts with 1), 0x05 = P2SH (starts with 3)
-        return decoded[0] === 0x00 || decoded[0] === 0x05;
-      } catch {
-        return false;
-      }
+      // BC2 has SegWit + Taproot: accept legacy base58 (1.../3...) AND bc1/bc1p.
+      // Validate via the tx builder's own rules so the UI accepts exactly what
+      // can actually be sent (previously this rejected all bc1/bc1p recipients).
+      return isValidRecipientAddress(addr, true);
     } else {
       // BCH2 CashAddr format with full polymod checksum verification
       const normalizedAddr = addr.toLowerCase();
