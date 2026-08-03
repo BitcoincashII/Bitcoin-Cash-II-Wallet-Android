@@ -52,9 +52,14 @@ function withStorageLock<T>(fn: () => Promise<T>): Promise<T> {
   return prev.catch(() => {}).then(fn).finally(() => release!());
 }
 
+// BC2 (Bitcoin-Core lineage) address flavour. Only meaningful when type==='bc2';
+// absent/legacy on existing wallets stays m/44' P2PKH for backward compatibility.
+export type BC2ScriptType = 'legacy' | 'p2sh-segwit' | 'native-segwit' | 'taproot';
+
 export interface StoredWallet {
   id: string;
   type: 'bch2' | 'bc2' | 'bc1';  // bc1 = Native SegWit for BCH2 airdrop claims
+  scriptType?: BC2ScriptType;    // BC2 only; undefined === 'legacy'
   label: string;
   mnemonic: string;
   address: string;
@@ -69,7 +74,8 @@ export interface StoredWallet {
 export async function saveWallet(
   label: string,
   mnemonic: string,
-  walletType: 'bch2' | 'bc2' | 'bc1' = 'bch2'
+  walletType: 'bch2' | 'bc2' | 'bc1' = 'bch2',
+  scriptType: BC2ScriptType = 'legacy'
 ): Promise<StoredWallet> {
   // Trim mnemonic once — must use same value for address derivation and storage
   const trimmedMnemonic = mnemonic.trim();
@@ -79,7 +85,7 @@ export async function saveWallet(
   }
 
   // Derive address from mnemonic
-  const address = deriveAddress(trimmedMnemonic, walletType);
+  const address = deriveAddress(trimmedMnemonic, walletType, scriptType);
   const id = generateId();
 
   // Store the recovery phrase in the Keystore FIRST. If that fails, do not
@@ -91,6 +97,7 @@ export async function saveWallet(
   const wallet: StoredWallet = {
     id,
     type: walletType,
+    ...(walletType === 'bc2' ? { scriptType } : {}),
     label: label.trim(),
     mnemonic: trimmedMnemonic,
     address,
@@ -223,16 +230,44 @@ export async function deleteWallet(id: string): Promise<void> {
 /**
  * Derive address from mnemonic (BCH2 CashAddr, BC2 legacy, or bc1 SegWit)
  */
-function deriveAddress(mnemonic: string, walletType: 'bch2' | 'bc2' | 'bc1' = 'bch2'): string {
+function deriveAddress(
+  mnemonic: string,
+  walletType: 'bch2' | 'bc2' | 'bc1' = 'bch2',
+  scriptType: BC2ScriptType = 'legacy'
+): string {
   const seed = bip39.mnemonicToSeedSync(mnemonic);
   try {
     const root = bip32.fromSeed(seed);
 
     if (walletType === 'bc2') {
-      // BC2 uses BTC derivation path: m/44'/0'/0'/0/0
-      const child = root.derivePath("m/44'/0'/0'/0/0");
-      const pubkeyHash = hash160(Buffer.from(child.publicKey));
-      return getLegacyAddress(pubkeyHash);
+      // BC2 (Bitcoin-Core lineage) — derivation depends on the chosen script type.
+      switch (scriptType) {
+        case 'native-segwit': {
+          // BIP84: m/84'/0'/0'/0/0 → bc1 P2WPKH
+          const child = root.derivePath("m/84'/0'/0'/0/0");
+          return encodeBech32('bc', 0, hash160(Buffer.from(child.publicKey)));
+        }
+        case 'p2sh-segwit': {
+          // BIP49: m/49'/0'/0'/0/0 → 3xxx P2SH-P2WPKH
+          const child = root.derivePath("m/49'/0'/0'/0/0");
+          return getP2SHP2WPKHAddress(hash160(Buffer.from(child.publicKey)));
+        }
+        case 'taproot': {
+          // BIP86: m/86'/0'/0'/0/0 → bc1p P2TR (key-path, tweaked x-only key)
+          const child = root.derivePath("m/86'/0'/0'/0/0");
+          const xonly = Buffer.from(child.publicKey).subarray(1, 33);
+          const tweak = taggedHash('TapTweak', xonly);
+          const tr = ecc.xOnlyPointAddTweak(xonly, tweak);
+          if (!tr) throw new Error('Taproot key tweak failed');
+          return encodeBech32m('bc', 1, Buffer.from(tr.xOnlyPubkey));
+        }
+        case 'legacy':
+        default: {
+          // BIP44: m/44'/0'/0'/0/0 → 1xxx P2PKH (default / backward-compatible)
+          const child = root.derivePath("m/44'/0'/0'/0/0");
+          return getLegacyAddress(hash160(Buffer.from(child.publicKey)));
+        }
+      }
     }
 
     if (walletType === 'bc1') {
@@ -255,6 +290,15 @@ function deriveAddress(mnemonic: string, walletType: 'bch2' | 'bc2' | 'bc1' = 'b
 }
 
 /**
+ * Derive the BC2 receive address for a given script type. Used by the import
+ * flow to scan a seed across legacy / wrapped-segwit / native-segwit / taproot
+ * (BlueWallet-style) and by any caller needing a non-persisted address.
+ */
+export function deriveBC2Address(mnemonic: string, scriptType: BC2ScriptType): string {
+  return deriveAddress(mnemonic.trim(), 'bc2', scriptType);
+}
+
+/**
  * Get legacy P2PKH address (for BC2)
  */
 function getLegacyAddress(pubkeyHash: Buffer): string {
@@ -269,6 +313,24 @@ function doubleHash(data: Buffer): Buffer {
   const hash1 = crypto.createHash('sha256').update(data).digest();
   const hash2 = crypto.createHash('sha256').update(hash1).digest();
   return hash2;
+}
+
+/**
+ * Get P2SH-P2WPKH (wrapped SegWit, 3xxx) address for BC2.
+ * redeemScript = OP_0 PUSH20 <pubkeyhash>; address = Base58Check(0x05 || HASH160(redeemScript)).
+ */
+function getP2SHP2WPKHAddress(pubkeyHash: Buffer): string {
+  const redeemScript = Buffer.concat([Buffer.from([0x00, 0x14]), pubkeyHash]);
+  const scriptHash = hash160(redeemScript);
+  const versionedHash = Buffer.concat([Buffer.from([0x05]), scriptHash]);
+  const checksum = doubleHash(versionedHash).slice(0, 4);
+  return base58Encode(Buffer.concat([versionedHash, checksum]));
+}
+
+/** BIP340/341 tagged hash: SHA256(SHA256(tag) || SHA256(tag) || data). */
+function taggedHash(tag: string, data: Buffer): Buffer {
+  const t = crypto.createHash('sha256').update(Buffer.from(tag, 'utf8')).digest();
+  return crypto.createHash('sha256').update(Buffer.concat([t, t, data])).digest();
 }
 
 function base58Encode(data: Buffer): string {
@@ -458,6 +520,36 @@ function encodeBech32(hrp: string, version: number, program: Buffer): string {
   }
 
   // Encode
+  let result = hrp + '1';
+  for (const v of [...data, ...checksum]) {
+    result += BECH32_CHARSET[v];
+  }
+  return result;
+}
+
+// Bech32m encoding (BIP350) for Taproot (bc1p, witness version 1). Identical to
+// bech32 except the checksum constant is XORed with 0x2bc830a3 instead of 1.
+function encodeBech32m(hrp: string, version: number, program: Buffer): string {
+  const data: number[] = [version];
+  let acc = 0;
+  let bits = 0;
+  for (const byte of program) {
+    acc = (acc << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      data.push((acc >> bits) & 0x1f);
+    }
+  }
+  if (bits > 0) {
+    data.push((acc << (5 - bits)) & 0x1f);
+  }
+  const hrpExpanded = bech32HrpExpand(hrp);
+  const polymod = (bech32Polymod([...hrpExpanded, ...data, 0, 0, 0, 0, 0, 0]) ^ 0x2bc830a3) >>> 0;
+  const checksum: number[] = [];
+  for (let i = 0; i < 6; i++) {
+    checksum.push((polymod >> (5 * (5 - i))) & 0x1f);
+  }
   let result = hrp + '1';
   for (const v of [...data, ...checksum]) {
     result += BECH32_CHARSET[v];

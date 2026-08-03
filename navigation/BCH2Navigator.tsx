@@ -20,7 +20,7 @@ import AddWallet from '../screen/bch2/AddWallet';
 import BCH2AppPassword from '../screen/bch2/BCH2AppPassword';
 import { getWallet, getWalletMnemonic, updateWalletBalance, StoredWallet } from '../class/bch2-wallet-storage';
 import { getTransactionsByAddress, getBC2Transactions, getBalanceByAddress, getBC2Balance, getBalanceByScripthash, getTransactionsByScripthash } from '../blue_modules/BCH2Electrum';
-import { sendTransaction, sendFromBech32, sendFromP2SH } from '../class/bch2-transaction';
+import { sendTransaction, sendFromBech32, sendFromP2SH, sendBC2Native, BC2ScriptType } from '../class/bch2-transaction';
 import { bc1AddressToScripthash } from '../class/bch2-airdrop';
 
 const Stack = createNativeStackNavigator<BCH2RootStackParamList>();
@@ -150,16 +150,26 @@ const BCH2SendWrapper: React.FC = () => {
       throw new Error('Could not retrieve wallet keys');
     }
 
-    const isBech32Source = walletAddress.toLowerCase().startsWith('bc1');
+    const addr = walletAddress.toLowerCase();
+    const isBech32Source = addr.startsWith('bc1');
     const isP2SHSource = walletAddress.startsWith('3');
 
     let result;
-    if (isBech32Source && !isBC2) {
+    if (isBC2) {
+      // Native BC2 (real SegWit/Taproot witness). Script type is unambiguous from
+      // the address prefix. sendBC2Native delegates legacy (1xxx) to sendTransaction.
+      const scriptType: BC2ScriptType =
+        addr.startsWith('bc1p') ? 'taproot' :
+        addr.startsWith('bc1') ? 'native-segwit' :
+        walletAddress.startsWith('3') ? 'p2sh-segwit' : 'legacy';
+      result = await sendBC2Native(mnemonic, scriptType, walletAddress, toAddress, amount, feePerByte);
+    } else if (isBech32Source) {
+      // BCH2 SegWit *recovery* of pre-fork coins (scriptSig + FORKID).
       result = await sendFromBech32(mnemonic, walletAddress, toAddress, amount, feePerByte);
-    } else if (isP2SHSource && !isBC2) {
+    } else if (isP2SHSource) {
       result = await sendFromP2SH(mnemonic, walletAddress, toAddress, amount, feePerByte);
     } else {
-      result = await sendTransaction(mnemonic, toAddress, amount, feePerByte, isBC2 || false, walletAddress);
+      result = await sendTransaction(mnemonic, toAddress, amount, feePerByte, false, walletAddress);
     }
 
     return { txid: result.txid };

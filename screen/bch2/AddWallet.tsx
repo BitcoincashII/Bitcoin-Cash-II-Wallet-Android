@@ -17,8 +17,40 @@ import {
 } from 'react-native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2BorderRadius, BCH2Shadows } from '../../components/BCH2Theme';
 import * as bip39 from 'bip39';
-import { saveWallet } from '../../class/bch2-wallet-storage';
+import { saveWallet, deriveBC2Address, BC2ScriptType } from '../../class/bch2-wallet-storage';
+import { getBC2Balance } from '../../blue_modules/BCH2Electrum';
 import { useScreenProtect } from '../../hooks/useScreenProtect';
+
+// BC2 script-type choices shown in the create/import picker. Native SegWit is the
+// modern default; legacy stays available for compatibility.
+const BC2_SCRIPT_TYPES: { key: BC2ScriptType; label: string; hint: string }[] = [
+  { key: 'native-segwit', label: 'SegWit', hint: 'bc1…  (recommended)' },
+  { key: 'legacy', label: 'Legacy', hint: '1…' },
+  { key: 'p2sh-segwit', label: 'SegWit (P2SH)', hint: '3…' },
+  { key: 'taproot', label: 'Taproot', hint: 'bc1p…' },
+];
+
+/**
+ * BlueWallet-style import discovery: derive the first receive address for each BC2
+ * script type and return the one that holds funds (largest balance wins). Returns
+ * null when nothing is found or the network is unreachable, so the caller can fall
+ * back to the user's chosen type. Network/derivation errors per type are ignored so
+ * one failure never blocks the import.
+ */
+async function discoverBc2ScriptType(mnemonic: string): Promise<BC2ScriptType | null> {
+  const types: BC2ScriptType[] = ['native-segwit', 'legacy', 'p2sh-segwit', 'taproot'];
+  let best: { type: BC2ScriptType; total: number } | null = null;
+  for (const t of types) {
+    try {
+      const bal = await getBC2Balance(deriveBC2Address(mnemonic, t));
+      const total = (bal.confirmed || 0) + (bal.unconfirmed || 0);
+      if (total > 0 && (!best || total > best.total)) best = { type: t, total };
+    } catch {
+      // skip this type — never block the import on a single lookup failure
+    }
+  }
+  return best ? best.type : null;
+}
 
 // Coin logos
 const BCH2_LOGO = require('../../img/bch2-logo-small.png');
@@ -37,6 +69,8 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
   const [mnemonic, setMnemonic] = useState('');
   const [importMnemonic, setImportMnemonic] = useState('');
   const [walletLabel, setWalletLabel] = useState('');
+  const [bc2ScriptType, setBc2ScriptType] = useState<BC2ScriptType>('native-segwit');
+  const [scanning, setScanning] = useState(false);
   const { enableScreenProtect } = useScreenProtect();
 
   // Ensure screenshot protection while a mnemonic is displayed or imported.
@@ -90,7 +124,7 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
 
     setLoading(true);
     try {
-      const wallet = await saveWallet(walletLabel, mnemonic, walletType);
+      const wallet = await saveWallet(walletLabel, mnemonic, walletType, bc2ScriptType);
       setMnemonic('');
 
       Alert.alert(
@@ -132,12 +166,29 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
 
     setLoading(true);
     try {
-      const wallet = await saveWallet(walletLabel, importMnemonic.trim(), walletType);
+      // BlueWallet-style discovery for BC2: scan the seed across all four address
+      // types and import the one that actually holds funds. Falls back to the
+      // user's picked type when nothing (or the network) turns up.
+      let importedType: BC2ScriptType = bc2ScriptType;
+      if (walletType === 'bc2') {
+        setScanning(true);
+        try {
+          const found = await discoverBc2ScriptType(importMnemonic.trim());
+          if (found) importedType = found;
+        } finally {
+          setScanning(false);
+        }
+      }
+
+      const wallet = await saveWallet(walletLabel, importMnemonic.trim(), walletType, importedType);
       setImportMnemonic('');
 
+      const typeNote = walletType === 'bc2'
+        ? `\n\nAddress type: ${BC2_SCRIPT_TYPES.find(t => t.key === importedType)?.label || importedType} (${wallet.address.slice(0, 10)}…)`
+        : '';
       Alert.alert(
         'Wallet Imported',
-        `Your ${coinName} wallet has been imported successfully!`,
+        `Your ${coinName} wallet has been imported successfully!${typeNote}`,
         [{ text: 'OK', onPress: () => navigation.goBack() }]
       );
     } catch (error: any) {
@@ -152,6 +203,37 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
     setWalletLabel('');
     setMode(walletType === 'bc2' ? 'import-bc2' : 'import-bch2');
   };
+
+  // BC2 address-type picker (chips). On create it chooses the wallet's type; on
+  // import it is the fallback used only when discovery finds no funds.
+  const renderBc2Picker = (title: string, subtitle?: string) => (
+    <View style={styles.inputGroup}>
+      <Text style={styles.inputLabel}>{title}</Text>
+      {subtitle ? <Text style={{ color: BCH2Colors.textMuted, fontSize: 12, marginBottom: 8 }}>{subtitle}</Text> : null}
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+        {BC2_SCRIPT_TYPES.map(t => {
+          const selected = bc2ScriptType === t.key;
+          return (
+            <TouchableOpacity
+              key={t.key}
+              onPress={() => setBc2ScriptType(t.key)}
+              style={{
+                paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8, marginRight: 8, marginBottom: 8,
+                borderWidth: 1.5, borderColor: selected ? BCH2Colors.bc2Primary : BCH2Colors.textMuted,
+                backgroundColor: selected ? BCH2Colors.bc2Primary + '22' : 'transparent',
+              }}
+              accessibilityRole="button"
+              accessibilityState={{ selected }}
+              accessibilityLabel={`${t.label} address type ${t.hint}`}
+            >
+              <Text style={{ color: selected ? BCH2Colors.bc2Primary : BCH2Colors.textPrimary, fontWeight: selected ? '700' : '500' }}>{t.label}</Text>
+              <Text style={{ color: BCH2Colors.textMuted, fontSize: 11 }}>{t.hint}</Text>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+    </View>
+  );
 
   // Main selection screen
   if (mode === 'select') {
@@ -277,6 +359,8 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
           />
         </View>
 
+        {walletType === 'bc2' && renderBc2Picker('Address Type')}
+
         <TouchableOpacity
           style={[styles.primaryButton, { backgroundColor: primaryColor }]}
           onPress={confirmNewWallet}
@@ -341,6 +425,17 @@ export const AddWalletScreen: React.FC<AddWalletProps> = ({ navigation }) => {
           maxLength={50}
         />
       </View>
+
+      {walletType === 'bc2' && renderBc2Picker(
+        'Default Address Type',
+        'On import we scan your seed for legacy and SegWit funds and pick the one that holds a balance. This default is used only if none is found.'
+      )}
+
+      {scanning ? (
+        <Text style={{ color: BCH2Colors.textMuted, textAlign: 'center', marginBottom: 8 }}>
+          Scanning addresses for funds…
+        </Text>
+      ) : null}
 
       <TouchableOpacity
         style={[styles.primaryButton, { backgroundColor: primaryColor }]}
