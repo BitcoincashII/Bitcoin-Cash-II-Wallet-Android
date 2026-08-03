@@ -366,7 +366,16 @@ export async function broadcastTransaction(hex: string): Promise<string> {
   if (typeof result !== 'string' || !/^[a-fA-F0-9]{64}$/.test(result.trim())) {
     throw new Error(`Broadcast failed: ${String(result).substring(0, 200)}`);
   }
-  return result.trim();
+  const txid = result.trim();
+  // Verify the server returned the txid of the tx we actually signed — a server
+  // that drops the tx and echoes a bogus/other id is caught rather than showing a
+  // false "sent". BCH2 txs are legacy-serialized, so this is a plain double-SHA256.
+  let expectedTxid: string | null = null;
+  try { expectedTxid = computeTxid(hex); } catch { /* skip verification on parse failure */ }
+  if (expectedTxid && txid.toLowerCase() !== expectedTxid.toLowerCase()) {
+    throw new Error(`Broadcast returned a txid that does not match the signed transaction — refusing to trust it`);
+  }
+  return expectedTxid || txid;
 }
 
 export async function getTransaction(txid: string): Promise<any> {
