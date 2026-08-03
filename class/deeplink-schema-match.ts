@@ -146,9 +146,17 @@ class DeeplinkSchemaMatch {
         },
       ]);
     } else if (event.url.toLowerCase().startsWith('bitcoincashii:')) {
-      // BCH2 CashAddr payment URI — not yet wired up
-      // TODO: Implement proper URI parsing (address, amount, label) and route to BCH2Send
-      return;
+      // BCH2 CashAddr payment URI — forward the full URI (address plus any
+      // amount/label/message query params) to BCH2Send, which parses it.
+      completionHandler([
+        'BCH2SendRoot',
+        {
+          screen: 'BCH2Send',
+          params: {
+            uri: event.url,
+          },
+        },
+      ]);
     } else if (DeeplinkSchemaMatch.isBitcoinAddress(event.url)) {
       completionHandler([
         'SendDetailsRoot',
