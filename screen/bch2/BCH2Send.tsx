@@ -54,6 +54,8 @@ interface BCH2SendProps {
   isBC2?: boolean;
   onSend?: (toAddress: string, amount: number, fee: number) => Promise<{ txid: string }>;
   navigation?: any;
+  prefillAddress?: string; // from a bitcoincashii: deep link
+  prefillAmount?: string;  // BCH2 units (decimal string)
 }
 
 export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
@@ -62,9 +64,11 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
   isBC2 = false,
   onSend,
   navigation,
+  prefillAddress,
+  prefillAmount,
 }) => {
-  const [toAddress, setToAddress] = useState('');
-  const [amount, setAmount] = useState('');
+  const [toAddress, setToAddress] = useState(prefillAddress || '');
+  const [amount, setAmount] = useState(prefillAmount || '');
   const [fee, setFee] = useState('1'); // sat/byte
   const [loading, setLoading] = useState(false);
   const [step, setStep] = useState<'input' | 'confirm' | 'success'>('input');

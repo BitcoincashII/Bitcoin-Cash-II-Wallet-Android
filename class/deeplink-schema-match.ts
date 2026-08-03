@@ -146,15 +146,13 @@ class DeeplinkSchemaMatch {
         },
       ]);
     } else if (event.url.toLowerCase().startsWith('bitcoincashii:')) {
-      // BCH2 CashAddr payment URI — forward the full URI (address plus any
-      // amount/label/message query params) to BCH2Send, which parses it.
+      // BCH2 CashAddr payment URI — hand the full URI to the BCH2SendRoot screen,
+      // which parses it (address + amount/label/message), picks a wallet, and
+      // forwards to BCH2Send prefilled.
       completionHandler([
         'BCH2SendRoot',
         {
-          screen: 'BCH2Send',
-          params: {
-            uri: event.url,
-          },
+          uri: event.url,
         },
       ]);
     } else if (DeeplinkSchemaMatch.isBitcoinAddress(event.url)) {

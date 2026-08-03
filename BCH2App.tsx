@@ -4,8 +4,9 @@
  */
 
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { StatusBar, View, Text, TextInput, TouchableOpacity, StyleSheet, ActivityIndicator, AppState } from 'react-native';
-import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
+import { StatusBar, View, Text, TextInput, TouchableOpacity, StyleSheet, ActivityIndicator, AppState, Linking } from 'react-native';
+import { NavigationContainer, DefaultTheme, useNavigationContainerRef } from '@react-navigation/native';
+import DeeplinkSchemaMatch from './class/deeplink-schema-match';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { BCH2Navigator } from './navigation/BCH2Navigator';
 import { BCH2Colors } from './components/BCH2Theme';
@@ -58,6 +59,30 @@ const BCH2App: React.FC = () => {
   const unlockedRef = useRef(false);           // true once the user has unlocked this session
   const lockConfiguredRef = useRef(false);     // password set OR biometric enabled
   const lockedRef = useRef(locked);
+
+  // Deep links (bitcoincashii: payment URIs). getInitialURL covers a cold start via
+  // a link; the listener covers links while running. If the navigator isn't ready
+  // yet (e.g. still on the lock screen), the URL is held and routed onReady.
+  const navRef = useNavigationContainerRef();
+  const pendingDeeplinkRef = useRef<string | null>(null);
+  const routeDeeplink = useCallback((url: string | null) => {
+    if (!url) return;
+    try {
+      DeeplinkSchemaMatch.navigationRouteFor({ url }, (value: [string, any]) => {
+        try { (navRef as any).navigate(...value); } catch {}
+      });
+    } catch { /* ignore unrecognized links */ }
+  }, [navRef]);
+  const handleDeeplink = useCallback((url: string | null) => {
+    if (!url) return;
+    if (navRef.isReady()) routeDeeplink(url);
+    else pendingDeeplinkRef.current = url;
+  }, [navRef, routeDeeplink]);
+  useEffect(() => {
+    Linking.getInitialURL().then(handleDeeplink).catch(() => {});
+    const sub = Linking.addEventListener('url', ({ url }) => handleDeeplink(url));
+    return () => sub.remove();
+  }, [handleDeeplink]);
   lockedRef.current = locked;
 
   useEffect(() => {
@@ -293,7 +318,13 @@ const BCH2App: React.FC = () => {
   return (
     <SafeAreaProvider>
       <StatusBar barStyle="light-content" backgroundColor={BCH2Colors.background} />
-      <NavigationContainer theme={BCH2Theme}>
+      <NavigationContainer
+        ref={navRef}
+        theme={BCH2Theme}
+        onReady={() => {
+          if (pendingDeeplinkRef.current) { routeDeeplink(pendingDeeplinkRef.current); pendingDeeplinkRef.current = null; }
+        }}
+      >
         <BCH2Navigator />
       </NavigationContainer>
     </SafeAreaProvider>

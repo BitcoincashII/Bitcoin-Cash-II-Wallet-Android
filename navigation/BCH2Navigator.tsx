@@ -4,7 +4,7 @@
  */
 
 import React from 'react';
-import { View, Text } from 'react-native';
+import { View, Text, Alert, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { BCH2Colors, BCH2Typography } from '../components/BCH2Theme';
 import { BCH2RootStackParamList } from './BCH2NavigationTypes';
@@ -18,7 +18,8 @@ import BCH2Settings from '../screen/bch2/BCH2Settings';
 import BCH2WalletDetail from '../screen/bch2/BCH2WalletDetail';
 import AddWallet from '../screen/bch2/AddWallet';
 import BCH2AppPassword from '../screen/bch2/BCH2AppPassword';
-import { getWallet, getWalletMnemonic, updateWalletBalance, getBC2AccountXpub, StoredWallet } from '../class/bch2-wallet-storage';
+import { getWallet, getWallets, getWalletMnemonic, updateWalletBalance, getBC2AccountXpub, StoredWallet } from '../class/bch2-wallet-storage';
+import { parseBCH2PaymentUri } from '../class/bch2-uri';
 import { getTransactionsByAddress, getBC2Transactions, getBalanceByAddress, getBC2Balance, getBalanceByScripthash, getTransactionsByScripthash } from '../blue_modules/BCH2Electrum';
 import { sendTransaction, sendFromBech32, sendFromP2SH, sendBC2NativeHd, bc2ScriptTypeFromAddress, getBC2HdBalance, scanBC2Hd } from '../class/bch2-transaction';
 import { bc1AddressToScripthash } from '../class/bch2-airdrop';
@@ -84,6 +85,15 @@ export const BCH2Navigator: React.FC = () => {
       />
 
       <Stack.Screen
+        name="BCH2SendRoot"
+        component={BCH2SendRootWrapper}
+        options={{
+          title: 'Send',
+          headerBackTitle: 'Back',
+        }}
+      />
+
+      <Stack.Screen
         name="BCH2Settings"
         component={BCH2Settings}
         options={{
@@ -124,7 +134,7 @@ export const BCH2Navigator: React.FC = () => {
 
 // Wrapper components to handle route params
 import { useRoute, useNavigation } from '@react-navigation/native';
-import { BCH2ReceiveRouteProp, BCH2SendRouteProp, WalletDetailRouteProp } from './BCH2NavigationTypes';
+import { BCH2ReceiveRouteProp, BCH2SendRouteProp, BCH2SendRootRouteProp, WalletDetailRouteProp } from './BCH2NavigationTypes';
 
 const BCH2ReceiveWrapper: React.FC = () => {
   const route = useRoute<BCH2ReceiveRouteProp>();
@@ -161,7 +171,7 @@ const BCH2ReceiveWrapper: React.FC = () => {
 const BCH2SendWrapper: React.FC = () => {
   const route = useRoute<BCH2SendRouteProp>();
   const navigation = useNavigation();
-  const { walletId, walletBalance, walletAddress, isBC2 } = route.params;
+  const { walletId, walletBalance, walletAddress, isBC2, prefillAddress, prefillAmount } = route.params;
 
   const handleSend = async (toAddress: string, amount: number, feePerByte: number): Promise<{ txid: string }> => {
     const mnemonic = await getWalletMnemonic(walletId);
@@ -198,7 +208,81 @@ const BCH2SendWrapper: React.FC = () => {
       isBC2={isBC2}
       onSend={handleSend}
       navigation={navigation}
+      prefillAddress={prefillAddress}
+      prefillAmount={prefillAmount}
     />
+  );
+};
+
+/**
+ * Deep-link entry: a bitcoincashii: payment URI arrived. Parse it, pick which BCH2
+ * wallet to pay from (auto if there's exactly one; a chooser if several; a prompt
+ * to create one if none), then forward to BCH2Send with the recipient prefilled.
+ */
+const BCH2SendRootWrapper: React.FC = () => {
+  const route = useRoute<BCH2SendRootRouteProp>();
+  const navigation = useNavigation<any>();
+  const [wallets, setWallets] = React.useState<StoredWallet[] | null>(null);
+  const payment = React.useMemo(() => parseBCH2PaymentUri(route.params?.uri || ''), [route.params?.uri]);
+
+  const goToSend = React.useCallback((w: StoredWallet) => {
+    navigation.replace('BCH2Send', {
+      walletId: w.id,
+      walletBalance: w.balance,
+      walletAddress: w.address,
+      isBC2: false,
+      prefillAddress: payment?.address,
+      prefillAmount: payment?.amount,
+    });
+  }, [navigation, payment]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!payment) { navigation.replace('BCH2WalletList'); return; }
+      const bch2 = (await getWallets()).filter(w => w.type === 'bch2');
+      if (cancelled) return;
+      if (bch2.length === 0) {
+        Alert.alert('No BCH2 wallet', 'Create or import a BCH2 wallet to receive this payment request.', [
+          { text: 'OK', onPress: () => navigation.replace('BCH2WalletList') },
+        ]);
+      } else if (bch2.length === 1) {
+        goToSend(bch2[0]);
+      } else {
+        setWallets(bch2); // show the chooser
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [payment, navigation, goToSend]);
+
+  if (!wallets) {
+    return (
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: BCH2Colors.background }}>
+        <ActivityIndicator color={BCH2Colors.primary} />
+      </View>
+    );
+  }
+
+  // Multiple wallets — let the user choose which one pays.
+  return (
+    <View style={{ flex: 1, padding: 20, backgroundColor: BCH2Colors.background }}>
+      <Text style={{ color: BCH2Colors.textPrimary, fontSize: 18, fontWeight: '700', marginBottom: 4 }}>Pay from which wallet?</Text>
+      <Text style={{ color: BCH2Colors.textMuted, marginBottom: 16 }} numberOfLines={2}>
+        {payment?.amount ? `${payment.amount} BCH2 to ` : 'To '}{payment?.address}
+      </Text>
+      {wallets.map(w => (
+        <TouchableOpacity
+          key={w.id}
+          onPress={() => goToSend(w)}
+          style={{ padding: 16, borderRadius: 10, borderWidth: 1, borderColor: BCH2Colors.textMuted, marginBottom: 10 }}
+          accessibilityRole="button"
+          accessibilityLabel={`Pay from ${w.label}`}
+        >
+          <Text style={{ color: BCH2Colors.textPrimary, fontWeight: '600' }}>{w.label}</Text>
+          <Text style={{ color: BCH2Colors.textMuted, fontSize: 12 }}>{(w.balance / 1e8).toFixed(8)} BCH2</Text>
+        </TouchableOpacity>
+      ))}
+    </View>
   );
 };
 

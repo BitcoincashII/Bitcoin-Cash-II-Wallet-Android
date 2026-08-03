@@ -94,10 +94,7 @@ describe('BCH2 Deeplink Handling', () => {
       expect(result).toEqual([
         'BCH2SendRoot',
         {
-          screen: 'BCH2Send',
-          params: {
-            uri: 'bitcoincashii:qr95sy3j9xwd2ap32xkykttr4cvcu7as5yc93ky292',
-          },
+          uri: 'bitcoincashii:qr95sy3j9xwd2ap32xkykttr4cvcu7as5yc93ky292',
         },
       ]);
     });
@@ -110,10 +107,7 @@ describe('BCH2 Deeplink Handling', () => {
       expect(result).toEqual([
         'BCH2SendRoot',
         {
-          screen: 'BCH2Send',
-          params: {
-            uri: 'bitcoincashii:qr95sy3j9xwd2ap32xkykttr4cvcu7as5yc93ky292?amount=1.5',
-          },
+          uri: 'bitcoincashii:qr95sy3j9xwd2ap32xkykttr4cvcu7as5yc93ky292?amount=1.5',
         },
       ]);
     });
@@ -126,10 +120,7 @@ describe('BCH2 Deeplink Handling', () => {
       expect(result).toEqual([
         'BCH2SendRoot',
         {
-          screen: 'BCH2Send',
-          params: {
-            uri: 'bitcoincashii:pqq3728yw0y47sqn6l2na30mcw6zm78dzq5ucqzc37',
-          },
+          uri: 'bitcoincashii:pqq3728yw0y47sqn6l2na30mcw6zm78dzq5ucqzc37',
         },
       ]);
     });
@@ -141,8 +132,7 @@ describe('BCH2 Deeplink Handling', () => {
       expect(result).toEqual([
         'BCH2SendRoot',
         {
-          screen: 'BCH2Send',
-          params: { uri },
+          uri,
         },
       ]);
     });
@@ -151,7 +141,7 @@ describe('BCH2 Deeplink Handling', () => {
       const uri = 'bitcoincashii:qr95sy3j9xwd2ap32xkykttr4cvcu7as5yc93ky292?amount=2.0&message=hello';
       const result = await asyncNavigationRouteFor({ url: uri });
 
-      expect(result[1].params.uri).toBe(uri);
+      expect(result[1].uri).toBe(uri);
     });
 
     it('handles uppercase BITCOINCASHII: scheme', async () => {
@@ -160,7 +150,7 @@ describe('BCH2 Deeplink Handling', () => {
       });
 
       expect(result[0]).toBe('BCH2SendRoot');
-      expect(result[1].screen).toBe('BCH2Send');
+      expect(result[1].uri.toLowerCase()).toContain('bitcoincashii:');
     });
 
     it('handles mixed case BitcoinCashII: scheme', async () => {
@@ -232,10 +222,7 @@ describe('BCH2 Deeplink Handling', () => {
       expect(handler).toHaveBeenCalledWith([
         'BCH2SendRoot',
         {
-          screen: 'BCH2Send',
-          params: {
-            uri: 'bitcoincashii:',
-          },
+          uri: 'bitcoincashii:',
         },
       ]);
     });

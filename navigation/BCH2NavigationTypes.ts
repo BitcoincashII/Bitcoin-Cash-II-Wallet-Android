@@ -17,6 +17,13 @@ export type BCH2RootStackParamList = {
     walletBalance: number;
     walletAddress: string;
     isBC2?: boolean;
+    prefillAddress?: string; // from a bitcoincashii: deep link
+    prefillAmount?: string;
+  };
+  // Deep-link entry point: parses a bitcoincashii: URI, picks a wallet, then
+  // forwards to BCH2Send prefilled.
+  BCH2SendRoot: {
+    uri: string;
   };
   BCH2Settings: undefined;
   WalletDetail: {
@@ -38,4 +45,5 @@ export type BCH2SettingsNavigationProp = NativeStackNavigationProp<BCH2RootStack
 
 export type BCH2ReceiveRouteProp = RouteProp<BCH2RootStackParamList, 'BCH2Receive'>;
 export type BCH2SendRouteProp = RouteProp<BCH2RootStackParamList, 'BCH2Send'>;
+export type BCH2SendRootRouteProp = RouteProp<BCH2RootStackParamList, 'BCH2SendRoot'>;
 export type WalletDetailRouteProp = RouteProp<BCH2RootStackParamList, 'WalletDetail'>;
