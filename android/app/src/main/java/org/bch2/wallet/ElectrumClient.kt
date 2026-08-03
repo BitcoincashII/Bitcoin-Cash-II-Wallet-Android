@@ -320,7 +320,7 @@ class ElectrumClient {
     // Pins the public key rather than the full cert — survives certificate renewals
     // as long as the key pair is unchanged. Update this set when keys rotate.
     private val PINNED_ELECTRUM_SPKI_SHA256 = setOf(
-        "ad71c6307a433d08934cc5b71ae9e310052d0937cb83e663e5dd082d76551684", // 144.202.73.66 / electrum.bch2.org
+        "8c4a8b61d10a3ab5e3cedab2a46dc1e52f7e6ec9d99a24746f6f63bae0bafa11", // electrum.bch2.org / 144.202.73.66 (LE, refresh per release)
     )
 
     /**

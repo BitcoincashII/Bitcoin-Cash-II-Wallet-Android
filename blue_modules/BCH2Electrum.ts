@@ -5,12 +5,86 @@
  */
 
 import DefaultPreference from 'react-native-default-preference';
+import { sha256 } from '@noble/hashes/sha256';
 
 const ElectrumClient = require('electrum-client');
 const net = require('net');
 const tls = require('tls');
 
 const DEBUG = __DEV__ || false;
+
+// ---------------------------------------------------------------------------
+// TLS certificate pinning (SPKI SHA-256, base64).
+//
+// react-native-tcp-socket validates the certificate chain but does NOT perform
+// hostname verification, so chain validation alone is MITM-able by anyone
+// holding any CA-issued cert. We therefore enforce SPKI pinning in JS after the
+// handshake and fail the connection closed on mismatch. `getPeerCertificate()`
+// returns `pubkey` = base64(SubjectPublicKeyInfo DER); the pin is
+// base64(sha256(SPKI DER)).
+//
+// electrum.bch2.org uses a Let's Encrypt cert whose key rotates on renewal —
+// its pin MUST be refreshed each app release (or LE key-reuse enabled server
+// side). bc2electrum uses a long-lived self-signed cert (stable). Keep the
+// hex mirror in android/app/src/main/java/org/bch2/wallet/ElectrumClient.kt in
+// sync when these change.
+const PINNED_SPKI_SHA256: Record<'bch2' | 'bc2', string[]> = {
+  // electrum.bch2.org:50002 (+ 144.202.73.66) — Let's Encrypt, rotates ~90d.
+  bch2: ['jEqLYdEKOrXjztqypG3B5S9+bsnZmiR0b29juuC6+hE='],
+  // bc2electrum.bch2.org:50011 (+ 144.202.73.66) — self-signed, 10y.
+  bc2: ['7RZ1HtI370pp2Re06xJ0W1/QGupIq+X94GdRzPY7aT4='],
+};
+
+function b64FromBytes(bytes: Uint8Array): string {
+  // RN has global btoa; fall back to a manual encoder if absent.
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  if (typeof btoa === 'function') return btoa(binary);
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let out = '';
+  for (let i = 0; i < binary.length; i += 3) {
+    const a = binary.charCodeAt(i);
+    const b = i + 1 < binary.length ? binary.charCodeAt(i + 1) : NaN;
+    const c = i + 2 < binary.length ? binary.charCodeAt(i + 2) : NaN;
+    out += chars[a >> 2];
+    out += chars[((a & 3) << 4) | (isNaN(b) ? 0 : b >> 4)];
+    out += isNaN(b) ? '=' : chars[((b & 15) << 2) | (isNaN(c) ? 0 : c >> 6)];
+    out += isNaN(c) ? '=' : chars[c & 63];
+  }
+  return out;
+}
+
+function b64ToBytes(b64: string): Uint8Array {
+  const binary = typeof atob === 'function'
+    ? atob(b64)
+    : Buffer.from(b64, 'base64').toString('binary');
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+/**
+ * Verify the pinned SPKI of an already-connected TLS Electrum client.
+ * Throws (fail-closed) if the peer's public key is not in the pinned set.
+ * `client.conn` is the react-native-tcp-socket TLSSocket created by
+ * electrum-client; getPeerCertificate() resolves after the handshake.
+ */
+async function verifyPinnedSpki(client: any, serverType: 'bch2' | 'bc2', host: string): Promise<void> {
+  const pins = PINNED_SPKI_SHA256[serverType];
+  const conn = client?.conn;
+  if (!conn || typeof conn.getPeerCertificate !== 'function') {
+    throw new Error(`Cannot read peer certificate for ${host} — refusing to trust connection`);
+  }
+  const cert = await conn.getPeerCertificate();
+  const pubkeyB64: string | undefined = cert && cert.pubkey;
+  if (!pubkeyB64) {
+    throw new Error(`No peer public key for ${host} — refusing to trust connection`);
+  }
+  const spkiPin = b64FromBytes(sha256(b64ToBytes(pubkeyB64)));
+  if (!pins.includes(spkiPin)) {
+    throw new Error(`Certificate pin mismatch for ${host} (got ${spkiPin}) — possible MITM, connection refused`);
+  }
+}
 
 // RPC fallback configuration
 let rpcConfig: { host: string; port: number; user: string; password: string } | null = null;
@@ -40,6 +114,21 @@ export const bc2Peers: Peer[] = [
   { host: 'bc2electrum.bch2.org', ssl: 50011, tcp: 50010 },
   { host: '144.202.73.66', ssl: 50011, tcp: 50010 },  // IP fallback if DNS fails
 ];
+
+// Map a known host to its pinned server type (for the settings test button).
+const BCH2_HOSTS = new Set(['electrum.bch2.org']);
+const BC2_HOSTS = new Set(['bc2electrum.bch2.org']);
+
+/**
+ * For the settings connection-test: if the host is a known BCH2/BC2 server,
+ * enforce its SPKI pin (fail-closed) so a "Success" dialog means the genuine
+ * server. For arbitrary user hosts we can't pin, so this is a no-op and the
+ * test reports reachability only. `client.conn` must be a connected TLSSocket.
+ */
+export async function verifyKnownHostPin(client: any, host: string): Promise<void> {
+  if (BCH2_HOSTS.has(host)) return verifyPinnedSpki(client, 'bch2', host);
+  if (BC2_HOSTS.has(host)) return verifyPinnedSpki(client, 'bc2', host);
+}
 
 let mainClient: typeof ElectrumClient | undefined;
 let mainConnected: boolean = false;
@@ -84,10 +173,12 @@ async function _doConnectMain(): Promise<void> {
     const peer = hardcodedPeers[currentPeerIndex];
     currentPeerIndex = (currentPeerIndex + 1) % hardcodedPeers.length;
 
-    // Build list of protocols to try: SSL first, then TCP fallback
-    const protocols: Array<{ port: number; proto: string; opts?: object }> = [];
-    if (peer.ssl) protocols.push({ port: peer.ssl, proto: 'tls', opts: { rejectUnauthorized: false } });
-    if (peer.tcp) protocols.push({ port: peer.tcp, proto: 'tcp' });
+    // TLS only — no plaintext TCP fallback. A silent downgrade to cleartext is a
+    // MITM vector (an attacker who blocks :50002 could otherwise force :50001).
+    if (!peer.ssl) continue;
+    const protocols: Array<{ port: number; proto: string; opts?: object }> = [
+      { port: peer.ssl, proto: 'tls', opts: { rejectUnauthorized: true } },
+    ];
 
     for (const { port, proto, opts } of protocols) {
       try {
@@ -106,6 +197,8 @@ async function _doConnectMain(): Promise<void> {
           mainClient.initElectrum({ client: 'bluewallet-bch2', version: '1.4' }),
           new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout')), 10000)),
         ]);
+        // Fail closed unless the server presents a pinned public key.
+        await verifyPinnedSpki(mainClient, 'bch2', peer.host);
         mainConnected = true;
         serverName = peer.host;
 
@@ -529,10 +622,14 @@ async function _doConnectBC2(): Promise<void> {
     const peer = bc2Peers[bc2PeerIndex];
     bc2PeerIndex = (bc2PeerIndex + 1) % bc2Peers.length;
 
-    // Build list of protocols to try: SSL first, then TCP fallback
-    const protocols: Array<{ port: number; proto: string; opts?: object }> = [];
-    if (peer.ssl) protocols.push({ port: peer.ssl, proto: 'tls', opts: { rejectUnauthorized: false } });
-    if (peer.tcp) protocols.push({ port: peer.tcp, proto: 'tcp' });
+    // TLS only — no plaintext TCP fallback (see connectMain). BC2 uses a stable
+    // self-signed cert, so chain validation would fail; the SPKI pin below IS
+    // the trust anchor. rejectUnauthorized:false lets the handshake complete;
+    // verifyPinnedSpki then fails closed unless the pinned key is presented.
+    if (!peer.ssl) continue;
+    const protocols: Array<{ port: number; proto: string; opts?: object }> = [
+      { port: peer.ssl, proto: 'tls', opts: { rejectUnauthorized: false } },
+    ];
 
     for (const { port, proto, opts } of protocols) {
       try {
@@ -549,6 +646,7 @@ async function _doConnectBC2(): Promise<void> {
           bc2Client.initElectrum({ client: 'bluewallet-bch2', version: '1.4' }),
           new Promise((_, reject) => setTimeout(() => reject(new Error('BC2 connection timeout')), 10000)),
         ]);
+        await verifyPinnedSpki(bc2Client, 'bc2', peer.host);
         bc2Connected = true;
         return; // Success
       } catch (e) {

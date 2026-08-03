@@ -18,6 +18,8 @@ import {
   Linking,
 } from 'react-native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2Shadows, BCH2BorderRadius } from '../../components/BCH2Theme';
+import { verifyKnownHostPin } from '../../blue_modules/BCH2Electrum';
+import { getVersion, getBuildNumber } from 'react-native-device-info';
 import {
   isBiometricAvailable,
   isBiometricEnabled,
@@ -197,6 +199,13 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
         client.initElectrum({ client: 'bch2-wallet-test', version: '1.4' }, { maxRetry: 0, callback: null }),
         new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout (10s)')), 10000)),
       ]);
+
+      // For known BCH2/BC2 hosts, fail closed on a certificate-pin mismatch so a
+      // "Success" result means the genuine server (not a MITM). No-op for
+      // arbitrary custom hosts, which we can only test for reachability.
+      if (server.ssl) {
+        await verifyKnownHostPin(client, server.host);
+      }
 
       client.close();
       client = null;
@@ -626,7 +635,7 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
             const body = encodeURIComponent(
               `\n\n` +
               `-------------------\n` +
-              `App Version: 1.3.0\n` +
+              `App Version: ${getVersion()} (build ${getBuildNumber()})\n` +
               `Platform: Android\n` +
               `Date: ${new Date().toISOString()}\n` +
               `-------------------\n` +
@@ -650,7 +659,7 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
             const body = encodeURIComponent(
               `\n\n` +
               `-------------------\n` +
-              `App Version: 1.3.0\n` +
+              `App Version: ${getVersion()} (build ${getBuildNumber()})\n` +
               `-------------------\n` +
               `Please describe your feature request above this line.`
             );
@@ -672,7 +681,7 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
 
         <View style={styles.aboutCard}>
           <Text style={styles.aboutTitle}>Bitcoin Cash II Wallet</Text>
-          <Text style={styles.aboutVersion}>Version 1.3.0</Text>
+          <Text style={styles.aboutVersion}>Version {getVersion()} (build {getBuildNumber()})</Text>
           <Text style={styles.aboutDescription}>
             A mobile wallet for Bitcoin Cash II (BCH2) and BitcoinII (BC2) with full support for both chains.
           </Text>
