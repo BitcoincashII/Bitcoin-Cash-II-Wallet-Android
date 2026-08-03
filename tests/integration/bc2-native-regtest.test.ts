@@ -38,7 +38,7 @@ jest.mock('../../blue_modules/BCH2Electrum', () => ({
   filterMatureUtxos: async (u: any[]) => u,
 }));
 
-import { buildBC2SegwitTx, buildBC2TaprootTx } from '../../class/bch2-transaction';
+import { buildBC2SegwitTx, buildBC2TaprootTx, buildBC2SegwitTxMulti, buildBC2TaprootTxMulti, buildBC2LegacyTxMulti } from '../../class/bch2-transaction';
 
 const CLI_BIN = process.env.BC2_REGTEST_CLI || '/home/dev/bch2-linux-out/bitcoincashII-cli';
 const DATADIR = process.env.BC2_REGTEST_DATADIR ||
@@ -198,6 +198,81 @@ run('native BC2 SegWit / Taproot spends — real regtest consensus', () => {
     expect(ecc.verifySchnorr(sighash, tweakedXonly, sig)).toBe(true);
     // The output key committed in the UTXO is exactly what we signed for.
     expect(decoded.vout[0].scriptPubKey.hex).toBe(RECIPIENT.toString('hex'));
+  });
+
+  it('multi-KEY P2WPKH spend (two different HD addresses) accepted by consensus', () => {
+    // The core HD guarantee: inputs from different addresses, each signed by its own key.
+    const c0 = root.derivePath("m/84'/0'/0'/0/0");
+    const c1 = root.derivePath("m/84'/0'/0'/0/1");
+    const p0 = Buffer.from(c0.publicKey), p1 = Buffer.from(c1.publicKey);
+    const spk0 = Buffer.concat([Buffer.from([0x00, 0x14]), hash160(p0)]);
+    const spk1 = Buffer.concat([Buffer.from([0x00, 0x14]), hash160(p1)]);
+    const u0 = fundScript(spk0, 30_000_000);
+    const u1 = fundScript(spk1, 40_000_000);
+    const inputs = [
+      { txid: u0.txid, vout: u0.vout, value: u0.value, privateKey: Buffer.from(c0.privateKey!), publicKey: p0 },
+      { txid: u1.txid, vout: u1.vout, value: u1.value, privateKey: Buffer.from(c1.privateKey!), publicKey: p1 },
+    ];
+    const hex = buildBC2SegwitTxMulti(false, inputs, RECIPIENT, 60_000_000, spk0, 9_999_000);
+    assertConsensusValid(hex); // a wrong key on either input would make consensus reject
+  });
+
+  it('multi-KEY legacy P2PKH spend (two different HD addresses) accepted by consensus', () => {
+    const c0 = root.derivePath("m/44'/0'/0'/0/0");
+    const c1 = root.derivePath("m/44'/0'/0'/0/1");
+    const p0 = Buffer.from(c0.publicKey), p1 = Buffer.from(c1.publicKey);
+    const spk = (pub: Buffer) => Buffer.concat([Buffer.from([0x76, 0xa9, 0x14]), hash160(pub), Buffer.from([0x88, 0xac])]);
+    const u0 = fundScript(spk(p0), 30_000_000);
+    const u1 = fundScript(spk(p1), 40_000_000);
+    const inputs = [
+      { txid: u0.txid, vout: u0.vout, value: u0.value, privateKey: Buffer.from(c0.privateKey!), publicKey: p0 },
+      { txid: u1.txid, vout: u1.vout, value: u1.value, privateKey: Buffer.from(c1.privateKey!), publicKey: p1 },
+    ];
+    const hex = buildBC2LegacyTxMulti(inputs, RECIPIENT, 60_000_000, spk(p0), 9_999_000);
+    assertConsensusValid(hex);
+  });
+
+  it('multi-KEY Taproot spend: each input signed by its own tweaked key', () => {
+    const mk = (i: number) => {
+      const c = root.derivePath(`m/86'/0'/0'/0/${i}`);
+      const pub = Buffer.from(c.publicKey);
+      const xonly = pub.subarray(1, 33);
+      const tweak = taggedHash('TapTweak', xonly);
+      const tweakedXonly = Buffer.from(ecc.xOnlyPointAddTweak(xonly, tweak)!.xOnlyPubkey);
+      const eff = pub[0] === 0x02 ? Buffer.from(c.privateKey!) : Buffer.from(ecc.privateNegate(Buffer.from(c.privateKey!)));
+      const tweakedPriv = Buffer.from(ecc.privateAdd(eff, tweak)!);
+      const spk = Buffer.concat([Buffer.from([0x51, 0x20]), tweakedXonly]);
+      return { tweakedPriv, tweakedXonly, spk };
+    };
+    const k0 = mk(0), k1 = mk(1);
+    const u0 = fundScript(k0.spk, 30_000_000);
+    const u1 = fundScript(k1.spk, 40_000_000);
+    const utxos = [u0, u1];
+    const spks = [k0.spk, k1.spk];
+    const inputs = [
+      { txid: u0.txid, vout: u0.vout, value: u0.value, tweakedPrivkey: k0.tweakedPriv, tweakedXonly: k0.tweakedXonly },
+      { txid: u1.txid, vout: u1.vout, value: u1.value, tweakedPrivkey: k1.tweakedPriv, tweakedXonly: k1.tweakedXonly },
+    ];
+    const amount = 50_000_000, change = 19_999_000;
+    const hexReal = buildBC2TaprootTxMulti(inputs, RECIPIENT, amount, k0.spk, change); // change → input 0's script
+    const outs = Buffer.concat([
+      le64(amount), varint(RECIPIENT.length), RECIPIENT,
+      le64(change), varint(k0.spk.length), k0.spk,
+    ]);
+    const shaPrevouts = sha256(Buffer.concat(utxos.map(u => Buffer.concat([Buffer.from(u.txid, 'hex').reverse(), (() => { const b = Buffer.alloc(4); b.writeUInt32LE(u.vout); return b; })()]))));
+    const shaAmounts = sha256(Buffer.concat(utxos.map(u => le64(u.value))));
+    const shaSpks = sha256(Buffer.concat(spks.map(s => Buffer.concat([varint(s.length), s]))));
+    const shaSeqs = sha256(Buffer.concat(utxos.map(() => Buffer.from('ffffffff', 'hex'))));
+    const shaOuts = sha256(outs);
+    const decoded = jcli(['decoderawtransaction', hexReal, 'true']);
+    for (let i = 0; i < 2; i++) {
+      const idx = Buffer.alloc(4); idx.writeUInt32LE(i);
+      const msg = Buffer.concat([Buffer.from([0x00, 0x00]), Buffer.from('02000000', 'hex'), Buffer.from('00000000', 'hex'), shaPrevouts, shaAmounts, shaSpks, shaSeqs, shaOuts, Buffer.from([0x00]), idx]);
+      const sighash = taggedHash('TapSighash', msg);
+      const sig = Buffer.from(decoded.vin[i].txinwitness[0], 'hex');
+      expect(sig.length).toBe(64);
+      expect(ecc.verifySchnorr(sighash, inputs[i].tweakedXonly, sig)).toBe(true); // input i signed by key i
+    }
   });
 
   it("fee estimate covers the real vsize of a Taproot-output tx at 1 sat/vByte (regression: 43-byte outputs)", () => {

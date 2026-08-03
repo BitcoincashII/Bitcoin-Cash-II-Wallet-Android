@@ -23,7 +23,9 @@ import {
   broadcastTransaction,
   broadcastBC2Transaction,
   filterMatureUtxos,
+  getBC2AddressInfo,
 } from '../blue_modules/BCH2Electrum';
+import { bc2AddressFromPubkey } from './bch2-wallet-storage';
 
 const bip32 = BIP32Factory(ecc);
 const crypto = require('crypto');
@@ -2775,11 +2777,86 @@ function createBIP143SighashNative(
   return doubleSha256(preimage);
 }
 
+// HD-aware keyed inputs: each input can come from a different address of the same
+// wallet, so it carries its own key material.
+export interface SegwitKeyedInput { txid: string; vout: number; value: number; privateKey: Buffer; publicKey: Buffer; }
+export interface TaprootKeyedInput { txid: string; vout: number; value: number; tweakedPrivkey: Buffer; tweakedXonly: Buffer; }
+
+/** Serialize the recipient (+ optional change) outputs and return with the count. */
+function buildOutputs(recipientScript: Buffer, amount: number, changeScript: Buffer | null, changeAmount: number): { outputs: Buffer; outputCount: number } {
+  if (amount < 0 || changeAmount < 0) throw new Error('Negative amount in transaction');
+  if (amount > Number.MAX_SAFE_INTEGER || changeAmount > Number.MAX_SAFE_INTEGER) throw new Error('Amount exceeds safe integer range');
+  let outputs = Buffer.alloc(0);
+  let outputCount = 1;
+  const amtB = Buffer.alloc(8); amtB.writeBigUInt64LE(BigInt(amount), 0);
+  outputs = Buffer.concat([outputs, amtB, encodeVarInt(recipientScript.length), recipientScript]);
+  if (changeScript && changeAmount > 0) {
+    outputCount++;
+    const cB = Buffer.alloc(8); cB.writeBigUInt64LE(BigInt(changeAmount), 0);
+    outputs = Buffer.concat([outputs, cB, encodeVarInt(changeScript.length), changeScript]);
+  }
+  return { outputs, outputCount };
+}
+
+/** BIP143 midstates (prevouts, sequences, outputs) for a set of inputs (all seq 0xffffffff). */
+function bip143Midstates(ins: { txid: string; vout: number }[], outputs: Buffer): { hashPrevouts: Buffer; hashSequence: Buffer; hashOutputs: Buffer } {
+  let prevoutsData = Buffer.alloc(0);
+  let sequencesData = Buffer.alloc(0);
+  for (const u of ins) {
+    const txid = Buffer.from(u.txid, 'hex').reverse();
+    const vout = Buffer.alloc(4); vout.writeUInt32LE(u.vout, 0);
+    prevoutsData = Buffer.concat([prevoutsData, txid, vout]);
+    sequencesData = Buffer.concat([sequencesData, Buffer.from('ffffffff', 'hex')]);
+  }
+  return { hashPrevouts: doubleSha256(prevoutsData), hashSequence: doubleSha256(sequencesData), hashOutputs: doubleSha256(outputs) };
+}
+
+/** Serialize a legacy (non-witness) transaction from pre-built scriptSigs. */
+function serializeLegacyTx(ins: { txid: string; vout: number; scriptSig: Buffer }[], serializedOutputs: Buffer, outputCount: number): string {
+  if (ins.length === 0) throw new Error('No inputs for transaction');
+  if (ins.length > 500) throw new Error('Too many inputs (max 500) — consolidate UTXOs first');
+  const version = Buffer.alloc(4); version.writeUInt32LE(2, 0);
+  const locktime = Buffer.alloc(4); locktime.writeUInt32LE(0, 0);
+  const parts: Buffer[] = [version, encodeVarInt(ins.length)];
+  for (const inp of ins) {
+    const txid = Buffer.from(inp.txid, 'hex').reverse();
+    const vout = Buffer.alloc(4); vout.writeUInt32LE(inp.vout, 0);
+    parts.push(txid, vout, encodeVarInt(inp.scriptSig.length), inp.scriptSig, Buffer.from('ffffffff', 'hex'));
+  }
+  parts.push(encodeVarInt(outputCount), serializedOutputs, locktime);
+  return Buffer.concat(parts).toString('hex');
+}
+
 /**
- * Build a native BC2 P2WPKH (nested=false) or P2SH-P2WPKH (nested=true) spend.
- * Returns raw tx hex with a real BIP144 witness. Pure: takes UTXOs + keys +
- * pre-built output scripts, no network. Exported for regtest validation.
+ * Build a native BC2 P2WPKH (nested=false) / P2SH-P2WPKH (nested=true) spend where
+ * EACH input carries its own key — HD wallets gather UTXOs from many addresses.
+ * Returns raw tx hex with a real BIP144 witness. Pure; no network.
  */
+export function buildBC2SegwitTxMulti(
+  nested: boolean,
+  inputs: SegwitKeyedInput[],
+  recipientScript: Buffer,
+  amount: number,
+  changeScript: Buffer | null,
+  changeAmount: number
+): string {
+  const { outputs, outputCount } = buildOutputs(recipientScript, amount, changeScript, changeAmount);
+  const { hashPrevouts, hashSequence, hashOutputs } = bip143Midstates(inputs, outputs);
+  const utxoList: UTXO[] = inputs.map(i => ({ txid: i.txid, vout: i.vout, value: i.value }));
+  const built: SegwitInput[] = inputs.map((inp, i) => {
+    const pubkeyHash = hash160(inp.publicKey);
+    const sighash = createBIP143SighashNative(utxoList, i, pubkeyHash, inp.value, hashPrevouts, hashSequence, hashOutputs);
+    const sig = Buffer.concat([signWithPrivateKey(sighash, inp.privateKey), Buffer.from([0x01])]); // SIGHASH_ALL
+    // P2SH-P2WPKH scriptSig is a single push of the input's own redeemScript (OP_0 PUSH20 <h160>)
+    const scriptSig = nested
+      ? (() => { const rs = Buffer.concat([Buffer.from([0x00, 0x14]), pubkeyHash]); return Buffer.concat([encodeVarInt(rs.length), rs]); })()
+      : Buffer.alloc(0);
+    return { txid: inp.txid, vout: inp.vout, scriptSig, witness: [sig, inp.publicKey] };
+  });
+  return serializeSegwitTx(built, outputs, outputCount);
+}
+
+/** Single-key convenience wrapper (all inputs share one key). Exported for regtest validation. */
 export function buildBC2SegwitTx(
   nested: boolean,
   utxos: UTXO[],
@@ -2790,45 +2867,30 @@ export function buildBC2SegwitTx(
   privateKey: Buffer,
   publicKey: Buffer
 ): string {
-  if (amount < 0 || changeAmount < 0) throw new Error('Negative amount in transaction');
-  if (amount > Number.MAX_SAFE_INTEGER || changeAmount > Number.MAX_SAFE_INTEGER) throw new Error('Amount exceeds safe integer range');
+  return buildBC2SegwitTxMulti(
+    nested,
+    utxos.map(u => ({ txid: u.txid, vout: u.vout, value: u.value, privateKey, publicKey })),
+    recipientScript, amount, changeScript, changeAmount
+  );
+}
 
-  let outputs = Buffer.alloc(0);
-  let outputCount = 1;
-  const amtB = Buffer.alloc(8); amtB.writeBigUInt64LE(BigInt(amount), 0);
-  outputs = Buffer.concat([outputs, amtB, encodeVarInt(recipientScript.length), recipientScript]);
-  if (changeScript && changeAmount > 0) {
-    outputCount++;
-    const cB = Buffer.alloc(8); cB.writeBigUInt64LE(BigInt(changeAmount), 0);
-    outputs = Buffer.concat([outputs, cB, encodeVarInt(changeScript.length), changeScript]);
-  }
-
-  const pubkeyHash = hash160(publicKey);
-
-  // BIP143 midstates (sequences are all 0xffffffff)
-  let prevoutsData = Buffer.alloc(0);
-  let sequencesData = Buffer.alloc(0);
-  for (const u of utxos) {
-    const txid = Buffer.from(u.txid, 'hex').reverse();
-    const vout = Buffer.alloc(4); vout.writeUInt32LE(u.vout, 0);
-    prevoutsData = Buffer.concat([prevoutsData, txid, vout]);
-    sequencesData = Buffer.concat([sequencesData, Buffer.from('ffffffff', 'hex')]);
-  }
-  const hashPrevouts = doubleSha256(prevoutsData);
-  const hashSequence = doubleSha256(sequencesData);
-  const hashOutputs = doubleSha256(outputs);
-
-  // P2SH-P2WPKH scriptSig is a single push of the redeemScript (OP_0 PUSH20 <h160>)
-  const redeemScript = nested ? Buffer.concat([Buffer.from([0x00, 0x14]), pubkeyHash]) : null;
-
-  const inputs: SegwitInput[] = utxos.map((u, i) => {
-    const sighash = createBIP143SighashNative(utxos, i, pubkeyHash, u.value, hashPrevouts, hashSequence, hashOutputs);
-    const sig = Buffer.concat([signWithPrivateKey(sighash, privateKey), Buffer.from([0x01])]); // SIGHASH_ALL
-    const scriptSig = redeemScript ? Buffer.concat([encodeVarInt(redeemScript.length), redeemScript]) : Buffer.alloc(0);
-    return { txid: u.txid, vout: u.vout, scriptSig, witness: [sig, publicKey] };
+/** Build a legacy BC2 P2PKH spend where each input carries its own key (HD). */
+export function buildBC2LegacyTxMulti(
+  inputs: SegwitKeyedInput[],
+  recipientScript: Buffer,
+  amount: number,
+  changeScript: Buffer | null,
+  changeAmount: number
+): string {
+  const { outputs, outputCount } = buildOutputs(recipientScript, amount, changeScript, changeAmount);
+  const utxoList: UTXO[] = inputs.map(i => ({ txid: i.txid, vout: i.vout, value: i.value }));
+  const built = inputs.map((inp, i) => {
+    const sighash = createLegacySighash(utxoList, i, inp.publicKey, outputCount, outputs, inp.value);
+    const sig = Buffer.concat([signWithPrivateKey(sighash, inp.privateKey), Buffer.from([0x01])]); // SIGHASH_ALL
+    const scriptSig = Buffer.concat([encodeVarInt(sig.length), sig, encodeVarInt(inp.publicKey.length), inp.publicKey]);
+    return { txid: inp.txid, vout: inp.vout, scriptSig };
   });
-
-  return serializeSegwitTx(inputs, outputs, outputCount);
+  return serializeLegacyTx(built, outputs, outputCount);
 }
 
 /**
@@ -2837,41 +2899,29 @@ export function buildBC2SegwitTx(
  * sighash already used by the recovery path — only the serialization differs
  * (real witness vs scriptSig). Pure; exported for regtest validation.
  */
-export function buildBC2TaprootTx(
-  utxos: UTXO[],
+export function buildBC2TaprootTxMulti(
+  inputs: TaprootKeyedInput[],
   recipientScript: Buffer,
   amount: number,
   changeScript: Buffer | null,
-  changeAmount: number,
-  tweakedPrivkey: Buffer,
-  tweakedXonly: Buffer
+  changeAmount: number
 ): string {
-  if (amount < 0 || changeAmount < 0) throw new Error('Negative amount in transaction');
-  if (amount > Number.MAX_SAFE_INTEGER || changeAmount > Number.MAX_SAFE_INTEGER) throw new Error('Amount exceeds safe integer range');
+  const { outputs, outputCount } = buildOutputs(recipientScript, amount, changeScript, changeAmount);
+  const inputScriptPubKeys = inputs.map(inp => Buffer.concat([Buffer.from([0x51, 0x20]), inp.tweakedXonly])); // OP_1 PUSH32 <tweaked x-only>
+  const utxoList: UTXO[] = inputs.map(i => ({ txid: i.txid, vout: i.vout, value: i.value }));
 
-  const spk = Buffer.concat([Buffer.from([0x51, 0x20]), tweakedXonly]); // OP_1 PUSH32 <tweaked x-only>
-
-  let outputs = Buffer.alloc(0);
-  let outputCount = 1;
-  const amtB = Buffer.alloc(8); amtB.writeBigUInt64LE(BigInt(amount), 0);
-  outputs = Buffer.concat([outputs, amtB, encodeVarInt(recipientScript.length), recipientScript]);
-  if (changeScript && changeAmount > 0) {
-    outputCount++;
-    const cB = Buffer.alloc(8); cB.writeBigUInt64LE(BigInt(changeAmount), 0);
-    outputs = Buffer.concat([outputs, cB, encodeVarInt(changeScript.length), changeScript]);
-  }
-
-  const inputScriptPubKeys = utxos.map(() => spk);
   let prevoutsData = Buffer.alloc(0);
   let amountsData = Buffer.alloc(0);
   let scriptPubKeysData = Buffer.alloc(0);
   let sequencesData = Buffer.alloc(0);
-  for (const u of utxos) {
+  for (let j = 0; j < inputs.length; j++) {
+    const u = inputs[j];
     const txid = Buffer.from(u.txid, 'hex').reverse();
     const vout = Buffer.alloc(4); vout.writeUInt32LE(u.vout, 0);
     prevoutsData = Buffer.concat([prevoutsData, txid, vout]);
     const amt = Buffer.alloc(8); amt.writeBigUInt64LE(BigInt(u.value), 0);
     amountsData = Buffer.concat([amountsData, amt]);
+    const spk = inputScriptPubKeys[j];
     scriptPubKeysData = Buffer.concat([scriptPubKeysData, encodeVarInt(spk.length), spk]);
     sequencesData = Buffer.concat([sequencesData, Buffer.from('ffffffff', 'hex')]);
   }
@@ -2881,16 +2931,32 @@ export function buildBC2TaprootTx(
   const hashSequences = singleSha256(sequencesData);
   const hashOutputs = singleSha256(outputs);
 
-  const inputs: SegwitInput[] = utxos.map((u, i) => {
+  const built: SegwitInput[] = inputs.map((inp, i) => {
     const sighash = createBIP341Sighash(
-      utxos, i, inputScriptPubKeys, outputCount, outputs,
+      utxoList, i, inputScriptPubKeys, outputCount, outputs,
       hashPrevouts, hashAmounts, hashScriptPubKeys, hashSequences, hashOutputs
     );
-    const sig = Buffer.from(ecc.signSchnorr(sighash, tweakedPrivkey)); // 64 bytes, SIGHASH_DEFAULT
-    return { txid: u.txid, vout: u.vout, scriptSig: Buffer.alloc(0), witness: [sig] };
+    const sig = Buffer.from(ecc.signSchnorr(sighash, inp.tweakedPrivkey)); // 64 bytes, SIGHASH_DEFAULT
+    return { txid: inp.txid, vout: inp.vout, scriptSig: Buffer.alloc(0), witness: [sig] };
   });
 
-  return serializeSegwitTx(inputs, outputs, outputCount);
+  return serializeSegwitTx(built, outputs, outputCount);
+}
+
+/** Single-key convenience wrapper (all inputs share one tweaked key). Exported for regtest validation. */
+export function buildBC2TaprootTx(
+  utxos: UTXO[],
+  recipientScript: Buffer,
+  amount: number,
+  changeScript: Buffer | null,
+  changeAmount: number,
+  tweakedPrivkey: Buffer,
+  tweakedXonly: Buffer
+): string {
+  return buildBC2TaprootTxMulti(
+    utxos.map(u => ({ txid: u.txid, vout: u.vout, value: u.value, tweakedPrivkey, tweakedXonly })),
+    recipientScript, amount, changeScript, changeAmount
+  );
 }
 
 /** BIP49 wrapped-SegWit input weight estimate: witness sig+pubkey + scriptSig redeemScript push. */
@@ -3063,6 +3129,190 @@ export async function sendBC2Native(
   }
 }
 
+// ============================================================================
+// BC2 HD wallets (BlueWallet-style): gap-limit scan across receive + change
+// chains, balance aggregation, multi-address spending, fresh change addresses.
+// ============================================================================
+
+const HD_GAP_LIMIT = 20;      // BIP44 standard
+const HD_MAX_INDEX = 1000;    // hard cap so a broken indexer can't spin forever
+const HD_MAX_NET_ERRORS = 10; // give up a chain after this many consecutive network errors
+
+function bc2Purpose(scriptType: BC2ScriptType): number {
+  return scriptType === 'p2sh-segwit' ? 49 : scriptType === 'native-segwit' ? 84 : scriptType === 'taproot' ? 86 : 44;
+}
+
+export interface HdUtxo { txid: string; vout: number; value: number; chain: 0 | 1; index: number; }
+export interface HdScanResult {
+  confirmed: number;
+  unconfirmed: number;
+  utxos: HdUtxo[];
+  nextReceiveIndex: number;
+  nextChangeIndex: number;
+  receiveAddress: string; // next unused receive address (chain 0)
+}
+
+/**
+ * Scan a BC2 HD account (receive chain 0 + change chain 1) with a BIP44 gap
+ * limit, aggregating balance and collecting spendable UTXOs (tagged with their
+ * derivation chain/index) across every used address. Returns NO key material —
+ * spending re-derives keys on demand. A used-but-empty address advances the gap
+ * counter (via tx_count) so spent addresses don't prematurely stop the scan.
+ */
+export async function scanBC2Hd(mnemonic: string, scriptType: BC2ScriptType): Promise<HdScanResult> {
+  const seed = await bip39.mnemonicToSeed(mnemonic);
+  const root = bip32.fromSeed(seed);
+  const purpose = bc2Purpose(scriptType);
+  try {
+    let confirmed = 0;
+    let unconfirmed = 0;
+    const utxos: HdUtxo[] = [];
+    const nextIndex: [number, number] = [0, 0];
+    for (const chain of [0, 1] as const) {
+      const acct = root.derivePath(`m/${purpose}'/0'/0'/${chain}`);
+      let consecutiveEmpty = 0;
+      let consecutiveErrors = 0;
+      let index = 0;
+      while (consecutiveEmpty < HD_GAP_LIMIT && index < HD_MAX_INDEX && consecutiveErrors < HD_MAX_NET_ERRORS) {
+        const address = bc2AddressFromPubkey(scriptType, Buffer.from(acct.derive(index).publicKey));
+        let info: { confirmed: number; unconfirmed: number; txCount: number };
+        try {
+          info = await getBC2AddressInfo(address);
+          consecutiveErrors = 0;
+        } catch {
+          consecutiveErrors++;
+          index++;
+          continue; // network error: skip this index without touching the gap counter
+        }
+        if (info.txCount > 0) {
+          consecutiveEmpty = 0;
+          confirmed += info.confirmed;
+          unconfirmed += info.unconfirmed;
+          if (info.confirmed > 0 || info.unconfirmed > 0) {
+            try {
+              const mature = await filterMatureUtxos(await getBC2Utxos(address), true);
+              for (const u of mature) {
+                if (Number.isInteger(u.value) && u.value > 0 && /^[0-9a-fA-F]{64}$/.test(u.txid) && Number.isInteger(u.vout) && u.vout >= 0) {
+                  utxos.push({ txid: u.txid, vout: u.vout, value: u.value, chain, index });
+                }
+              }
+            } catch { /* leave this address's UTXOs out rather than block the scan */ }
+          }
+        } else {
+          consecutiveEmpty++;
+        }
+        index++;
+      }
+      nextIndex[chain] = index - consecutiveEmpty; // first unused index on this chain
+    }
+    const receiveAddress = bc2AddressFromPubkey(scriptType, Buffer.from(root.derivePath(`m/${purpose}'/0'/0'/0/${nextIndex[0]}`).publicKey));
+    return { confirmed, unconfirmed, utxos, nextReceiveIndex: nextIndex[0], nextChangeIndex: nextIndex[1], receiveAddress };
+  } finally {
+    if (seed instanceof Buffer || seed instanceof Uint8Array) { try { crypto.randomFillSync(seed); } catch {} seed.fill(0); }
+    if (root.privateKey) { try { crypto.randomFillSync(root.privateKey); } catch {} root.privateKey.fill(0); }
+  }
+}
+
+/**
+ * HD send for BC2: gather UTXOs across the whole account, sign EACH input with
+ * its own address key, send change to a fresh change address, broadcast to BC2.
+ * Handles all four script types (legacy / wrapped / native SegWit / taproot).
+ */
+export async function sendBC2NativeHd(
+  mnemonic: string,
+  scriptType: BC2ScriptType,
+  toAddress: string,
+  amountSats: number,
+  feePerByte: number
+): Promise<TransactionResult> {
+  feePerByte = Math.ceil(feePerByte);
+  if (!Number.isFinite(feePerByte) || feePerByte < 1) feePerByte = 1;
+  if (feePerByte > 1000) throw new Error('Fee rate too high (max 1000 sat/byte)');
+  if (!Number.isInteger(amountSats) || amountSats < 0) throw new Error('Invalid amount');
+  if (amountSats < 546) throw new Error('Amount below dust threshold (546 sats)');
+
+  const recipientScript = addressToScript(toAddress, true);
+  const purpose = bc2Purpose(scriptType);
+
+  const scan = await scanBC2Hd(mnemonic, scriptType);
+  const available = scan.utxos.slice().sort((a, b) => b.value - a.value);
+  if (available.length === 0) throw new Error(`No spendable UTXOs for this BC2 ${scriptType} wallet`);
+
+  const seed = await bip39.mnemonicToSeed(mnemonic);
+  const root = bip32.fromSeed(seed);
+  const derivedNodes: BIP32Interface[] = [];
+  const keyBuffers: Buffer[] = [];
+  try {
+    // Change to a fresh change address (chain 1, next unused index).
+    const changeAddress = bc2AddressFromPubkey(scriptType, Buffer.from(root.derivePath(`m/${purpose}'/0'/0'/1/${scan.nextChangeIndex}`).publicKey));
+    const changeScript = addressToScript(changeAddress, true);
+
+    // Coin selection — outputs sized by their real scriptPubKey length.
+    const perInput = estimateBytes(scriptType);
+    const outBytes = (s: Buffer) => 8 + encodeVarInt(s.length).length + s.length;
+    const size = (ins: number, withChange: boolean) =>
+      11 + perInput * ins + outBytes(recipientScript) + (withChange ? outBytes(changeScript) : 0);
+    const selected: HdUtxo[] = [];
+    let totalInput = 0;
+    for (const u of available) {
+      selected.push(u); totalInput += u.value;
+      if (totalInput > Number.MAX_SAFE_INTEGER) throw new Error('UTXO total exceeds safe integer range');
+      if (totalInput >= amountSats + size(selected.length, true) * feePerByte || selected.length >= 500) break;
+    }
+    const fee2 = size(selected.length, true) * feePerByte;
+    const hasChange = totalInput - amountSats - fee2 > 546;
+    const fee = size(selected.length, hasChange) * feePerByte;
+    const changeAmount = hasChange ? totalInput - amountSats - fee : 0;
+    if (totalInput < amountSats + fee) {
+      if (selected.length >= 500) throw new Error('Too many UTXOs required. Please consolidate UTXOs first.');
+      throw new Error(`Insufficient funds. Need ${amountSats + fee} sats, have ${totalInput} sats`);
+    }
+
+    // Derive a key per selected input (each from its own chain/index).
+    let txHex: string;
+    if (scriptType === 'taproot') {
+      const inputs: TaprootKeyedInput[] = selected.map(u => {
+        const node = root.derivePath(`m/${purpose}'/0'/0'/${u.chain}/${u.index}`);
+        derivedNodes.push(node);
+        const pub = Buffer.from(node.publicKey);
+        const priv = Buffer.from(node.privateKey!); keyBuffers.push(priv);
+        const xonly = pub.subarray(1, 33);
+        const tweak = taggedHashBuf('TapTweak', xonly);
+        const trp = ecc.xOnlyPointAddTweak(xonly, tweak);
+        if (!trp) throw new Error('Taproot tweak failed for input');
+        const negRaw = pub[0] === 0x02 ? null : ecc.privateNegate(priv);
+        const eff = negRaw ? Buffer.from(negRaw) : priv;
+        const added = ecc.privateAdd(eff, tweak);
+        if (!added) throw new Error('Taproot private tweak failed for input');
+        const tweakedPrivkey = Buffer.from(added); keyBuffers.push(tweakedPrivkey);
+        if (added) { try { crypto.randomFillSync(added); } catch {} added.fill(0); }
+        if (negRaw) { try { crypto.randomFillSync(negRaw); } catch {} negRaw.fill(0); }
+        if (eff !== priv) { crypto.randomFillSync(eff); eff.fill(0); }
+        return { txid: u.txid, vout: u.vout, value: u.value, tweakedPrivkey, tweakedXonly: Buffer.from(trp.xOnlyPubkey) };
+      });
+      txHex = buildBC2TaprootTxMulti(inputs, recipientScript, amountSats, hasChange ? changeScript : null, changeAmount);
+    } else {
+      const inputs: SegwitKeyedInput[] = selected.map(u => {
+        const node = root.derivePath(`m/${purpose}'/0'/0'/${u.chain}/${u.index}`);
+        derivedNodes.push(node);
+        const priv = Buffer.from(node.privateKey!); keyBuffers.push(priv);
+        return { txid: u.txid, vout: u.vout, value: u.value, privateKey: priv, publicKey: Buffer.from(node.publicKey) };
+      });
+      txHex = scriptType === 'legacy'
+        ? buildBC2LegacyTxMulti(inputs, recipientScript, amountSats, hasChange ? changeScript : null, changeAmount)
+        : buildBC2SegwitTxMulti(scriptType === 'p2sh-segwit', inputs, recipientScript, amountSats, hasChange ? changeScript : null, changeAmount);
+    }
+
+    const txid = await broadcastBC2Transaction(txHex);
+    return { txid, hex: txHex };
+  } finally {
+    if (seed instanceof Buffer || seed instanceof Uint8Array) { try { crypto.randomFillSync(seed); } catch {} seed.fill(0); }
+    if (root.privateKey) { try { crypto.randomFillSync(root.privateKey); } catch {} root.privateKey.fill(0); }
+    for (const n of derivedNodes) { try { if (n.privateKey) { crypto.randomFillSync(n.privateKey); n.privateKey.fill(0); } } catch {} }
+    for (const k of keyBuffers) { try { crypto.randomFillSync(k); } catch {} k.fill(0); }
+  }
+}
+
 export default {
   sendTransaction,
   sendFromBech32,
@@ -3071,6 +3321,8 @@ export default {
   sendFromP2TR,
   sweepAirdropClaims,
   sendBC2Native,
+  sendBC2NativeHd,
+  scanBC2Hd,
   buildBC2SegwitTx,
   buildBC2TaprootTx,
 };

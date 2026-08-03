@@ -240,34 +240,12 @@ function deriveAddress(
     const root = bip32.fromSeed(seed);
 
     if (walletType === 'bc2') {
-      // BC2 (Bitcoin-Core lineage) — derivation depends on the chosen script type.
-      switch (scriptType) {
-        case 'native-segwit': {
-          // BIP84: m/84'/0'/0'/0/0 → bc1 P2WPKH
-          const child = root.derivePath("m/84'/0'/0'/0/0");
-          return encodeBech32('bc', 0, hash160(Buffer.from(child.publicKey)));
-        }
-        case 'p2sh-segwit': {
-          // BIP49: m/49'/0'/0'/0/0 → 3xxx P2SH-P2WPKH
-          const child = root.derivePath("m/49'/0'/0'/0/0");
-          return getP2SHP2WPKHAddress(hash160(Buffer.from(child.publicKey)));
-        }
-        case 'taproot': {
-          // BIP86: m/86'/0'/0'/0/0 → bc1p P2TR (key-path, tweaked x-only key)
-          const child = root.derivePath("m/86'/0'/0'/0/0");
-          const xonly = Buffer.from(child.publicKey).subarray(1, 33);
-          const tweak = taggedHash('TapTweak', xonly);
-          const tr = ecc.xOnlyPointAddTweak(xonly, tweak);
-          if (!tr) throw new Error('Taproot key tweak failed');
-          return encodeBech32m('bc', 1, Buffer.from(tr.xOnlyPubkey));
-        }
-        case 'legacy':
-        default: {
-          // BIP44: m/44'/0'/0'/0/0 → 1xxx P2PKH (default / backward-compatible)
-          const child = root.derivePath("m/44'/0'/0'/0/0");
-          return getLegacyAddress(hash160(Buffer.from(child.publicKey)));
-        }
-      }
+      // BC2 (Bitcoin-Core lineage) — path depends on the chosen script type; the
+      // address encoding is centralised in bc2AddressFromPubkey (single source of
+      // truth, shared with HD scanning) so the two never diverge.
+      const purpose = scriptType === 'p2sh-segwit' ? 49 : scriptType === 'native-segwit' ? 84 : scriptType === 'taproot' ? 86 : 44;
+      const child = root.derivePath(`m/${purpose}'/0'/0'/0/0`);
+      return bc2AddressFromPubkey(scriptType, Buffer.from(child.publicKey));
     }
 
     if (walletType === 'bc1') {
@@ -286,6 +264,30 @@ function deriveAddress(
     if (seed instanceof Buffer || seed instanceof Uint8Array) {
       seed.fill(0);
     }
+  }
+}
+
+/**
+ * Encode a BC2 address from a compressed public key for a given script type.
+ * Single source of truth for BC2 address encoding — used by deriveAddress and by
+ * HD scanning so a derived receive/change address always matches what is stored.
+ */
+export function bc2AddressFromPubkey(scriptType: BC2ScriptType, publicKey: Buffer): string {
+  switch (scriptType) {
+    case 'native-segwit':
+      return encodeBech32('bc', 0, hash160(publicKey));                 // bc1 P2WPKH
+    case 'p2sh-segwit':
+      return getP2SHP2WPKHAddress(hash160(publicKey));                  // 3xxx P2SH-P2WPKH
+    case 'taproot': {
+      const xonly = publicKey.subarray(1, 33);
+      const tweak = taggedHash('TapTweak', xonly);
+      const tr = ecc.xOnlyPointAddTweak(xonly, tweak);
+      if (!tr) throw new Error('Taproot key tweak failed');
+      return encodeBech32m('bc', 1, Buffer.from(tr.xOnlyPubkey));       // bc1p P2TR
+    }
+    case 'legacy':
+    default:
+      return getLegacyAddress(hash160(publicKey));                      // 1xxx P2PKH
   }
 }
 

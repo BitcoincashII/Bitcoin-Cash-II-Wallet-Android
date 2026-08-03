@@ -751,6 +751,37 @@ export async function getBC2Balance(address: string): Promise<{ confirmed: numbe
   }
 }
 
+/**
+ * BC2 address info for HD gap-limit scanning: balance PLUS tx_count so a used-
+ * but-now-empty address still advances the gap counter (rather than being treated
+ * as unused, which would prematurely stop the scan and hide funds at higher
+ * indices). Explorer-only (the esplora /api/address endpoint returns chain_stats).
+ */
+export async function getBC2AddressInfo(address: string): Promise<{ confirmed: number; unconfirmed: number; txCount: number }> {
+  if (typeof address !== 'string' || address.length === 0 || address.length > 150) {
+    throw new Error('Invalid BC2 address');
+  }
+  const response = await fetch(`https://explorer.bitcoin-ii.org/api/address/${encodeURIComponent(address)}`);
+  if (!response.ok) throw new Error(`Explorer API error: ${response.status}`);
+  const data = await response.json();
+  const funded = Number(data.chain_stats?.funded_txo_sum ?? 0);
+  const spent = Number(data.chain_stats?.spent_txo_sum ?? 0);
+  const mFunded = Number(data.mempool_stats?.funded_txo_sum ?? 0);
+  const mSpent = Number(data.mempool_stats?.spent_txo_sum ?? 0);
+  const chainTx = Number(data.chain_stats?.tx_count ?? 0);
+  const memTx = Number(data.mempool_stats?.tx_count ?? 0);
+  if (![funded, spent, mFunded, mSpent, chainTx, memTx].every(Number.isFinite)) {
+    throw new Error('Invalid address data from explorer');
+  }
+  const MAX_BALANCE = 21_000_000 * 100_000_000;
+  const confirmed = Math.max(0, funded - spent);
+  const unconfirmed = mFunded - mSpent;
+  if (confirmed > MAX_BALANCE || Math.abs(unconfirmed) > MAX_BALANCE) {
+    throw new Error('Balance exceeds maximum supply — possible server error');
+  }
+  return { confirmed, unconfirmed, txCount: chainTx + memTx };
+}
+
 // Get BC2 balance by scripthash (for bc1 addresses)
 export async function getBC2BalanceByScripthash(scripthash: string): Promise<{ confirmed: number; unconfirmed: number }> {
   if (typeof scripthash !== 'string' || !/^[a-fA-F0-9]{64}$/.test(scripthash)) {
