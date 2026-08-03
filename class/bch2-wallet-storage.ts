@@ -4,14 +4,43 @@
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Keychain from 'react-native-keychain';
 import * as bip39 from 'bip39';
 import BIP32Factory from 'bip32';
 import ecc from '../blue_modules/noble_ecc';
 const bip32 = BIP32Factory(ecc);
 const crypto = require('crypto');
 
+// AsyncStorage holds only non-secret wallet METADATA. The recovery phrase for
+// each wallet lives in the hardware-backed Android Keystore (react-native-
+// keychain), one entry per wallet keyed by `seedService(id)`. Legacy installs
+// stored the mnemonic inline in this metadata blob; getWallets/getWalletMnemonic
+// migrate those into the Keystore on read and only drop the plaintext copy once
+// the Keystore copy is verified readable (see migrateSeedsToKeystore).
 const WALLETS_KEY = '@bch2_wallets';
 const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+
+function seedService(id: string): string {
+  return 'bch2_seed_' + id;
+}
+
+// Stable Android value; falls back to the literal if the enum is unavailable.
+const ACCESSIBLE_WHEN_UNLOCKED_THIS_DEVICE_ONLY =
+  (Keychain.ACCESSIBLE && Keychain.ACCESSIBLE.WHEN_UNLOCKED_THIS_DEVICE_ONLY) ||
+  ('AccessibleWhenUnlockedThisDeviceOnly' as Keychain.ACCESSIBLE);
+
+async function storeSeed(id: string, mnemonic: string): Promise<boolean> {
+  const res = await Keychain.setGenericPassword('bch2', mnemonic, {
+    service: seedService(id),
+    accessible: ACCESSIBLE_WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+  });
+  return res !== false;
+}
+
+async function readSeed(id: string): Promise<string | null> {
+  const cred = await Keychain.getGenericPassword({ service: seedService(id) });
+  return cred && cred.password ? cred.password : null;
+}
 
 // Simple async mutex to prevent concurrent read-modify-write races on wallet storage
 let _storageLock: Promise<void> = Promise.resolve();
@@ -51,9 +80,16 @@ export async function saveWallet(
 
   // Derive address from mnemonic
   const address = deriveAddress(trimmedMnemonic, walletType);
+  const id = generateId();
+
+  // Store the recovery phrase in the Keystore FIRST. If that fails, do not
+  // persist a wallet whose seed we could not securely save.
+  if (!(await storeSeed(id, trimmedMnemonic))) {
+    throw new Error('Could not securely store the recovery phrase (Keystore unavailable)');
+  }
 
   const wallet: StoredWallet = {
-    id: generateId(),
+    id,
     type: walletType,
     label: label.trim(),
     mnemonic: trimmedMnemonic,
@@ -63,10 +99,11 @@ export async function saveWallet(
     createdAt: Date.now(),
   };
 
-  // Serialized via lock to prevent concurrent read-modify-write races
+  // Serialized via lock to prevent concurrent read-modify-write races.
+  // The persisted metadata never contains the mnemonic (secret is in Keystore).
   await withStorageLock(async () => {
-    const wallets = await getWallets();
-    wallets.push(wallet);
+    const wallets = await getWalletsRaw();
+    wallets.push({ ...wallet, mnemonic: '' });
     await AsyncStorage.setItem(WALLETS_KEY, JSON.stringify(wallets));
   });
 
@@ -74,9 +111,11 @@ export async function saveWallet(
 }
 
 /**
- * Get all stored wallets
+ * Read the raw metadata array from AsyncStorage. May contain legacy inline
+ * mnemonics for wallets not yet migrated. Internal use only — never returns
+ * to callers without stripping the secret.
  */
-export async function getWallets(): Promise<StoredWallet[]> {
+async function getWalletsRaw(): Promise<StoredWallet[]> {
   const data = await AsyncStorage.getItem(WALLETS_KEY);
   if (!data) return [];
   try {
@@ -89,11 +128,60 @@ export async function getWallets(): Promise<StoredWallet[]> {
 }
 
 /**
+ * Migrate any legacy inline plaintext mnemonics into the Keystore. Non-
+ * destructive: the plaintext copy is only removed after the Keystore write is
+ * verified readable, so a Keystore failure never loses a seed.
+ */
+async function migrateSeedsToKeystore(): Promise<void> {
+  await withStorageLock(async () => {
+    const wallets = await getWalletsRaw();
+    let changed = false;
+    for (const w of wallets) {
+      if (!w.mnemonic) continue;
+      try {
+        if (!(await storeSeed(w.id, w.mnemonic))) continue; // keep plaintext, retry later
+        if ((await readSeed(w.id)) !== w.mnemonic) continue; // verify before dropping plaintext
+        w.mnemonic = '';
+        changed = true;
+      } catch {
+        // Keystore unavailable right now — leave plaintext intact, retry later.
+      }
+    }
+    if (changed) await AsyncStorage.setItem(WALLETS_KEY, JSON.stringify(wallets));
+  });
+}
+
+/**
+ * Get all stored wallets (metadata only; mnemonic is always empty here).
+ * Triggers a lazy migration of any legacy plaintext seeds into the Keystore.
+ */
+export async function getWallets(): Promise<StoredWallet[]> {
+  const wallets = await getWalletsRaw();
+  if (wallets.some(w => w.mnemonic)) {
+    await migrateSeedsToKeystore();
+    return (await getWalletsRaw()).map(w => ({ ...w, mnemonic: '' }));
+  }
+  return wallets.map(w => ({ ...w, mnemonic: '' }));
+}
+
+/**
  * Get a single wallet by ID
  */
 export async function getWallet(id: string): Promise<StoredWallet | null> {
   const wallets = await getWallets();
   return wallets.find(w => w.id === id) || null;
+}
+
+/**
+ * Delete every wallet and its Keystore seed. Used by the authenticated
+ * "wipe all data" flow. Callers MUST authenticate the user first.
+ */
+export async function wipeAllWallets(): Promise<void> {
+  const wallets = await getWalletsRaw();
+  for (const w of wallets) {
+    try { await Keychain.resetGenericPassword({ service: seedService(w.id) }); } catch {}
+  }
+  await AsyncStorage.removeItem(WALLETS_KEY);
 }
 
 /**
@@ -109,7 +197,7 @@ export async function updateWalletBalance(
   balance = Math.max(0, Math.floor(balance));
   unconfirmedBalance = Math.floor(unconfirmedBalance); // Can be negative (pending spend)
   await withStorageLock(async () => {
-    const wallets = await getWallets();
+    const wallets = await getWalletsRaw();
     const index = wallets.findIndex(w => w.id === id);
 
     if (index !== -1) {
@@ -121,18 +209,12 @@ export async function updateWalletBalance(
 }
 
 /**
- * Delete a wallet
+ * Delete a wallet: remove its Keystore seed and its metadata entry.
  */
 export async function deleteWallet(id: string): Promise<void> {
+  try { await Keychain.resetGenericPassword({ service: seedService(id) }); } catch {}
   await withStorageLock(async () => {
-    const wallets = await getWallets();
-    const target = wallets.find(w => w.id === id);
-    if (target) {
-      // Phase 1: Overwrite mnemonic with random data and persist (overwrites ciphertext in storage)
-      target.mnemonic = crypto.randomBytes(Math.ceil(target.mnemonic.length / 2)).toString('hex').slice(0, target.mnemonic.length);
-      await AsyncStorage.setItem(WALLETS_KEY, JSON.stringify(wallets));
-    }
-    // Phase 2: Remove wallet entry entirely
+    const wallets = await getWalletsRaw();
     const filtered = wallets.filter(w => w.id !== id);
     await AsyncStorage.setItem(WALLETS_KEY, JSON.stringify(filtered));
   });
@@ -217,9 +299,22 @@ function base58Encode(data: Buffer): string {
  * Get mnemonic for a wallet (for sending transactions)
  */
 export async function getWalletMnemonic(id: string): Promise<string | null> {
-  const wallet = await getWallet(id);
-  if (!wallet?.mnemonic) return null;
-  return wallet.mnemonic;
+  // Keystore is the source of truth.
+  try {
+    const seed = await readSeed(id);
+    if (seed) return seed;
+  } catch {
+    // fall through to legacy path
+  }
+  // Legacy fallback: un-migrated plaintext still in metadata. Return it and
+  // kick off migration so the next read comes from the Keystore.
+  const wallets = await getWalletsRaw();
+  const w = wallets.find(x => x.id === id);
+  if (w?.mnemonic) {
+    migrateSeedsToKeystore().catch(() => {});
+    return w.mnemonic;
+  }
+  return null;
 }
 
 
@@ -377,4 +472,5 @@ export default {
   updateWalletBalance,
   deleteWallet,
   getWalletMnemonic,
+  wipeAllWallets,
 };

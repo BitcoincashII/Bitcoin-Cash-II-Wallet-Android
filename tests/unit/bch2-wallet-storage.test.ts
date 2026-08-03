@@ -1,5 +1,25 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+// In-memory Keystore mock (react-native-keychain is a native module).
+jest.mock('react-native-keychain', () => {
+  const store: Record<string, { username: string; password: string; service: string }> = {};
+  const svc = (o: any) => (typeof o === 'string' ? o : o && o.service) || 'default';
+  return {
+    ACCESSIBLE: { WHEN_UNLOCKED_THIS_DEVICE_ONLY: 'AccessibleWhenUnlockedThisDeviceOnly' },
+    setGenericPassword: jest.fn(async (username: string, password: string, opts: any) => {
+      const service = svc(opts);
+      store[service] = { username, password, service };
+      return { service, storage: 'mock' };
+    }),
+    getGenericPassword: jest.fn(async (opts: any) => store[svc(opts)] || false),
+    resetGenericPassword: jest.fn(async (opts: any) => { delete store[svc(opts)]; return true; }),
+    hasGenericPassword: jest.fn(async (opts: any) => !!store[svc(opts)]),
+    __clear: () => { for (const k of Object.keys(store)) delete store[k]; },
+  };
+});
+// eslint-disable-next-line import/first
+import * as Keychain from 'react-native-keychain';
+
 import BCH2WalletStorage, {
   saveWallet,
   getWallets,
@@ -16,6 +36,7 @@ const WALLETS_KEY = '@bch2_wallets';
 
 beforeEach(async () => {
   await AsyncStorage.clear();
+  (Keychain as any).__clear?.();
 });
 
 // ============================================================================
@@ -34,12 +55,19 @@ describe('Wallet CRUD', () => {
     expect(wallet.createdAt).toBeGreaterThan(0);
     expect(wallet.mnemonic).toBe(TEST_MNEMONIC);
 
-    // Verify it was persisted
+    // Verify metadata was persisted
     const raw = await AsyncStorage.getItem(WALLETS_KEY);
     expect(raw).toBeTruthy();
     const parsed = JSON.parse(raw!);
     expect(parsed).toHaveLength(1);
     expect(parsed[0].id).toBe(wallet.id);
+
+    // Security: the recovery phrase must NOT be in AsyncStorage (plaintext),
+    // and MUST be retrievable from the Keystore.
+    expect(parsed[0].mnemonic).toBe('');
+    expect(raw).not.toContain(TEST_MNEMONIC);
+    const fromKeystore = await getWalletMnemonic(wallet.id);
+    expect(fromKeystore).toBe(TEST_MNEMONIC);
   });
 
   it('saveWallet() throws for invalid mnemonic', async () => {
@@ -212,42 +240,42 @@ describe('Edge cases', () => {
     await expect(getWallets()).rejects.toThrow();
   });
 
-  it('secure deletion (mnemonic overwritten before removal)', async () => {
+  it('deletion removes the wallet metadata and its Keystore seed', async () => {
     const wallet = await saveWallet('Secure Del', TEST_MNEMONIC, 'bch2');
-    const originalMnemonic = wallet.mnemonic;
-
-    // Track all setItem calls by wrapping the real implementation
-    const capturedWrites: string[] = [];
-    const origSetItem = AsyncStorage.setItem.bind(AsyncStorage);
-    const wrappedSetItem = jest.fn(async (key: string, value: string) => {
-      if (key === WALLETS_KEY) {
-        capturedWrites.push(value);
-      }
-      return origSetItem(key, value);
-    });
-    AsyncStorage.setItem = wrappedSetItem as any;
+    // Seed is retrievable before deletion.
+    expect(await getWalletMnemonic(wallet.id)).toBe(TEST_MNEMONIC);
 
     await deleteWallet(wallet.id);
 
-    // Restore original setItem
-    AsyncStorage.setItem = origSetItem;
+    // Metadata gone.
+    const raw = await AsyncStorage.getItem(WALLETS_KEY);
+    const remaining = raw ? JSON.parse(raw) : [];
+    expect(remaining.find((w: StoredWallet) => w.id === wallet.id)).toBeUndefined();
+    // Keystore seed gone.
+    expect(await getWalletMnemonic(wallet.id)).toBeNull();
+  });
 
-    // There should be at least 2 writes to WALLETS_KEY:
-    // 1. One with overwritten mnemonic data (secure erasure)
-    // 2. One with the wallet removed from the array
-    expect(capturedWrites.length).toBeGreaterThanOrEqual(2);
+  it('migrates a legacy plaintext seed into the Keystore and drops the plaintext', async () => {
+    const legacy: StoredWallet = {
+      id: 'bch2_legacy_migrate',
+      type: 'bch2',
+      label: 'Legacy',
+      mnemonic: TEST_MNEMONIC,
+      address: 'bitcoincashii:qtest',
+      balance: 0,
+      unconfirmedBalance: 0,
+      createdAt: Date.now(),
+    };
+    await AsyncStorage.setItem(WALLETS_KEY, JSON.stringify([legacy]));
 
-    // First write should contain overwritten mnemonic (random data, not original)
-    const firstWrite = JSON.parse(capturedWrites[0]);
-    const overwrittenWallet = firstWrite.find((w: StoredWallet) => w.id === wallet.id);
-    if (overwrittenWallet) {
-      expect(overwrittenWallet.mnemonic).not.toBe(originalMnemonic);
-      expect(overwrittenWallet.mnemonic.length).toBe(originalMnemonic.length);
-    }
+    // getWallets() triggers migration.
+    await getWallets();
 
-    // Final write should not contain the wallet at all
-    const finalWrite = JSON.parse(capturedWrites[capturedWrites.length - 1]);
-    expect(finalWrite.find((w: StoredWallet) => w.id === wallet.id)).toBeUndefined();
+    // Plaintext removed from AsyncStorage; seed now readable from Keystore.
+    const raw = await AsyncStorage.getItem(WALLETS_KEY);
+    expect(raw).not.toContain(TEST_MNEMONIC);
+    expect(JSON.parse(raw!)[0].mnemonic).toBe('');
+    expect(await getWalletMnemonic('bch2_legacy_migrate')).toBe(TEST_MNEMONIC);
   });
 
   it('multiple wallets can be saved and retrieved independently', async () => {
@@ -412,7 +440,8 @@ describe('Gap coverage: deriveAddress edge cases', () => {
     const originalMnemonicToSeedSync = bip39Module.mnemonicToSeedSync;
 
     // Spy on mnemonicToSeedSync to capture the seed buffer
-    jest.spyOn(bip39Module, 'mnemonicToSeedSync').mockImplementation((mnemonic: string, passphrase?: string) => {
+    jest.spyOn(bip39Module, 'mnemonicToSeedSync').mockImplementation((...args: unknown[]) => {
+      const [mnemonic, passphrase] = args as [string, string?];
       const seed = originalMnemonicToSeedSync(mnemonic, passphrase);
       capturedSeed = Buffer.from(seed); // Copy to check later — the original will be zeroed
       return seed;
@@ -498,45 +527,6 @@ describe('Gap coverage: updateWalletBalance() negative unconfirmed balance', () 
 
 // ============================================================================
 // Gap coverage: deleteWallet() secure overwrite length
-// ============================================================================
-describe('Gap coverage: deleteWallet() secure overwrite length', () => {
-  it('random bytes overwrite has the same length as the original mnemonic', async () => {
-    const wallet = await saveWallet('Overwrite Len', TEST_MNEMONIC, 'bch2');
-    const originalMnemonicLength = wallet.mnemonic.length;
-
-    // Track setItem calls to capture the overwrite
-    const capturedWrites: string[] = [];
-    const origSetItem = AsyncStorage.setItem.bind(AsyncStorage);
-    const wrappedSetItem = jest.fn(async (key: string, value: string) => {
-      if (key === WALLETS_KEY) {
-        capturedWrites.push(value);
-      }
-      return origSetItem(key, value);
-    });
-    AsyncStorage.setItem = wrappedSetItem as any;
-
-    await deleteWallet(wallet.id);
-
-    // Restore original
-    AsyncStorage.setItem = origSetItem;
-
-    // First write should contain the overwritten mnemonic
-    expect(capturedWrites.length).toBeGreaterThanOrEqual(2);
-    const firstWrite = JSON.parse(capturedWrites[0]);
-    const overwrittenWallet = firstWrite.find((w: StoredWallet) => w.id === wallet.id);
-    expect(overwrittenWallet).toBeDefined();
-
-    // The overwritten mnemonic must have EXACTLY the same length as the original
-    expect(overwrittenWallet.mnemonic.length).toBe(originalMnemonicLength);
-
-    // It must be different from the original (random data)
-    expect(overwrittenWallet.mnemonic).not.toBe(wallet.mnemonic);
-
-    // It should be hex characters (crypto.randomBytes().toString('hex'))
-    expect(overwrittenWallet.mnemonic).toMatch(/^[0-9a-f]+$/);
-  });
-});
-
 // ============================================================================
 // Gap coverage: deriveAddress() with falsy walletType
 // ============================================================================
