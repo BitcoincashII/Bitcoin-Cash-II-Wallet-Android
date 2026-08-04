@@ -805,7 +805,7 @@ function getLegacyAddress(pubkeyHash: Buffer): string {
 /**
  * Get BCH2 CashAddr from pubkey hash
  */
-function getCashAddr(pubkeyHash: Buffer): string {
+export function getCashAddr(pubkeyHash: Buffer): string {
   const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
   const prefix = 'bitcoincashii';
 
@@ -2548,8 +2548,10 @@ function decodeBech32m(address: string): { version: number; program: Buffer } | 
 // bug yields a node-rejected tx — never a payment to anyone else.
 //
 // Scope: legacy P2PKH inputs only — the standard spendable script for BC2-origin
-// airdrop funds (BC2 has no SegWit). P2PK and (anyone-can-spend) SegWit-typed
-// balances are reported as `skipped` for honest UI, not silently dropped.
+// airdrop funds. Legacy P2PKH is consolidated into a single tx; bc1 / p2sh-segwit
+// / p2tr are recovered per address via the BCH2 SegWit-recovery builders (the
+// pre-fork SegWit UTXOs are keyholder-recoverable on BCH2 via scriptSig, NOT
+// anyone-can-spend). P2PK / unknown types are reported as `skipped` for honest UI.
 // ============================================================================
 export interface SweepClaim {
   bch2Address: string;
@@ -2558,7 +2560,8 @@ export interface SweepClaim {
   balance: number;
 }
 export interface SweepResult {
-  txid: string | null;
+  txid: string | null;        // primary (first) tx; kept for back-compat with the UI
+  txids: string[];            // ALL broadcast txs (legacy consolidation + per-type SegWit recoveries)
   sweptSats: number;
   fee: number;
   swept: Array<{ address: string; value: number }>;
@@ -2581,26 +2584,125 @@ export async function sweepAirdropClaims(
   const seed = await bip39.mnemonicToSeed(mnemonic, passphrase);
   const root = bip32.fromSeed(seed);
 
-  const inputs: Array<{ utxo: UTXO; publicKey: Buffer; privateKey: Buffer }> = [];
+  const inputs: Array<{ utxo: UTXO; publicKey: Buffer; privateKey: Buffer }> = []; // legacy P2PKH consolidation
   const skipped: SweepResult['skipped'] = [];
+  const swept: SweepResult['swept'] = [];
+  const txids: string[] = [];
+  let sweptTotal = 0;
+  let feeTotal = 0;
   // Track EVERY derived private-key buffer (incl. those on skip paths) so they
   // are all zeroed in the finally, matching buildTransaction's key hygiene.
   const derivedKeys: Buffer[] = [];
   const derivedNodes: BIP32Interface[] = [];
+  // SegWit-typed claims (bc1 / p2sh-segwit / p2tr) are recovered per address via
+  // the proven BCH2 recovery builders (BIP143/BIP341 + scriptSig recovery).
+  const segwitJobs: Array<{ type: 'bc1' | 'p2sh-segwit' | 'p2tr'; claim: SweepClaim; publicKey: Buffer; privateKey: Buffer; pubkeyHash: Buffer; child: BIP32Interface }> = [];
+  const norm = (a: string) => (a.toLowerCase().startsWith('bitcoincashii:') ? a.toLowerCase() : 'bitcoincashii:' + a.toLowerCase());
+
+  // Compute a P2TR key-path tweaked private key + x-only pubkey from a child node
+  // (mirrors sendFromP2TR). Returns null if the point/scalar tweak is invalid.
+  const deriveP2TRTweaked = (child: BIP32Interface): { tweakedPrivkey: Buffer; tweakedXonly: Buffer } | null => {
+    if (!child.privateKey) return null;
+    const pubkey = Buffer.from(child.publicKey);
+    const xonly = pubkey.subarray(1, 33);
+    const tweak = taggedHashBuf('TapTweak', xonly);
+    const tweakResult = ecc.xOnlyPointAddTweak(xonly, tweak);
+    if (!tweakResult) return null;
+    const tweakedXonly = Buffer.from(tweakResult.xOnlyPubkey);
+    const privkey = Buffer.from(child.privateKey);
+    derivedKeys.push(privkey);
+    const hasEvenY = pubkey[0] === 0x02;
+    let effectivePrivkey: Buffer;
+    if (hasEvenY) {
+      effectivePrivkey = privkey;
+    } else {
+      const negated = ecc.privateNegate(privkey);
+      effectivePrivkey = Buffer.from(negated);
+      derivedKeys.push(effectivePrivkey);
+    }
+    const added = ecc.privateAdd(effectivePrivkey, tweak);
+    if (!added) return null;
+    const tweakedPrivkey = Buffer.from(added);
+    derivedKeys.push(tweakedPrivkey);
+    return { tweakedPrivkey, tweakedXonly };
+  };
+
+  // Validate + dedupe a UTXO set fetched for a recovery job.
+  const cleanUtxos = (utxos: UTXO[]): UTXO[] => {
+    const out: UTXO[] = [];
+    const seen = new Set<string>();
+    const MAXV = 21_000_000 * 100_000_000;
+    for (const u of utxos) {
+      if (!/^[0-9a-fA-F]{64}$/.test(u.txid)) continue;
+      if (!Number.isInteger(u.value) || u.value <= 0 || u.value > MAXV) continue;
+      if (!Number.isInteger(u.vout) || u.vout < 0 || u.vout > 0xFFFFFFFF) continue;
+      const k = `${u.txid}:${u.vout}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(u);
+    }
+    return out;
+  };
+
+  // Recover ONE SegWit address's full balance to destAddress via the proven
+  // per-type builder (changeAddress=null => sweep everything minus fee). Returns
+  // null when there is nothing spendable. Amount is committed in the BIP143/BIP341
+  // sighash, so a lying server value yields an invalid sig (rejected), never loss.
+  const recoverSegwit = async (job: typeof segwitJobs[number]): Promise<{ txid: string; sweptSats: number; fee: number } | null> => {
+    const { type, publicKey, privateKey, pubkeyHash, child } = job;
+    let scripthash: string;
+    let tweakedXonly: Buffer | undefined;
+    let tweakedPrivkey: Buffer | undefined;
+    // Electrum scripthash = SHA256(scriptPubKey), byte-reversed (matches sendFromP2SH/P2TR).
+    const spkToScripthash = (spk: Buffer): string =>
+      Buffer.from(crypto.createHash('sha256').update(spk).digest()).reverse().toString('hex');
+    if (type === 'bc1') {
+      scripthash = getSegwitScripthash(pubkeyHash); // P2WPKH: OP_0 PUSH20 <pubkeyhash>
+    } else if (type === 'p2sh-segwit') {
+      const redeemScript = Buffer.concat([Buffer.from([0x00, 0x14]), pubkeyHash]); // 0014<pubkeyhash>
+      const p2shSpk = Buffer.concat([Buffer.from([0xa9, 0x14]), hash160(redeemScript), Buffer.from([0x87])]); // OP_HASH160 PUSH20 <h> OP_EQUAL
+      scripthash = spkToScripthash(p2shSpk);
+    } else {
+      const tw = deriveP2TRTweaked(child);
+      if (!tw) return null;
+      tweakedXonly = tw.tweakedXonly;
+      tweakedPrivkey = tw.tweakedPrivkey;
+      scripthash = spkToScripthash(Buffer.concat([Buffer.from([0x51, 0x20]), tweakedXonly])); // OP_1 PUSH32 <tweaked>
+    }
+    const utxos = cleanUtxos(await getUtxosByScripthash(scripthash));
+    if (utxos.length === 0) return null;
+    if (utxos.length > 500) throw new Error('Too many UTXOs to sweep at once (max 500)');
+    const total = utxos.reduce((s, u) => s + u.value, 0);
+    const perInput = type === 'p2tr' ? 110 : type === 'p2sh-segwit' ? 172 : 148;
+    const fee = Math.max(1, feePerByte) * (10 + perInput * utxos.length + 34);
+    const amount = total - fee;
+    if (amount < 546) throw new Error('Swept amount is below the dust threshold after fees');
+    let txHex: string;
+    if (type === 'bc1') {
+      txHex = buildSegwitRecoveryTransaction(utxos, destAddress, amount, null, 0, privateKey, publicKey, pubkeyHash);
+    } else if (type === 'p2sh-segwit') {
+      const redeemScript = Buffer.concat([Buffer.from([0x00, 0x14]), pubkeyHash]);
+      txHex = buildSegwitRecoveryTransaction(utxos, destAddress, amount, null, 0, privateKey, publicKey, pubkeyHash, redeemScript);
+    } else {
+      const spk = Buffer.concat([Buffer.from([0x51, 0x20]), tweakedXonly!]);
+      const inputScriptPubKeys = utxos.map(() => spk);
+      txHex = buildP2TRRecoveryTransaction(utxos, destAddress, amount, null, 0, tweakedPrivkey!, tweakedXonly!, inputScriptPubKeys, publicKey);
+    }
+    const txid = await broadcastTransaction(txHex);
+    return { txid, sweptSats: amount, fee };
+  };
+
   try {
     for (const claim of claims) {
-      // Only legacy P2PKH is swept here (see scope note above).
-      if ((claim.addressType || 'legacy') !== 'legacy' || !claim.derivationPath) {
-        if (claim.balance > 0) {
-          const t = claim.addressType || 'unknown';
-          // Honest reason: SegWit-typed BCH2 outputs are anyone-can-spend on a
-          // no-SegWit chain and cannot be safely recovered; P2PK is recoverable
-          // but not by this legacy-only sweep.
-          const reason = (t === 'bc1' || t === 'p2sh-segwit' || t === 'p2tr')
-            ? `Held at a SegWit-type address (${t}); on BCH2 (no SegWit) these outputs are anyone-can-spend and cannot be safely recovered`
-            : `Script type ${t} not handled by auto-consolidation — recoverable from your recovery phrase with other tooling`;
-          skipped.push({ address: claim.bch2Address, balance: claim.balance, reason });
-        }
+      const t = (claim.addressType || 'legacy');
+      // p2pk and any unrecognized type: honestly skipped (rare; recoverable via
+      // the recovery phrase with other tooling).
+      if (t !== 'legacy' && t !== 'bc1' && t !== 'p2sh-segwit' && t !== 'p2tr') {
+        if (claim.balance > 0) skipped.push({ address: claim.bch2Address, balance: claim.balance, reason: `Script type ${t} is not auto-consolidated — recoverable from your recovery phrase with other tooling` });
+        continue;
+      }
+      if (!claim.derivationPath) {
+        if (claim.balance > 0) skipped.push({ address: claim.bch2Address, balance: claim.balance, reason: 'Missing derivation path for this claim' });
         continue;
       }
       let child: BIP32Interface;
@@ -2614,86 +2716,114 @@ export async function sweepAirdropClaims(
       const publicKey = Buffer.from(child.publicKey);
       const privateKey = child.privateKey ? Buffer.from(child.privateKey) : null;
       if (privateKey) derivedKeys.push(privateKey);
-      // Sanity: the derived key must actually control the claimed address, else
-      // we would sign for the wrong output. Compare normalized (prefixed) forms.
-      const norm = (a: string) => (a.toLowerCase().startsWith('bitcoincashii:') ? a.toLowerCase() : 'bitcoincashii:' + a.toLowerCase());
-      const derivedAddr = getCashAddr(hash160(publicKey));
-      if (!privateKey || norm(derivedAddr) !== norm(claim.bch2Address)) {
+      // Sanity: the derived key must control the claimed address. scanSingleAddress
+      // sets bch2Address to the P2PKH CashAddr of the SAME pubkey for EVERY type,
+      // so this one check covers legacy/bc1/p2sh-segwit/p2tr.
+      const pubkeyHash = hash160(publicKey);
+      if (!privateKey || norm(getCashAddr(pubkeyHash)) !== norm(claim.bch2Address)) {
         skipped.push({ address: claim.bch2Address, balance: claim.balance, reason: 'Derived key does not match claimed address' });
         continue;
       }
-      let utxos: UTXO[];
+      if (t === 'legacy') {
+        let utxos: UTXO[];
+        try {
+          utxos = await getUtxosByAddress(claim.bch2Address);
+        } catch {
+          skipped.push({ address: claim.bch2Address, balance: claim.balance, reason: 'Could not fetch UTXOs (network)' });
+          continue;
+        }
+        // Empty resolve (funds moved/spent between scan and sweep, or a transient
+        // indexer gap): account for the balance so the honest UI still reports it.
+        if (utxos.length === 0) {
+          if (claim.balance > 0) skipped.push({ address: claim.bch2Address, balance: claim.balance, reason: 'No spendable UTXOs found at sweep time — recoverable from your recovery phrase' });
+          continue;
+        }
+        for (const u of utxos) inputs.push({ utxo: u, publicKey, privateKey });
+      } else {
+        // bc1 / p2sh-segwit / p2tr: queue a per-address SegWit recovery.
+        segwitJobs.push({ type: t, claim, publicKey, privateKey, pubkeyHash, child });
+      }
+    }
+
+    // --- Legacy P2PKH consolidation (all legacy inputs → one tx). ---
+    if (inputs.length > 0) {
+      if (inputs.length > 500) throw new Error('Too many inputs to sweep at once (max 500)');
+      const totalIn = inputs.reduce((s, i) => s + i.utxo.value, 0);
+      const estSize = 10 + 148 * inputs.length + 34; // 1 output
+      const fee = Math.max(1, feePerByte) * estSize;
+      const outputAmount = totalIn - fee;
+      if (outputAmount < 546) throw new Error('Swept amount is below the dust threshold after fees');
+
+      const recipientScript = addressToScript(destAddress, false);
+      const outAmountBytes = Buffer.alloc(8);
+      outAmountBytes.writeBigUInt64LE(BigInt(outputAmount), 0);
+      const outputs = Buffer.concat([outAmountBytes, encodeVarInt(recipientScript.length), recipientScript]);
+
+      let prevoutsData = Buffer.alloc(0);
+      let sequencesData = Buffer.alloc(0);
+      const utxoList: UTXO[] = inputs.map(i => i.utxo);
+      for (const u of utxoList) {
+        const txid = Buffer.from(u.txid, 'hex').reverse();
+        const vout = Buffer.alloc(4); vout.writeUInt32LE(u.vout, 0);
+        prevoutsData = Buffer.concat([prevoutsData, txid, vout]);
+        sequencesData = Buffer.concat([sequencesData, Buffer.from('ffffffff', 'hex')]);
+      }
+      const hashPrevouts = doubleSha256(prevoutsData);
+      const hashSequence = doubleSha256(sequencesData);
+      const hashOutputs = doubleSha256(outputs);
+
+      const signedInputs: Buffer[] = [];
+      for (let i = 0; i < inputs.length; i++) {
+        const { utxo, publicKey, privateKey } = inputs[i];
+        const sighash = createBIP143Sighash(utxoList, i, publicKey, 1, outputs, utxo.value, hashPrevouts, hashSequence, hashOutputs);
+        const signature = signWithPrivateKey(sighash, privateKey);
+        const sigWithHashType = Buffer.concat([signature, Buffer.from([0x41])]); // SIGHASH_ALL|FORKID
+        const scriptSig = Buffer.concat([
+          encodeVarInt(sigWithHashType.length), sigWithHashType,
+          encodeVarInt(publicKey.length), publicKey,
+        ]);
+        const txidBytes = Buffer.from(utxo.txid, 'hex').reverse();
+        const voutBytes = Buffer.alloc(4); voutBytes.writeUInt32LE(utxo.vout, 0);
+        signedInputs.push(Buffer.concat([txidBytes, voutBytes, encodeVarInt(scriptSig.length), scriptSig, Buffer.from('ffffffff', 'hex')]));
+      }
+
+      const version = Buffer.alloc(4); version.writeUInt32LE(2, 0);
+      let tx = Buffer.concat([version, encodeVarInt(inputs.length)]);
+      for (const inp of signedInputs) tx = Buffer.concat([tx, inp]);
+      const locktime = Buffer.alloc(4); locktime.writeUInt32LE(0, 0);
+      tx = Buffer.concat([tx, encodeVarInt(1), outputs, locktime]);
+
+      const txid = await broadcastTransaction(tx.toString('hex'));
+      txids.push(txid);
+      sweptTotal += outputAmount;
+      feeTotal += fee;
+      for (const i of inputs) swept.push({ address: destAddress, value: i.utxo.value });
+    }
+
+    // --- SegWit recovery (bc1 / p2sh-segwit / p2tr), one tx per address. ---
+    for (const job of segwitJobs) {
       try {
-        utxos = await getUtxosByAddress(claim.bch2Address);
-      } catch {
-        skipped.push({ address: claim.bch2Address, balance: claim.balance, reason: 'Could not fetch UTXOs (network)' });
-        continue;
+        const res = await recoverSegwit(job);
+        if (res) {
+          txids.push(res.txid);
+          sweptTotal += res.sweptSats;
+          feeTotal += res.fee;
+          swept.push({ address: destAddress, value: res.sweptSats });
+        } else if (job.claim.balance > 0) {
+          skipped.push({ address: job.claim.bch2Address, balance: job.claim.balance, reason: 'No spendable UTXOs found at sweep time — recoverable from your recovery phrase' });
+        }
+      } catch (e: any) {
+        skipped.push({ address: job.claim.bch2Address, balance: job.claim.balance, reason: `SegWit recovery could not complete (${e?.message || 'error'}) — recoverable from your recovery phrase` });
       }
-      // Empty resolve (funds moved/spent between scan and sweep, or a transient
-      // indexer gap): account for the balance so the honest UI still reports it.
-      if (utxos.length === 0) {
-        if (claim.balance > 0) skipped.push({ address: claim.bch2Address, balance: claim.balance, reason: 'No spendable UTXOs found at sweep time — recoverable from your recovery phrase' });
-        continue;
-      }
-      for (const u of utxos) inputs.push({ utxo: u, publicKey, privateKey });
     }
 
-    if (inputs.length === 0) return { txid: null, sweptSats: 0, fee: 0, swept: [], skipped };
-    if (inputs.length > 500) throw new Error('Too many inputs to sweep at once (max 500)');
-
-    const totalIn = inputs.reduce((s, i) => s + i.utxo.value, 0);
-    const estSize = 10 + 148 * inputs.length + 34; // 1 output
-    const fee = Math.max(1, feePerByte) * estSize;
-    const outputAmount = totalIn - fee;
-    if (outputAmount < 546) throw new Error('Swept amount is below the dust threshold after fees');
-
-    // Outputs: single payment to the user's wallet.
-    const recipientScript = addressToScript(destAddress, false);
-    const outAmountBytes = Buffer.alloc(8);
-    outAmountBytes.writeBigUInt64LE(BigInt(outputAmount), 0);
-    const outputs = Buffer.concat([outAmountBytes, encodeVarInt(recipientScript.length), recipientScript]);
-
-    // BIP143 common hashes over all inputs/outputs.
-    let prevoutsData = Buffer.alloc(0);
-    let sequencesData = Buffer.alloc(0);
-    const utxoList: UTXO[] = inputs.map(i => i.utxo);
-    for (const u of utxoList) {
-      const txid = Buffer.from(u.txid, 'hex').reverse();
-      const vout = Buffer.alloc(4); vout.writeUInt32LE(u.vout, 0);
-      prevoutsData = Buffer.concat([prevoutsData, txid, vout]);
-      sequencesData = Buffer.concat([sequencesData, Buffer.from('ffffffff', 'hex')]);
-    }
-    const hashPrevouts = doubleSha256(prevoutsData);
-    const hashSequence = doubleSha256(sequencesData);
-    const hashOutputs = doubleSha256(outputs);
-
-    const signedInputs: Buffer[] = [];
-    for (let i = 0; i < inputs.length; i++) {
-      const { utxo, publicKey, privateKey } = inputs[i];
-      const sighash = createBIP143Sighash(utxoList, i, publicKey, 1, outputs, utxo.value, hashPrevouts, hashSequence, hashOutputs);
-      const signature = signWithPrivateKey(sighash, privateKey);
-      const sigWithHashType = Buffer.concat([signature, Buffer.from([0x41])]); // SIGHASH_ALL|FORKID
-      const scriptSig = Buffer.concat([
-        encodeVarInt(sigWithHashType.length), sigWithHashType,
-        encodeVarInt(publicKey.length), publicKey,
-      ]);
-      const txidBytes = Buffer.from(utxo.txid, 'hex').reverse();
-      const voutBytes = Buffer.alloc(4); voutBytes.writeUInt32LE(utxo.vout, 0);
-      signedInputs.push(Buffer.concat([txidBytes, voutBytes, encodeVarInt(scriptSig.length), scriptSig, Buffer.from('ffffffff', 'hex')]));
-    }
-
-    const version = Buffer.alloc(4); version.writeUInt32LE(2, 0);
-    let tx = Buffer.concat([version, encodeVarInt(inputs.length)]);
-    for (const inp of signedInputs) tx = Buffer.concat([tx, inp]);
-    const locktime = Buffer.alloc(4); locktime.writeUInt32LE(0, 0);
-    tx = Buffer.concat([tx, encodeVarInt(1), outputs, locktime]);
-
-    const txid = await broadcastTransaction(tx.toString('hex'));
+    if (txids.length === 0) return { txid: null, txids: [], sweptSats: 0, fee: 0, swept: [], skipped };
     return {
-      txid,
-      sweptSats: outputAmount,
-      fee,
-      swept: inputs.map(i => ({ address: destAddress, value: i.utxo.value })),
+      txid: txids[0],
+      txids,
+      sweptSats: sweptTotal,
+      fee: feeTotal,
+      swept,
       skipped,
     };
   } finally {

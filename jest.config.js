@@ -16,6 +16,7 @@ const NETWORK_INTEGRATION = [
   'tests/integration/hd-segwit-p2sh-wallet\\.test\\.js$',
   'tests/integration/hd-segwit-bech32-transaction\\.test\\.js$',
   'tests/integration/bc2-native-regtest\\.test\\.ts$',
+  'tests/integration/bch2-segwit-recovery-regtest\\.test\\.ts$',
 ];
 
 module.exports = {

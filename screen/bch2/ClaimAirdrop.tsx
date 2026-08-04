@@ -471,7 +471,7 @@ export const ClaimAirdropScreen: React.FC = () => {
           setSweepResult(res);
         } catch (sweepErr) {
           // Import still succeeds; surface that consolidation did not complete.
-          setSweepResult({ txid: null, sweptSats: 0, fee: 0, swept: [], skipped: scanResult.claims.map(c => ({ address: c.bch2Address, balance: c.balance, reason: 'Consolidation could not complete — funds remain at their addresses and can be swept later' })) });
+          setSweepResult({ txid: null, txids: [], sweptSats: 0, fee: 0, swept: [], skipped: scanResult.claims.map(c => ({ address: c.bch2Address, balance: c.balance, reason: 'Consolidation could not complete — funds remain at their addresses and can be swept later' })) });
         }
       }
       // Clear sensitive data
@@ -973,9 +973,10 @@ export const ClaimAirdropScreen: React.FC = () => {
             <>
               {sweepResult.txid ? (
                 <Text style={styles.successSubtitle}>
-                  Consolidated {formatBalance(sweepResult.sweptSats)} BCH2 into your new wallet
-                  (network fee {formatBalance(sweepResult.fee)}). It will appear once the
-                  transaction confirms.
+                  Recovered {formatBalance(sweepResult.sweptSats)} BCH2 into your new wallet
+                  (network fee {formatBalance(sweepResult.fee)})
+                  {sweepResult.txids.length > 1 ? ` across ${sweepResult.txids.length} transactions` : ''}.
+                  {' '}It will appear once confirmed.
                 </Text>
               ) : (
                 <Text style={styles.successSubtitle}>

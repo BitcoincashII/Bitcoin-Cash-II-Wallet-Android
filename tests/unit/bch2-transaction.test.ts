@@ -2560,6 +2560,7 @@ describe('sweepAirdropClaims', () => {
 
   beforeEach(() => {
     mockGetUtxosByAddress.mockReset();
+    mockGetUtxosByScripthash.mockReset().mockResolvedValue([]);
     mockBroadcastTransaction.mockReset().mockResolvedValue('ff'.repeat(32));
   });
 
@@ -2608,17 +2609,69 @@ describe('sweepAirdropClaims', () => {
     expect(res.sweptSats).toBe(110_000 - res.fee);
   });
 
-  it('reports non-legacy (unsupported) claims as skipped, not swept', async () => {
+  it('reports p2pk (non-auto-consolidated) claims as skipped, not swept', async () => {
     const path = "m/44'/145'/0'/0/1";
     const addr = await addrForPath(path);
     mockGetUtxosByAddress.mockResolvedValue([{ txid: fakeTxid(5), vout: 0, value: 100_000 }]);
     const res = await sweepAirdropClaims(TEST_MNEMONIC, '', [
       { bch2Address: addr, derivationPath: path, addressType: 'legacy', balance: 100_000 },
-      { bch2Address: 'bc1qexampleexampleexampleexampleexampleee', derivationPath: "m/84'/0'/0'/0/0", addressType: 'bc1', balance: 42_000 },
+      { bch2Address: addr, derivationPath: path, addressType: 'p2pk', balance: 42_000 },
     ], DEST_CASHADDR, 1);
-    expect(res.swept.length).toBe(1);
-    expect(res.skipped.length).toBe(1);
+    expect(res.swept.length).toBe(1);          // legacy consolidated
+    expect(res.skipped.length).toBe(1);        // p2pk skipped
     expect(res.skipped[0].balance).toBe(42_000);
+    expect(res.skipped[0].reason).toMatch(/not auto-consolidated/i);
+  });
+
+  it('RECOVERS a bc1 (P2WPKH) SegWit claim via scripthash lookup (separate recovery tx)', async () => {
+    // bc1 airdrop funds are keyholder-recoverable on BCH2 (scriptSig recovery),
+    // NOT skipped as "anyone-can-spend". Uses the m/84' path; bch2Address is the
+    // P2PKH CashAddr of the same key (as scanSingleAddress records it).
+    const path = "m/84'/0'/0'/0/0";
+    const addr = await addrForPath(path);
+    mockGetUtxosByAddress.mockResolvedValue([]); // no legacy funds
+    mockGetUtxosByScripthash.mockResolvedValue([{ txid: fakeTxid(7), vout: 0, value: 500_000 }]);
+    const res = await sweepAirdropClaims(TEST_MNEMONIC, '', [
+      { bch2Address: addr, derivationPath: path, addressType: 'bc1', balance: 500_000 },
+    ], DEST_CASHADDR, 2);
+    expect(res.skipped.length).toBe(0);        // recovered, not skipped
+    expect(res.txids.length).toBe(1);
+    expect(mockGetUtxosByScripthash).toHaveBeenCalled();
+    expect(mockBroadcastTransaction).toHaveBeenCalledTimes(1);
+    // Output pays the recovered balance (minus fee) to the destination P2PKH.
+    const out = singleOutput(mockBroadcastTransaction.mock.calls[0][0]);
+    const destScript = decodeCashAddr(DEST_CASHADDR, true).hash.toString('hex');
+    expect(out.scriptHex).toBe(`76a914${destScript}88ac`);
+    expect(out.value).toBe(res.sweptSats);
+  });
+
+  it('RECOVERS a p2tr (Taproot) SegWit claim via scripthash lookup', async () => {
+    const path = "m/86'/0'/0'/0/0";
+    const addr = await addrForPath(path);
+    mockGetUtxosByAddress.mockResolvedValue([]);
+    mockGetUtxosByScripthash.mockResolvedValue([{ txid: fakeTxid(8), vout: 0, value: 400_000 }]);
+    const res = await sweepAirdropClaims(TEST_MNEMONIC, '', [
+      { bch2Address: addr, derivationPath: path, addressType: 'p2tr', balance: 400_000 },
+    ], DEST_CASHADDR, 2);
+    expect(res.skipped.length).toBe(0);
+    expect(res.txids.length).toBe(1);
+    expect(mockBroadcastTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('legacy + bc1 mixed claims produce TWO txs (consolidation + recovery)', async () => {
+    const legacyPath = "m/44'/145'/0'/0/3";
+    const bc1Path = "m/84'/0'/0'/0/2";
+    const legacyAddr = await addrForPath(legacyPath);
+    const bc1Addr = await addrForPath(bc1Path);
+    mockGetUtxosByAddress.mockImplementation(async (a: string) => (a === legacyAddr ? [{ txid: fakeTxid(9), vout: 0, value: 300_000 }] : []));
+    mockGetUtxosByScripthash.mockResolvedValue([{ txid: fakeTxid(10), vout: 0, value: 700_000 }]);
+    const res = await sweepAirdropClaims(TEST_MNEMONIC, '', [
+      { bch2Address: legacyAddr, derivationPath: legacyPath, addressType: 'legacy', balance: 300_000 },
+      { bch2Address: bc1Addr, derivationPath: bc1Path, addressType: 'bc1', balance: 700_000 },
+    ], DEST_CASHADDR, 1);
+    expect(res.skipped.length).toBe(0);
+    expect(res.txids.length).toBe(2);
+    expect(mockBroadcastTransaction).toHaveBeenCalledTimes(2);
   });
 
   it('returns no tx when there are no spendable UTXOs', async () => {
