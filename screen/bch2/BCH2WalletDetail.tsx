@@ -29,6 +29,7 @@ interface Transaction {
   timestamp: number;
   fee?: number;
   height?: number;
+  verified?: 'unverified' | 'verified' | 'failed'; // client-side SPV state (bch2-spv)
 }
 
 interface BCH2WalletDetailProps {
@@ -205,6 +206,10 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
             <Text style={styles.txId}>{formatTxid(item.txid)}</Text>
             <Text style={styles.txDate}>
               {hasHeight ? `Block ${item.height}` : 'Pending'}
+              {item.verified === 'verified' ? '  🛡 SPV verified'
+                : item.verified === 'failed' ? '  ⚠ unverified'
+                : item.verified === 'unverified' ? '  · verifying…'
+                : ''}
             </Text>
           </View>
         </View>

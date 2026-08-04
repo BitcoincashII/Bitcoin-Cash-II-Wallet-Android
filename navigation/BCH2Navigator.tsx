@@ -20,7 +20,8 @@ import AddWallet from '../screen/bch2/AddWallet';
 import BCH2AppPassword from '../screen/bch2/BCH2AppPassword';
 import { getWallet, getWallets, getWalletMnemonic, updateWalletBalance, getBC2AccountXpub, StoredWallet } from '../class/bch2-wallet-storage';
 import { parseBCH2PaymentUri } from '../class/bch2-uri';
-import { getTransactionsByAddress, getBC2Transactions, getBalanceByAddress, getBC2Balance, getBalanceByScripthash, getTransactionsByScripthash } from '../blue_modules/BCH2Electrum';
+import { getTransactionsByAddress, getBC2Transactions, getBalanceByAddress, getBC2Balance, getBalanceByScripthash, getTransactionsByScripthash, getLatestBlock, getTipHeight } from '../blue_modules/BCH2Electrum';
+import * as BCH2Spv from '../blue_modules/bch2-spv';
 import { sendTransaction, sendFromBech32, sendFromP2SH, sendFromP2WSH, sendFromP2TR, decodeBech32, sendBC2NativeHd, bc2ScriptTypeFromAddress, getBC2HdBalance, scanBC2Hd } from '../class/bch2-transaction';
 import { bc1AddressToScripthash } from '../class/bch2-airdrop';
 
@@ -303,6 +304,7 @@ interface Transaction {
   amount: number;
   timestamp: number;
   height?: number;
+  verified?: 'unverified' | 'verified' | 'failed';
 }
 
 const BCH2WalletDetailWrapper: React.FC = () => {
@@ -365,15 +367,38 @@ const BCH2WalletDetailWrapper: React.FC = () => {
       }
 
       // Convert to Transaction format
+      const isPlainBCH2 = !isBC2 && !isBC1; // SPV applies to mainnet BCH2 CashAddr txs only
       const formattedTxs: Transaction[] = txHistory.map((tx: any) => ({
         txid: tx.tx_hash || tx.txid,
-        confirmations: tx.height ? Math.max(0, (tx.height > 0 ? 1 : 0)) : 0, // Simplified - would need current block height
+        confirmations: tx.height ? Math.max(0, (tx.height > 0 ? 1 : 0)) : 0, // optimistic; upgraded by the SPV pass below
         amount: 0, // Amount requires fetching full tx details
         timestamp: Math.floor(Date.now() / 1000), // Would need tx details for actual time
         height: tx.height,
+        // Only txs SPV can actually cover (mainnet, above the checkpoint) start 'unverified'; others get no badge.
+        verified: (isPlainBCH2 && tx.height > 0 && BCH2Spv.isInSpvScope(tx.height)) ? 'unverified' : undefined,
       }));
 
       setTransactions(formattedTxs);
+
+      // L1: fire-and-forget client-side SPV verification of confirmed BCH2 txs (merkle + PoW header chain), so the
+      // confirmation is trust-minimised rather than server-reported. Non-blocking; fail-closed per tx; mainnet only.
+      if (isPlainBCH2 && BCH2Spv.spvSupported()) {
+        (async () => {
+          const tip = await getTipHeight(); // FRESH tip (getLatestBlock can be stale for a long session)
+          if (!tip || tip <= 0) return;
+          const updated = await Promise.all(formattedTxs.slice(0, 25).map(async (t): Promise<Transaction> => {
+            if (t.verified !== 'unverified' || !t.height || t.height <= 0) return t;
+            try {
+              const depth = await BCH2Spv.verifyConfirmations(t.txid, t.height, tip);
+              // null = out of scope / not verifiable yet → neutral (no badge); number = proven depth.
+              return depth === null ? { ...t, verified: undefined } : { ...t, verified: 'verified', confirmations: depth };
+            } catch {
+              return { ...t, verified: 'failed' }; // definitive forgery
+            }
+          }));
+          setTransactions(prev => (prev === formattedTxs ? updated.concat(formattedTxs.slice(25)) : prev));
+        })().catch(() => {});
+      }
 
       // Update wallet with new balance (both React state and persistent storage).
       // Also cache a freshly-backfilled xpub so pull-to-refresh short-circuits the

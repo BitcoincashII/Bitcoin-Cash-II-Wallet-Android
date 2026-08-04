@@ -397,6 +397,24 @@ export async function getRawTransaction(txid: string): Promise<string> {
   return mainClient.blockchainTransaction_get(txid, false);
 }
 
+// ── SPV support (bch2-spv.ts): merkle proof + batch headers ───────────────────────────────────────────────────
+/** blockchain.transaction.get_merkle — the Merkle inclusion proof for a confirmed tx at `height`. */
+export async function getMerkleProof(txid: string, height: number): Promise<{ block_height: number; merkle: string[]; pos: number }> {
+  if (typeof txid !== 'string' || !/^[0-9a-fA-F]{64}$/.test(txid)) throw new Error('Invalid txid');
+  if (!Number.isInteger(height) || height < 0) throw new Error('Invalid height');
+  await connectMain();
+  return mainClient.blockchainTransaction_getMerkle(txid, height);
+}
+
+/** blockchain.block.headers — a batch of raw 80-byte headers as hex. Uses request() directly because the vendored
+ *  electrum-client's blockchainBlock_headers wrapper sends a typo'd method name ('blockchain.block.headeres'). */
+export async function getBlockHeaders(startHeight: number, count: number): Promise<{ count: number; hex: string; max: number }> {
+  if (!Number.isInteger(startHeight) || startHeight < 0) throw new Error('Invalid start height');
+  if (!Number.isInteger(count) || count < 1 || count > 2016) throw new Error('Invalid header count');
+  await connectMain();
+  return mainClient.request('blockchain.block.headers', [startHeight, count]);
+}
+
 /**
  * Check if a transaction is a coinbase by examining its first input's prevout hash
  */
@@ -491,6 +509,23 @@ export async function estimateFee(blocks: number = 6): Promise<number> {
 
 export function getLatestBlock(): { height: number; time: number } | { height: undefined; time: undefined } {
   return latestBlock;
+}
+
+/**
+ * Fetch a FRESH tip height (re-subscribe). latestBlock is captured once at connect and connectMain() short-circuits
+ * while the socket is alive, so getLatestBlock() can be stale for a long-running session — SPV needs the current
+ * tip so a tx confirmed after connect isn't mis-flagged. Falls back to the cached height on error.
+ */
+export async function getTipHeight(): Promise<number> {
+  try {
+    await connectMain();
+    const header = await mainClient.blockchainHeaders_subscribe();
+    if (header && typeof header.height === 'number' && Number.isInteger(header.height) && header.height >= 0) {
+      latestBlock = { height: header.height, time: Math.floor(Date.now() / 1000) };
+      return header.height;
+    }
+  } catch { /* fall back to cached */ }
+  return latestBlock.height || 0;
 }
 
 export function isConnected(): boolean {

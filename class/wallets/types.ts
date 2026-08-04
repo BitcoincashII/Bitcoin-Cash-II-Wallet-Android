@@ -125,6 +125,9 @@ export type Transaction = {
   outputs: TransactionOutput[];
   blockhash: string;
   confirmations: number;
+  // Client-side SPV state of the confirmation count (bch2-spv): 'unverified' = server-reported only,
+  // 'verified' = merkle+PoW proven, 'failed' = proof did not verify. Optional; undefined for unconfirmed.
+  verified?: 'unverified' | 'verified' | 'failed';
   time: number;
   blocktime: number;
   timestamp: number; // seconds, not milliseconds

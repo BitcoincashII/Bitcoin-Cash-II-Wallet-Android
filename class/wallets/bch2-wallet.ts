@@ -6,6 +6,7 @@
 import { ECPairAPI, ECPairFactory } from 'ecpair';
 import ecc from '../../blue_modules/noble_ecc';
 import * as BCH2Electrum from '../../blue_modules/BCH2Electrum';
+import * as BCH2Spv from '../../blue_modules/bch2-spv';
 import { AbstractWallet } from './abstract-wallet';
 import { Transaction, Utxo } from './types';
 import { randomBytes } from '../rng';
@@ -93,11 +94,13 @@ export class BCH2Wallet extends AbstractWallet {
     try {
       const history = await BCH2Electrum.getTransactionsByAddress(address);
       const transactions: Transaction[] = [];
+      const heightByTxid: Record<string, number> = {};
 
       for (const tx of history) {
         const fullTx = await BCH2Electrum.getTransaction(tx.tx_hash);
         if (fullTx) {
           const blockHeight = BCH2Electrum.getLatestBlock().height || 0;
+          if (tx.height > 0) heightByTxid[tx.tx_hash] = tx.height;
           transactions.push({
             txid: tx.tx_hash,
             hash: tx.tx_hash,
@@ -112,6 +115,9 @@ export class BCH2Wallet extends AbstractWallet {
             timestamp: fullTx.blocktime || Math.floor(Date.now() / 1000),
             blockhash: fullTx.blockhash || '',
             confirmations: tx.height > 0 ? blockHeight - tx.height + 1 : 0,
+            // Server-reported until the fire-and-forget SPV pass upgrades it. Only txs SPV can actually cover
+            // (mainnet, above the checkpoint) start 'unverified'; everything else has no badge.
+            verified: (tx.height > 0 && BCH2Spv.isInSpvScope(tx.height)) ? 'unverified' : undefined,
             inputs: fullTx.vin || [],
             outputs: fullTx.vout || [],
           });
@@ -120,8 +126,34 @@ export class BCH2Wallet extends AbstractWallet {
 
       this._transactions = transactions;
       this._lastTxFetch = Date.now();
+      // L1: verify confirmations client-side (merkle + PoW) WITHOUT blocking the list. The confirmed count renders
+      // immediately (optimistic) and upgrades to a trusted badge a moment later. Fully fail-closed + best-effort.
+      this.verifyConfirmedTransactions(heightByTxid).catch(() => {});
     } catch (err) {
       console.log('BCH2 fetchTransactions error:', err);
+    }
+  }
+
+  /**
+   * L1: SPV-verify the confirmation depth of recent confirmed txs (merkle-inclusion + PoW/ASERT header chain from a
+   * hardcoded checkpoint), removing trust in the server's reported height. Fire-and-forget: sets tx.verified to
+   * 'verified' or 'failed' in place. Skips entirely when SPV isn't supported (non-mainnet server) so nothing is
+   * mislabelled. Capped to the most recent confirmed txs; the header chain is cached across txs.
+   */
+  private async verifyConfirmedTransactions(heightByTxid: Record<string, number>): Promise<void> {
+    if (!BCH2Spv.spvSupported()) return; // non-mainnet — nothing was marked 'unverified', so no badges to upgrade
+    const tip = await BCH2Electrum.getTipHeight(); // FRESH tip so a tx confirmed after connect isn't mis-flagged
+    if (!tip || tip <= 0) return;
+    const MAX = 25;
+    const toVerify = this._transactions.filter(t => t.verified === 'unverified' && heightByTxid[t.txid] > 0).slice(0, MAX);
+    for (const tx of toVerify) {
+      try {
+        const depth = await BCH2Spv.verifyConfirmations(tx.txid, heightByTxid[tx.txid], tip);
+        if (depth === null) tx.verified = undefined; // out of scope / not verifiable yet → neutral (no badge)
+        else { tx.verified = 'verified'; tx.confirmations = depth; }
+      } catch {
+        tx.verified = 'failed'; // definitive forgery of this tx's inclusion (merkle/binding mismatch)
+      }
     }
   }
 

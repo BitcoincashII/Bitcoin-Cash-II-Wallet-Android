@@ -7,6 +7,8 @@ jest.mock('../../blue_modules/BCH2Electrum', () => ({
   getUtxosByAddress: jest.fn(),
   getTransaction: jest.fn(),
   getLatestBlock: jest.fn(() => ({ height: 100, time: 1700000000 })),
+  getTipHeight: jest.fn(async () => 100),
+  getServerName: jest.fn(() => false), // non-mainnet in tests => SPV off (isInSpvScope false)
 }));
 
 // Mock the rng module to return deterministic bytes
