@@ -21,7 +21,7 @@ import BCH2AppPassword from '../screen/bch2/BCH2AppPassword';
 import { getWallet, getWallets, getWalletMnemonic, updateWalletBalance, getBC2AccountXpub, StoredWallet } from '../class/bch2-wallet-storage';
 import { parseBCH2PaymentUri } from '../class/bch2-uri';
 import { getTransactionsByAddress, getBC2Transactions, getBalanceByAddress, getBC2Balance, getBalanceByScripthash, getTransactionsByScripthash } from '../blue_modules/BCH2Electrum';
-import { sendTransaction, sendFromBech32, sendFromP2SH, sendBC2NativeHd, bc2ScriptTypeFromAddress, getBC2HdBalance, scanBC2Hd } from '../class/bch2-transaction';
+import { sendTransaction, sendFromBech32, sendFromP2SH, sendFromP2WSH, sendFromP2TR, decodeBech32, sendBC2NativeHd, bc2ScriptTypeFromAddress, getBC2HdBalance, scanBC2Hd } from '../class/bch2-transaction';
 import { bc1AddressToScripthash } from '../class/bch2-airdrop';
 
 const Stack = createNativeStackNavigator<BCH2RootStackParamList>();
@@ -180,7 +180,9 @@ const BCH2SendWrapper: React.FC = () => {
     }
 
     const addr = walletAddress.toLowerCase();
-    const isBech32Source = addr.startsWith('bc1');
+    // NB: check bc1p (Taproot) BEFORE bc1 — 'bc1p'.startsWith('bc1') is true.
+    const isTaprootSource = addr.startsWith('bc1p');
+    const isBech32Source = addr.startsWith('bc1') && !isTaprootSource; // bc1q (P2WPKH or P2WSH)
     const isP2SHSource = walletAddress.startsWith('3');
 
     let result;
@@ -189,9 +191,18 @@ const BCH2SendWrapper: React.FC = () => {
       // address of the account and sends change to a fresh change address. Script
       // type is inferred from the wallet address prefix.
       result = await sendBC2NativeHd(mnemonic, bc2ScriptTypeFromAddress(walletAddress), toAddress, amount, feePerByte);
+    } else if (isTaprootSource) {
+      // BCH2 Taproot *recovery* of pre-fork coins (BIP341 Schnorr via scriptSig).
+      result = await sendFromP2TR(mnemonic, walletAddress, toAddress, amount, feePerByte);
     } else if (isBech32Source) {
-      // BCH2 SegWit *recovery* of pre-fork coins (scriptSig + FORKID).
-      result = await sendFromBech32(mnemonic, walletAddress, toAddress, amount, feePerByte);
+      // BCH2 SegWit *recovery* of pre-fork coins (scriptSig + FORKID). A bc1q
+      // address is P2WPKH (20-byte program) or, rarely, P2WSH (32-byte program).
+      const decoded = decodeBech32(walletAddress);
+      if (decoded && decoded.program.length === 32) {
+        result = await sendFromP2WSH(mnemonic, walletAddress, toAddress, amount, feePerByte);
+      } else {
+        result = await sendFromBech32(mnemonic, walletAddress, toAddress, amount, feePerByte);
+      }
     } else if (isP2SHSource) {
       result = await sendFromP2SH(mnemonic, walletAddress, toAddress, amount, feePerByte);
     } else {

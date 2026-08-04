@@ -953,7 +953,7 @@ function bech32HrpExpand(hrp: string): number[] {
  * Decode bech32 address to witness version and program
  * Returns null if invalid
  */
-function decodeBech32(address: string): { version: number; program: Buffer } | null {
+export function decodeBech32(address: string): { version: number; program: Buffer } | null {
   const addr = address.toLowerCase();
 
   // Find separator
