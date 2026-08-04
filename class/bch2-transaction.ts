@@ -3274,6 +3274,10 @@ export async function sendBC2NativeHd(
   if (!Number.isInteger(amountSats) || amountSats < 0) throw new Error('Invalid amount');
   if (amountSats < 546) throw new Error('Amount below dust threshold (546 sats)');
 
+  // LOW: trim the recipient — isValidRecipientAddress trims before validating, so a
+  // pasted address with surrounding whitespace passes the UI check; without trimming
+  // here a leading space defeats the bc1/bech32 prefix test and the send fails.
+  toAddress = toAddress.trim();
   const recipientScript = addressToScript(toAddress, true);
   const purpose = bc2Purpose(scriptType);
 

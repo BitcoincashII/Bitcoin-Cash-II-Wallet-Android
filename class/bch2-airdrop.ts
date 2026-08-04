@@ -369,9 +369,15 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
             continue;
           }
 
-          // Scan both external (0) and internal/change (1) chains
-          for (const chain of [0, 1]) {
-            await scanChainWithGapLimit(accountNode, chain, accountPath, config.addressType);
+          // Scan both external (0) and internal/change (1) chains, then wipe the
+          // account-level private key (xprv-equivalent) — mirrors
+          // scanDescriptorForAirdrop, so no account node lingers un-zeroed.
+          try {
+            for (const chain of [0, 1]) {
+              await scanChainWithGapLimit(accountNode, chain, accountPath, config.addressType);
+            }
+          } finally {
+            if (accountNode.privateKey) { try { crypto.randomFillSync(accountNode.privateKey); } catch {} accountNode.privateKey.fill(0); }
           }
 
           // Account gap tolerance of 2: skip higher accounts only after

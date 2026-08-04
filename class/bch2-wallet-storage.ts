@@ -6,7 +6,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Keychain from 'react-native-keychain';
 import * as bip39 from 'bip39';
-import BIP32Factory from 'bip32';
+import BIP32Factory, { BIP32Interface } from 'bip32';
 import ecc from '../blue_modules/noble_ecc';
 const bip32 = BIP32Factory(ecc);
 const crypto = require('crypto');
@@ -241,34 +241,40 @@ function deriveAddress(
   scriptType: BC2ScriptType = 'legacy'
 ): string {
   const seed = bip39.mnemonicToSeedSync(mnemonic);
+  // Hoisted so the finally can zero them — deriveAddress runs on every wallet
+  // create/derive, so the BIP32 master + child private keys must not linger.
+  let root: BIP32Interface | undefined;
+  let child: BIP32Interface | undefined;
   try {
-    const root = bip32.fromSeed(seed);
+    root = bip32.fromSeed(seed);
 
     if (walletType === 'bc2') {
       // BC2 (Bitcoin-Core lineage) — path depends on the chosen script type; the
       // address encoding is centralised in bc2AddressFromPubkey (single source of
       // truth, shared with HD scanning) so the two never diverge.
       const purpose = scriptType === 'p2sh-segwit' ? 49 : scriptType === 'native-segwit' ? 84 : scriptType === 'taproot' ? 86 : 44;
-      const child = root.derivePath(`m/${purpose}'/0'/0'/0/0`);
+      child = root.derivePath(`m/${purpose}'/0'/0'/0/0`);
       return bc2AddressFromPubkey(scriptType, Buffer.from(child.publicKey));
     }
 
     if (walletType === 'bc1') {
       // Native SegWit uses BIP84 path: m/84'/0'/0'/0/0
-      const child = root.derivePath("m/84'/0'/0'/0/0");
+      child = root.derivePath("m/84'/0'/0'/0/0");
       const pubkeyHash = hash160(Buffer.from(child.publicKey));
       return encodeBech32('bc', 0, pubkeyHash);
     }
 
     // BCH2 uses BCH derivation path: m/44'/145'/0'/0/0
-    const child = root.derivePath("m/44'/145'/0'/0/0");
+    child = root.derivePath("m/44'/145'/0'/0/0");
     const pubkeyHash = hash160(Buffer.from(child.publicKey));
     return encodeCashAddr('bitcoincashii', 0, pubkeyHash);
   } finally {
-    // Zero seed material regardless of success/failure
+    // Zero seed + BIP32 master/child private keys regardless of success/failure.
     if (seed instanceof Buffer || seed instanceof Uint8Array) {
       seed.fill(0);
     }
+    if (root?.privateKey) { try { root.privateKey.fill(0); } catch {} }
+    if (child?.privateKey) { try { child.privateKey.fill(0); } catch {} }
   }
 }
 

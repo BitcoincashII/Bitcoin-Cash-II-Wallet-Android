@@ -24,6 +24,13 @@ describe('parseBCH2PaymentUri', () => {
     expect(parseBCH2PaymentUri(`BITCOINCASHII:${p2sh}`)).toEqual({ address: `bitcoincashii:${p2sh}` });
   });
 
+  it('lowercases an all-UPPERCASE CashAddr body (LOW: avoids mixed-case rejection)', () => {
+    // Uppercase is CashAddr-legal (common in QR alphanumeric mode). The lowercase
+    // scheme + an uppercase body would be mixed-case and get rejected downstream.
+    expect(parseBCH2PaymentUri(`BITCOINCASHII:${ADDR.toUpperCase()}`)).toEqual({ address: `bitcoincashii:${ADDR}` });
+    expect(parseBCH2PaymentUri(`bitcoincashii:${ADDR.toUpperCase()}?amount=1`)).toEqual({ address: `bitcoincashii:${ADDR}`, amount: '1' });
+  });
+
   it('normalizes a double-prefixed address to a single prefix', () => {
     expect(parseBCH2PaymentUri(`bitcoincashii:bitcoincashii:${ADDR}`)).toEqual({ address: `bitcoincashii:${ADDR}` });
   });

@@ -29,7 +29,11 @@ export function parseBCH2PaymentUri(uri: string): BCH2Payment | null {
   addrPart = addrPart.replace(/^bitcoincashii:/i, '').replace(/^\/+/, '');
   if (!addrPart) return null;
 
-  const result: BCH2Payment = { address: `${SCHEME}${addrPart}` };
+  // CashAddr is case-insensitive but must be uniform case; the scheme prefix is
+  // lowercase, so lowercase the body too. Without this an all-UPPERCASE CashAddr
+  // URI (valid, common in QR alphanumeric mode) becomes lowercase-prefix +
+  // uppercase-body = mixed case, which decodeCashAddr rejects (LOW #24).
+  const result: BCH2Payment = { address: `${SCHEME}${addrPart.toLowerCase()}` };
 
   const query = qIdx === -1 ? '' : rest.slice(qIdx + 1);
   for (const pair of query.split('&')) {
