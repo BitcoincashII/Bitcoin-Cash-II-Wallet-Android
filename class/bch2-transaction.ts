@@ -2587,6 +2587,7 @@ export async function sweepAirdropClaims(
   const root = bip32.fromSeed(seed);
 
   const inputs: Array<{ utxo: UTXO; publicKey: Buffer; privateKey: Buffer }> = []; // legacy P2PKH consolidation
+  const legacyClaims: SweepClaim[] = []; // legacy claims contributing to `inputs` (for skip-on-failure reporting)
   const skipped: SweepResult['skipped'] = [];
   const swept: SweepResult['swept'] = [];
   const txids: string[] = [];
@@ -2673,7 +2674,8 @@ export async function sweepAirdropClaims(
       tweakedPrivkey = tw.tweakedPrivkey;
       scripthash = spkToScripthash(Buffer.concat([Buffer.from([0x51, 0x20]), tweakedXonly])); // OP_1 PUSH32 <tweaked>
     }
-    const utxos = cleanUtxos(await getUtxosByScripthash(scripthash));
+    // Exclude immature (<100-conf) coinbase, else the node rejects the sweep tx (bad-txns-premature-spend).
+    const utxos = cleanUtxos(await filterMatureUtxos(await getUtxosByScripthash(scripthash), false));
     if (utxos.length === 0) return null;
     if (utxos.length > 500) throw new Error('Too many UTXOs to sweep at once (max 500)');
     const total = utxos.reduce((s, u) => s + u.value, 0);
@@ -2731,7 +2733,8 @@ export async function sweepAirdropClaims(
       if (t === 'legacy') {
         let utxos: UTXO[];
         try {
-          utxos = await getUtxosByAddress(claim.bch2Address);
+          // Exclude immature (<100-conf) coinbase — a swept coinbase would be node-rejected.
+          utxos = await filterMatureUtxos(await getUtxosByAddress(claim.bch2Address), false);
         } catch {
           skipped.push({ address: claim.bch2Address, balance: claim.balance, reason: 'Could not fetch UTXOs (network)' });
           continue;
@@ -2743,6 +2746,7 @@ export async function sweepAirdropClaims(
           continue;
         }
         for (const u of utxos) inputs.push({ utxo: u, publicKey, privateKey });
+        legacyClaims.push(claim); // track so a consolidation failure skips (not aborts) — see below
       } else {
         // bc1 / p2sh-segwit / p2tr: queue a per-address SegWit recovery.
         segwitJobs.push({ type: t, claim, publicKey, privateKey, pubkeyHash, child });
@@ -2750,7 +2754,9 @@ export async function sweepAirdropClaims(
     }
 
     // --- Legacy P2PKH consolidation (all legacy inputs → one tx). ---
-    if (inputs.length > 0) {
+    // round-5 MED: this must NOT abort the whole sweep — a dust/too-many/broadcast failure here would otherwise
+    // skip the per-address SegWit recoveries below (which hold the real value). Guard it and continue.
+    if (inputs.length > 0) try {
       if (inputs.length > 500) throw new Error('Too many inputs to sweep at once (max 500)');
       const totalIn = inputs.reduce((s, i) => s + i.utxo.value, 0);
       const estSize = 10 + 148 * inputs.length + 34; // 1 output
@@ -2802,6 +2808,12 @@ export async function sweepAirdropClaims(
       sweptTotal += outputAmount;
       feeTotal += fee;
       for (const i of inputs) swept.push({ address: destAddress, value: i.utxo.value });
+    } catch (e: any) {
+      // Legacy consolidation failed (dust after fee / too many inputs / broadcast reject). Report the legacy claims
+      // as skipped and fall through to the SegWit recoveries — never abandon them because legacy failed.
+      for (const c of legacyClaims) {
+        skipped.push({ address: c.bch2Address, balance: c.balance, reason: `Legacy consolidation could not complete (${e?.message || 'error'}) — recoverable from your recovery phrase` });
+      }
     }
 
     // --- SegWit recovery (bc1 / p2sh-segwit / p2tr), one tx per address. ---

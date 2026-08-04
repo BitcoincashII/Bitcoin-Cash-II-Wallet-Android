@@ -341,6 +341,7 @@ const BCH2WalletDetailWrapper: React.FC = () => {
       let balance: { confirmed: number; unconfirmed: number };
       let txHistory: any[];
       let resolvedXpub: string | undefined; // cache a backfilled xpub into state so refresh doesn't re-read the seed
+      let bc2BalancePartial = false; // true if the BC2 balance is the primary-address-only fallback (don't persist)
 
       if (isBC2) {
         // HD: one account scan drives both the aggregate balance AND the tx history
@@ -366,8 +367,11 @@ const BCH2WalletDetailWrapper: React.FC = () => {
           merged.sort((a, b) => (b.height || Number.MAX_SAFE_INTEGER) - (a.height || Number.MAX_SAFE_INTEGER));
           txHistory = merged;
         } catch {
+          // HD scan failed (locked seed / network): primary-address-only fallback UNDER-reports (0 when funds are
+          // on change addresses). Show it this session but do NOT persist it over the last-known-good aggregate.
           balance = await getBC2Balance(w.address);
           txHistory = await getBC2Transactions(w.address);
+          bc2BalancePartial = true;
         }
       } else if (isBC1) {
         // bc1 addresses need scripthash-based queries
@@ -433,7 +437,8 @@ const BCH2WalletDetailWrapper: React.FC = () => {
         unconfirmedBalance: balance.unconfirmed,
         ...(resolvedXpub && !prev.xpub ? { xpub: resolvedXpub } : {}),
       } : null);
-      updateWalletBalance(w.id, balance.confirmed, balance.unconfirmed).catch(() => {});
+      // Don't persist a partial (primary-address-only) BC2 balance over the last-known-good aggregate (round-5 LOW).
+      if (!bc2BalancePartial) updateWalletBalance(w.id, balance.confirmed, balance.unconfirmed).catch(() => {});
     } catch (error) {
       __DEV__ && console.log('Failed to fetch wallet data:', error);
     }

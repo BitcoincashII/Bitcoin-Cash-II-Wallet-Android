@@ -24,13 +24,16 @@ import { bc1AddressToScripthash } from '../../class/bch2-airdrop';
 // HD-aggregate BC2 balance across the whole account, watch-only via the account
 // xpub (the seed is read at most once, to backfill an older wallet). Falls back to
 // the primary-address balance if that fails.
-async function bc2WalletBalance(wallet: StoredWallet): Promise<{ confirmed: number; unconfirmed: number }> {
+// Returns the HD-account-wide BC2 balance, or the PRIMARY-address-only balance with partial=true when the HD scan
+// fails. Callers must NOT persist a partial value (round-5 LOW): it under-reports (0 when funds are on change
+// addresses) and would overwrite the last-known-good stored balance.
+async function bc2WalletBalance(wallet: StoredWallet): Promise<{ confirmed: number; unconfirmed: number; partial: boolean }> {
   try {
     const scriptType = bc2ScriptTypeFromAddress(wallet.address);
     const xpub = await getBC2AccountXpub(wallet, scriptType);
-    return await getBC2HdBalance(xpub, scriptType);
-  } catch { /* fall through */ }
-  return getBC2Balance(wallet.address);
+    return { ...(await getBC2HdBalance(xpub, scriptType)), partial: false };
+  } catch { /* fall through to primary-address-only */ }
+  return { ...(await getBC2Balance(wallet.address)), partial: true };
 }
 
 interface Wallet {
@@ -73,9 +76,11 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
         const storedWallets = await getWallets();
         await Promise.all(storedWallets.map(async (wallet) => {
           try {
-            let balance;
+            let balance: { confirmed: number; unconfirmed: number };
+            let partial = false;
             if (wallet.type === 'bc2') {
-              balance = await bc2WalletBalance(wallet);
+              const b = await bc2WalletBalance(wallet);
+              balance = b; partial = b.partial;
             } else if (wallet.type === 'bc1' || wallet.address.toLowerCase().startsWith('bc1')) {
               const scripthash = bc1AddressToScripthash(wallet.address);
               if (!scripthash) throw new Error('Invalid bc1 address');
@@ -83,7 +88,8 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
             } else {
               balance = await getBalanceByAddress(wallet.address);
             }
-            await updateWalletBalance(wallet.id, balance.confirmed, balance.unconfirmed);
+            // Don't persist a partial (primary-address-only) BC2 balance over the last-known-good aggregate.
+            if (!partial) await updateWalletBalance(wallet.id, balance.confirmed, balance.unconfirmed);
           } catch (error) {
             __DEV__ && console.error('Failed to fetch balance:', error);
           }

@@ -171,14 +171,16 @@ async function connectMain(): Promise<void> {
   // Check both flag and client liveness — if disconnected, client ref may be stale
   if (mainConnected && mainClient) return;
 
-  // If disconnected, clear stale client to force fresh connection
+  // Prevent concurrent connection attempts — return the in-flight attempt BEFORE any stale-client teardown, else a
+  // concurrent caller (e.g. the wallet-list Promise.all) closes the actively-connecting socket out from under the
+  // first caller mid-handshake (round-5 LOW).
+  if (connectingPromise) return connectingPromise;
+
+  // No attempt in flight: clear any stale (disconnected) client, then connect fresh.
   if (!mainConnected && mainClient) {
     try { mainClient.close(); } catch {}
     mainClient = undefined;
   }
-
-  // Prevent concurrent connection attempts (race condition)
-  if (connectingPromise) return connectingPromise;
 
   connectingPromise = _doConnectMain();
   try {
@@ -313,20 +315,28 @@ export async function getUtxosByScripthash(scripthash: string): Promise<any[]> {
 /**
  * Get transaction history by scripthash (for SegWit addresses)
  */
+// Electrum blockchain.scripthash.get_history returns confirmed txs OLDEST-first (mempool, height<=0, appended
+// last). Sort NEWEST-first (mempool first, then confirmed by descending height) and keep the newest 500, so a
+// reused address with >500 txs retains the most recent activity (and the newest gets SPV-verified / rendered
+// first) rather than dropping it (round-5 MED).
+function newestFirst(history: any): any[] {
+  if (!Array.isArray(history)) return [];
+  const rank = (h: any) => (typeof h?.height === 'number' && h.height > 0 ? h.height : Number.MAX_SAFE_INTEGER);
+  return history.slice().sort((a, b) => rank(b) - rank(a)).slice(0, 500);
+}
+
 export async function getTransactionsByScripthash(scripthash: string): Promise<any[]> {
   if (typeof scripthash !== 'string' || !/^[a-fA-F0-9]{64}$/.test(scripthash)) {
     throw new Error('Invalid scripthash: expected 64-char hex string');
   }
   await connectMain();
-  const history = await mainClient.blockchainScripthash_getHistory(scripthash);
-  return Array.isArray(history) ? history.slice(0, 500) : [];
+  return newestFirst(await mainClient.blockchainScripthash_getHistory(scripthash));
 }
 
 export async function getTransactionsByAddress(address: string): Promise<any[]> {
   await connectMain();
   const script = addressToScriptHash(address);
-  const history = await mainClient.blockchainScripthash_getHistory(script);
-  return Array.isArray(history) ? history.slice(0, 500) : [];
+  return newestFirst(await mainClient.blockchainScripthash_getHistory(script));
 }
 
 export async function getUtxosByAddress(address: string): Promise<any[]> {
@@ -675,12 +685,14 @@ let bc2ConnectingPromise: Promise<void> | null = null;
 
 async function connectBC2(): Promise<void> {
   if (bc2Connected && bc2Client) return;
+  // Return an in-flight attempt BEFORE tearing down a stale client (round-5 LOW: else a concurrent caller closes
+  // the actively-connecting socket out from under the first).
+  if (bc2ConnectingPromise) return bc2ConnectingPromise;
   // Clear stale client on disconnect (same pattern as connectMain)
   if (!bc2Connected && bc2Client) {
     try { bc2Client.close(); } catch {}
     bc2Client = undefined;
   }
-  if (bc2ConnectingPromise) return bc2ConnectingPromise;
 
   bc2ConnectingPromise = _doConnectBC2();
   try {

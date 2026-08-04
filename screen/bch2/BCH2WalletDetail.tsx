@@ -196,21 +196,29 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
     const absAmount = Math.abs(item.amount);
     const hasHeight = item.height && item.height > 0;
 
+    const spvFailed = item.verified === 'failed'; // a definitive merkle/binding forgery (server lied)
     return (
-      <TouchableOpacity style={styles.txItem} onPress={() => openTransactionInExplorer(item.txid)} accessibilityLabel={`Transaction ${formatTxid(item.txid)}, ${isReceived ? 'received' : 'sent'} ${formatBalance(absAmount)} ${coinSymbol}, ${hasHeight ? `confirmed at block ${item.height}` : 'pending'}. Tap to view in explorer.`} accessibilityRole="button">
+      <TouchableOpacity
+        style={styles.txItem}
+        onPress={() => openTransactionInExplorer(item.txid)}
+        // amount/direction are placeholders (not yet computed) — don't announce a false "received 0.00000000".
+        accessibilityLabel={`Transaction ${formatTxid(item.txid)}, ${hasHeight ? `confirmed at block ${item.height}` : 'pending'}${spvFailed ? ', SPV verification failed — server proof invalid' : ''}. Tap to view in explorer.`}
+        accessibilityRole="button"
+      >
         <View style={styles.txLeft}>
-          <View style={[styles.txIcon, { backgroundColor: hasHeight ? BCH2Colors.success : BCH2Colors.warning }]}>
-            <Text style={styles.txIconText}>{hasHeight ? '✓' : '⏳'}</Text>
+          <View style={[styles.txIcon, { backgroundColor: spvFailed ? BCH2Colors.error : hasHeight ? BCH2Colors.success : BCH2Colors.warning }]}>
+            <Text style={styles.txIconText}>{spvFailed ? '⚠' : hasHeight ? '✓' : '⏳'}</Text>
           </View>
           <View style={styles.txInfo}>
             <Text style={styles.txId}>{formatTxid(item.txid)}</Text>
-            <Text style={styles.txDate}>
-              {hasHeight ? `Block ${item.height}` : 'Pending'}
-              {item.verified === 'verified' ? '  🛡 SPV verified'
-                : item.verified === 'failed' ? '  ⚠ unverified'
-                : item.verified === 'unverified' ? '  · verifying…'
-                : ''}
-            </Text>
+            <Text style={styles.txDate}>{hasHeight ? `Block ${item.height}` : 'Pending'}</Text>
+            {item.verified === 'verified' ? (
+              <Text style={[styles.txDate, { color: BCH2Colors.success }]}>🛡 SPV verified</Text>
+            ) : spvFailed ? (
+              <Text style={[styles.txDate, { color: BCH2Colors.error, fontWeight: '700' }]}>⚠ SPV FAILED — server proof invalid</Text>
+            ) : item.verified === 'unverified' ? (
+              <Text style={styles.txDate}>· verifying…</Text>
+            ) : null}
           </View>
         </View>
         <View style={styles.txRight}>

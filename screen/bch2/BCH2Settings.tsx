@@ -25,6 +25,7 @@ import {
   isBiometricEnabled,
   setBiometricEnabled,
   authenticateWithBiometric,
+  isAppPasswordSet,
   getAutoLockTimeout,
   setAutoLockTimeout,
 } from './BCH2AppPassword';
@@ -96,6 +97,17 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
   }, []);
 
   const handleBiometricToggle = useCallback(async (value: boolean) => {
+    // round-5 MED: require an app password BEFORE enabling biometrics. On Android 7-10 (API 24-29) the bundled
+    // biometrics lib can't fall back to the device PIN, so a lost/invalidated fingerprint with NO password would
+    // permanently lock the wallet (no escape on the lock screen). The password is the guaranteed knowledge-factor
+    // fallback. (Disabling never needs it.)
+    if (value && !(await isAppPasswordSet())) {
+      Alert.alert(
+        'Set an app password first',
+        'To use biometric unlock, first set an app password (Security → App Password). It is your fallback if your fingerprint/face is ever removed or unavailable — without it you could be locked out of the app entirely.',
+      );
+      return;
+    }
     // Verify identity before changing the lock state in EITHER direction —
     // turning protection OFF is as sensitive as turning it ON. Skip the check
     // only when the sensor is unavailable AND we are disabling, so a user whose

@@ -126,11 +126,18 @@ const BCH2App: React.FC = () => {
           }
         }
       } catch (e) {
-        // FAIL CLOSED: if we can't determine lock status on resume and a lock
-        // was ever configured, re-lock rather than leave the wallet open.
+        // FAIL CLOSED (round-5 LOW): the primary probe threw. Do NOT rely on the possibly-stale lockConfiguredRef
+        // (a lock enabled mid-session via Settings never updates it). Re-read the lock flags with individual guards
+        // and treat an UNREADABLE password flag as "a lock exists" — a storage error must never leave the wallet
+        // OPEN. Re-lock on any positive/uncertain signal; only a positively-confirmed no-lock stays unlocked.
         console.log('Auto-lock error:', e);
+        let pw = true;   // unreadable => assume a lock is configured
+        let bio = false;
+        try { pw = await isAppPasswordSet(); } catch { pw = true; }
+        try { bio = await isBiometricEnabled(); } catch { bio = false; }
+        lockConfiguredRef.current = pw || bio || lockConfiguredRef.current;
         if (lockConfiguredRef.current && !lockedRef.current) {
-          setPasswordConfigured(true);
+          setPasswordConfigured(pw);
           setLocked(true);
           setPasswordInput('');
           setPasswordError('');

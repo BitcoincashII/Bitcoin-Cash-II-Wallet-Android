@@ -350,6 +350,12 @@ export async function verifyConfirmations(txid: string, claimedHeight: number, t
   }
   if (!header) return null;
   if (proof.block_height !== claimedHeight) return null;
+  // Shape-validate the consumed fields BEFORE the merkle check so a MALFORMED (but non-forged) response is treated
+  // as neutral (null, retry later), NOT surfaced as a forgery 'failed'. Only a well-formed proof that fails to match
+  // is an actual server lie. (round-5 LOW: verifyMerkleInclusion previously ran on unvalidated bytes.)
+  if (typeof rawTxHex !== 'string' || rawTxHex.length === 0 || rawTxHex.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(rawTxHex)) return null;
+  if (!Array.isArray(proof.merkle) || !proof.merkle.every(h => typeof h === 'string' && /^[0-9a-fA-F]{64}$/.test(h))) return null;
+  if (!Number.isInteger(proof.pos) || proof.pos < 0) return null;
   // The Merkle-inclusion + txid-binding are the unambiguous adversarial checks: a network error cannot make a
   // wrong tx's bytes hash into the real block's merkle root. A throw here == the server forged this tx's inclusion.
   const provenTxid = verifyMerkleInclusion(rawTxHex, proof.merkle, proof.pos, header.merkleRoot); // throws on mismatch

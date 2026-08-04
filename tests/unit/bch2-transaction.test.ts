@@ -2700,15 +2700,36 @@ describe('sweepAirdropClaims', () => {
     ).rejects.toThrow();
   });
 
-  it('throws when the swept amount would be below dust after fees', async () => {
+  it('SKIPS (does not abort) a legacy consolidation that would be dust after fees', async () => {
+    // round-5: a dust legacy consolidation must NOT throw out of the whole sweep — it skips the legacy claim so any
+    // coexisting SegWit recovery still runs. Legacy-only here → no tx, the claim reported as skipped.
     const path = "m/44'/145'/0'/0/1";
     const addr = await addrForPath(path);
     mockGetUtxosByAddress.mockResolvedValue([{ txid: fakeTxid(6), vout: 0, value: 600 }]);
-    await expect(
-      sweepAirdropClaims(TEST_MNEMONIC, '', [
-        { bch2Address: addr, derivationPath: path, addressType: 'legacy', balance: 600 },
-      ], DEST_CASHADDR, 5),
-    ).rejects.toThrow(/dust/i);
+    const res = await sweepAirdropClaims(TEST_MNEMONIC, '', [
+      { bch2Address: addr, derivationPath: path, addressType: 'legacy', balance: 600 },
+    ], DEST_CASHADDR, 5);
+    expect(res.txid).toBeNull();
+    expect(res.txids).toHaveLength(0);
+    expect(res.skipped).toHaveLength(1);
+    expect(res.skipped[0].reason).toMatch(/legacy consolidation could not complete/i);
+    expect(mockBroadcastTransaction).not.toHaveBeenCalled();
+  });
+
+  it('legacy dust does NOT block a coexisting bc1 SegWit recovery (partial-success)', async () => {
+    const legacyPath = "m/44'/145'/0'/0/4";
+    const bc1Path = "m/84'/0'/0'/0/5";
+    const legacyAddr = await addrForPath(legacyPath);
+    const bc1Addr = await addrForPath(bc1Path);
+    mockGetUtxosByAddress.mockResolvedValue([{ txid: fakeTxid(11), vout: 0, value: 600 }]); // legacy dust
+    mockGetUtxosByScripthash.mockResolvedValue([{ txid: fakeTxid(12), vout: 0, value: 800_000 }]); // bc1 real value
+    const res = await sweepAirdropClaims(TEST_MNEMONIC, '', [
+      { bch2Address: legacyAddr, derivationPath: legacyPath, addressType: 'legacy', balance: 600 },
+      { bch2Address: bc1Addr, derivationPath: bc1Path, addressType: 'bc1', balance: 800_000 },
+    ], DEST_CASHADDR, 5);
+    expect(res.txids).toHaveLength(1);            // the bc1 recovery still ran
+    expect(res.skipped.some(s => /legacy consolidation/i.test(s.reason))).toBe(true);
+    expect(mockBroadcastTransaction).toHaveBeenCalledTimes(1);
   });
 });
 
