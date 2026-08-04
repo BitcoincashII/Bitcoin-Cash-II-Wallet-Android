@@ -559,6 +559,26 @@ export const BCH2SettingsScreen: React.FC<BCH2SettingsProps> = ({ navigation }) 
         </View>
       </View>
 
+      {/* Swap & Trade Section — opens the self-contained swap DEX in the browser (no keys shared) */}
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: BCH2Colors.textPrimary }]}>Swap & Trade</Text>
+        <View style={styles.explorerCard}>
+          <TouchableOpacity
+            style={styles.explorerRow}
+            onPress={() => Linking.openURL('https://swap.bch2.org').catch(() => {})}
+            accessibilityLabel="Open the BCH2 swap DEX to swap BCH2 for other crypto or fiat"
+            accessibilityRole="link"
+          >
+            <Image source={BCH2_LOGO} style={styles.explorerLogo} resizeMode="contain" />
+            <View style={styles.explorerInfo}>
+              <Text style={styles.explorerLabel}>Swap DEX (BCH2 ↔ Crypto / Fiat)</Text>
+              <Text style={[styles.explorerUrl, { color: BCH2Colors.info }]}>swap.bch2.org</Text>
+            </View>
+            <Text style={styles.explorerArrow}>↗</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
       {/* Security Section */}
       <View style={styles.section}>
         <Text style={[styles.sectionTitle, { color: BCH2Colors.textPrimary }]}>Security</Text>
