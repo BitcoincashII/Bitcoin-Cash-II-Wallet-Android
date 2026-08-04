@@ -36,6 +36,25 @@ async function bc2WalletBalance(wallet: StoredWallet): Promise<{ confirmed: numb
   return { ...(await getBC2Balance(wallet.address)), partial: true };
 }
 
+// Fetch a wallet's balance and persist it — EXCEPT a partial (primary-address-only) BC2 fallback, which would
+// clobber the last-known-good HD aggregate (round-5 LOW). Shared by BOTH the focus and pull-to-refresh paths so
+// they can't diverge again (round-6: onRefresh had lost the guard).
+async function fetchAndPersistBalance(wallet: StoredWallet): Promise<void> {
+  let balance: { confirmed: number; unconfirmed: number };
+  let partial = false;
+  if (wallet.type === 'bc2') {
+    const b = await bc2WalletBalance(wallet);
+    balance = b; partial = b.partial;
+  } else if (wallet.type === 'bc1' || wallet.address.toLowerCase().startsWith('bc1')) {
+    const scripthash = bc1AddressToScripthash(wallet.address);
+    if (!scripthash) throw new Error('Invalid bc1 address');
+    balance = await getBalanceByScripthash(scripthash);
+  } else {
+    balance = await getBalanceByAddress(wallet.address);
+  }
+  if (!partial) await updateWalletBalance(wallet.id, balance.confirmed, balance.unconfirmed);
+}
+
 interface Wallet {
   id: string;
   type: 'bc2' | 'bch2' | 'bc1';
@@ -76,20 +95,7 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
         const storedWallets = await getWallets();
         await Promise.all(storedWallets.map(async (wallet) => {
           try {
-            let balance: { confirmed: number; unconfirmed: number };
-            let partial = false;
-            if (wallet.type === 'bc2') {
-              const b = await bc2WalletBalance(wallet);
-              balance = b; partial = b.partial;
-            } else if (wallet.type === 'bc1' || wallet.address.toLowerCase().startsWith('bc1')) {
-              const scripthash = bc1AddressToScripthash(wallet.address);
-              if (!scripthash) throw new Error('Invalid bc1 address');
-              balance = await getBalanceByScripthash(scripthash);
-            } else {
-              balance = await getBalanceByAddress(wallet.address);
-            }
-            // Don't persist a partial (primary-address-only) BC2 balance over the last-known-good aggregate.
-            if (!partial) await updateWalletBalance(wallet.id, balance.confirmed, balance.unconfirmed);
+            await fetchAndPersistBalance(wallet);
           } catch (error) {
             __DEV__ && console.error('Failed to fetch balance:', error);
           }
@@ -109,18 +115,7 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
       // Fetch updated balances in parallel for all wallets
       await Promise.all(storedWallets.map(async (wallet) => {
         try {
-          let balance;
-          if (wallet.type === 'bc2') {
-            balance = await bc2WalletBalance(wallet);
-          } else if (wallet.type === 'bc1' || wallet.address.toLowerCase().startsWith('bc1')) {
-            const scripthash = bc1AddressToScripthash(wallet.address);
-            if (!scripthash) throw new Error('Invalid bc1 address');
-            balance = await getBalanceByScripthash(scripthash);
-          } else {
-            balance = await getBalanceByAddress(wallet.address);
-          }
-
-          await updateWalletBalance(wallet.id, balance.confirmed, balance.unconfirmed);
+          await fetchAndPersistBalance(wallet); // partial-BC2-balance guard is inside the shared helper
         } catch (error) {
           __DEV__ && console.error('Failed to fetch balance:', error);
         }
