@@ -301,7 +301,10 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
         {/* Network Status */}
         <View style={styles.networkStatus} accessibilityLabel={isElectrumConnected() ? 'Network status: connected to BCH2 network' : 'Network status: disconnected'} accessibilityRole="text">
           <View style={[styles.statusDot, !isElectrumConnected() && { backgroundColor: '#f85149' }]} />
-          <Text style={styles.statusText}>{isElectrumConnected() ? 'Connected to BCH2 Network' : 'Disconnected'}</Text>
+          {/* textBreakStrategy="simple" + trailing NBSP: Android's default highQuality
+              strategy under-measures a single unbroken word ("Disconnected") and clips
+              its last glyph; the inkless NBSP absorbs the clip so the real last letter shows. */}
+          <Text style={styles.statusText} textBreakStrategy="simple">{isElectrumConnected() ? 'Connected to BCH2 Network\u00A0' : 'Disconnected\u00A0'}</Text>
         </View>
       </ScrollView>
 
@@ -480,7 +483,6 @@ const styles = StyleSheet.create({
   statusText: {
     fontSize: BCH2Typography.fontSize.sm,
     color: BCH2Colors.textMuted,
-    paddingHorizontal: 4, // guard the trailing "d" of "Disconnected" against Android's last-glyph clip
   },
   fab: {
     position: 'absolute',
