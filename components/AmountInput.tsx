@@ -367,9 +367,12 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     alignSelf: 'center',
     justifyContent: 'center',
+    flexShrink: 0,
   },
   input: {
     fontWeight: 'bold',
+    flexShrink: 1,
+    minWidth: 0,
   },
   cryptoCurrency: {
     fontSize: 15,
@@ -377,6 +380,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     alignSelf: 'center',
     justifyContent: 'center',
+    flexShrink: 0,
   },
   secondaryRoot: {
     alignItems: 'center',

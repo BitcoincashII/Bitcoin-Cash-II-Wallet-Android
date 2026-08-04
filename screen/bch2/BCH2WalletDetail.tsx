@@ -210,20 +210,20 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
             <Text style={styles.txIconText}>{spvFailed ? '⚠' : hasHeight ? '✓' : '⏳'}</Text>
           </View>
           <View style={styles.txInfo}>
-            <Text style={styles.txId}>{formatTxid(item.txid)}</Text>
+            <Text style={styles.txId} numberOfLines={1}>{formatTxid(item.txid)}</Text>
             <Text style={styles.txDate}>{hasHeight ? `Block ${item.height}` : 'Pending'}</Text>
             {item.verified === 'verified' ? (
-              <Text style={[styles.txDate, { color: BCH2Colors.success }]}>🛡 SPV verified</Text>
+              <Text style={[styles.txDate, { color: BCH2Colors.success }]} numberOfLines={1}>🛡 SPV verified</Text>
             ) : spvFailed ? (
-              <Text style={[styles.txDate, { color: BCH2Colors.error, fontWeight: '700' }]}>⚠ SPV FAILED — server proof invalid</Text>
+              <Text style={[styles.txDate, { color: BCH2Colors.error, fontWeight: '700' }]} numberOfLines={1}>⚠ SPV FAILED — server proof invalid</Text>
             ) : item.verified === 'unverified' ? (
-              <Text style={styles.txDate}>· verifying…</Text>
+              <Text style={styles.txDate} numberOfLines={1}>· verifying…</Text>
             ) : null}
           </View>
         </View>
         <View style={styles.txRight}>
           {absAmount > 0 ? (
-            <Text style={[styles.txAmount, { color: isReceived ? BCH2Colors.success : BCH2Colors.error }]}>
+            <Text style={[styles.txAmount, { color: isReceived ? BCH2Colors.success : BCH2Colors.error }]} numberOfLines={1} adjustsFontSizeToFit>
               {isReceived ? '+' : '-'}{formatBalance(absAmount)}
             </Text>
           ) : (
@@ -286,7 +286,7 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
         <Text style={styles.walletLabel}>{label}</Text>
 
         <View style={styles.balanceContainer}>
-          <Text style={[styles.balance, { color: primaryColor }]}>
+          <Text style={[styles.balance, { color: primaryColor }]} numberOfLines={1} adjustsFontSizeToFit>
             {formatBalance(balance)}
           </Text>
           <Text style={styles.balanceSymbol}>{coinSymbol}</Text>
@@ -362,7 +362,7 @@ export const BCH2WalletDetailScreen: React.FC<BCH2WalletDetailProps> = ({
           </View>
           <View style={styles.infoRow}>
             <Text style={styles.infoLabel}>Full Address</Text>
-            <Text style={[styles.infoValue, styles.infoValueMono]} numberOfLines={2}>
+            <Text style={[styles.infoValue, styles.infoValueMono]}>
               {address}
             </Text>
           </View>
@@ -483,11 +483,13 @@ const styles = StyleSheet.create({
     fontSize: BCH2Typography.fontSize.xxxl,
     fontWeight: BCH2Typography.fontWeight.bold,
     fontFamily: 'monospace',
+    flexShrink: 1,
   },
   balanceSymbol: {
     color: BCH2Colors.textSecondary,
     fontSize: BCH2Typography.fontSize.lg,
     marginLeft: BCH2Spacing.sm,
+    flexShrink: 0,
   },
   unconfirmed: {
     color: BCH2Colors.warning,
@@ -586,6 +588,8 @@ const styles = StyleSheet.create({
   txLeft: {
     flexDirection: 'row',
     alignItems: 'center',
+    flex: 1,
+    minWidth: 0,
   },
   txIcon: {
     width: 36,
@@ -624,6 +628,7 @@ const styles = StyleSheet.create({
   },
   txRight: {
     alignItems: 'flex-end',
+    flexShrink: 0,
   },
   txAmount: {
     fontSize: BCH2Typography.fontSize.base,

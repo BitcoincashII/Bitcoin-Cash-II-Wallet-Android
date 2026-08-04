@@ -64,7 +64,7 @@ export const BCH2WalletCard: React.FC<BCH2WalletCardProps> = ({
           resizeMode="contain"
         />
         <View style={styles.headerText}>
-          <Text style={styles.label}>
+          <Text style={styles.label} numberOfLines={1}>
             {walletLabel || (isBC2 ? 'BitcoinII' : 'Bitcoin Cash II')}
           </Text>
           <View style={[styles.coinBadge, { backgroundColor: badgeColor }]}>
@@ -73,7 +73,7 @@ export const BCH2WalletCard: React.FC<BCH2WalletCardProps> = ({
         </View>
       </View>
 
-      {/* Balance */}
+      {/* Balance — ticker omitted here; the header badge already shows BC2/BCH2 */}
       <View style={styles.balanceContainer}>
         <Text
           style={[styles.balance, { color: primaryColor }]}
@@ -83,7 +83,6 @@ export const BCH2WalletCard: React.FC<BCH2WalletCardProps> = ({
         >
           {formatBalance(balance)}
         </Text>
-        <Text style={styles.balanceSymbol} numberOfLines={1}>{coinSymbol}</Text>
       </View>
 
       {/* Unconfirmed */}
@@ -150,6 +149,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   coinBadge: {
+    flexShrink: 0,
     paddingHorizontal: BCH2Spacing.sm,
     paddingVertical: BCH2Spacing.xs,
     borderRadius: BCH2BorderRadius.sm,
@@ -160,6 +160,8 @@ const styles = StyleSheet.create({
     fontWeight: BCH2Typography.fontWeight.bold,
   },
   label: {
+    flexShrink: 1,
+    marginRight: BCH2Spacing.sm,
     color: BCH2Colors.textSecondary,
     fontSize: BCH2Typography.fontSize.base,
     fontWeight: BCH2Typography.fontWeight.medium,
@@ -174,13 +176,6 @@ const styles = StyleSheet.create({
     fontSize: BCH2Typography.fontSize.xxl,
     fontWeight: BCH2Typography.fontWeight.bold,
     fontFamily: 'monospace',
-  },
-  balanceSymbol: {
-    flexShrink: 0, // the ticker (BCH2/BC2) never gets squeezed or clipped
-    color: BCH2Colors.textSecondary,
-    fontSize: BCH2Typography.fontSize.lg,
-    marginLeft: BCH2Spacing.sm,
-    paddingRight: 2, // guard the trailing "2" against Android's last-glyph clip
   },
   unconfirmed: {
     color: BCH2Colors.warning,

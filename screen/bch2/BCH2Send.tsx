@@ -283,7 +283,7 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
           <Text style={styles.title}>Send {coinSymbol}</Text>
           <View style={styles.balanceRow}>
             <Text style={styles.balanceLabel}>Available:</Text>
-            <Text style={[styles.balanceValue, { color: primaryColor }]}>
+            <Text style={[styles.balanceValue, { color: primaryColor }]} numberOfLines={1} adjustsFontSizeToFit>
               {formatBalance(walletBalance)} {coinSymbol}
             </Text>
           </View>
@@ -359,11 +359,11 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
           <View style={styles.summaryCard}>
             <View style={styles.summaryRow}>
               <Text style={styles.summaryLabel}>Amount</Text>
-              <Text style={styles.summaryValue}>{formatBalance(amountInSats)} {coinSymbol}</Text>
+              <Text style={styles.summaryValue} numberOfLines={1} adjustsFontSizeToFit>{formatBalance(amountInSats)} {coinSymbol}</Text>
             </View>
             <View style={styles.summaryRow}>
               <Text style={styles.summaryLabel}>Fee</Text>
-              <Text style={styles.summaryValue}>{formatBalance(feeInSats)} {coinSymbol}</Text>
+              <Text style={styles.summaryValue} numberOfLines={1} adjustsFontSizeToFit>{formatBalance(feeInSats)} {coinSymbol}</Text>
             </View>
             <View style={[styles.summaryRow, styles.summaryTotal]}>
               <Text style={styles.summaryTotalLabel}>Total</Text>
@@ -397,11 +397,11 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
           <View style={styles.confirmCard}>
             <View style={styles.confirmRow}>
               <Text style={styles.confirmLabel}>To</Text>
-              <Text style={[styles.confirmValue, { fontSize: 12 }]} selectable numberOfLines={3}>{toAddress}</Text>
+              <Text style={[styles.confirmValue, { fontSize: 12, flex: 1, textAlign: 'right' }]} selectable numberOfLines={3} adjustsFontSizeToFit>{toAddress}</Text>
             </View>
             <View style={styles.confirmRow}>
               <Text style={styles.confirmLabel}>Amount</Text>
-              <Text style={[styles.confirmValueLarge, { color: primaryColor }]}>
+              <Text style={[styles.confirmValueLarge, { color: primaryColor }]} numberOfLines={1} adjustsFontSizeToFit>
                 {formatBalance(amountInSats)} {coinSymbol}
               </Text>
             </View>
@@ -411,7 +411,7 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
             </View>
             <View style={[styles.confirmRow, styles.confirmTotal]}>
               <Text style={styles.confirmTotalLabel}>Total</Text>
-              <Text style={styles.confirmTotalValue}>
+              <Text style={styles.confirmTotalValue} numberOfLines={1} adjustsFontSizeToFit>
                 {formatBalance(totalInSats)} {coinSymbol}
               </Text>
             </View>
@@ -505,11 +505,14 @@ const styles = StyleSheet.create({
     fontSize: BCH2Typography.fontSize.base,
     color: BCH2Colors.textSecondary,
     marginRight: BCH2Spacing.sm,
+    flexShrink: 0,
   },
   balanceValue: {
     fontSize: BCH2Typography.fontSize.base,
     fontWeight: BCH2Typography.fontWeight.semibold,
     fontFamily: 'monospace',
+    flexShrink: 1,
+    textAlign: 'right',
   },
   inputGroup: {
     marginBottom: BCH2Spacing.lg,
@@ -579,11 +582,14 @@ const styles = StyleSheet.create({
   summaryLabel: {
     fontSize: BCH2Typography.fontSize.sm,
     color: BCH2Colors.textMuted,
+    flexShrink: 0,
   },
   summaryValue: {
     fontSize: BCH2Typography.fontSize.sm,
     color: BCH2Colors.textSecondary,
     fontFamily: 'monospace',
+    flexShrink: 1,
+    textAlign: 'right',
   },
   summaryTotal: {
     borderTopWidth: 1,
@@ -640,6 +646,7 @@ const styles = StyleSheet.create({
   confirmLabel: {
     fontSize: BCH2Typography.fontSize.base,
     color: BCH2Colors.textMuted,
+    flexShrink: 0,
   },
   confirmValue: {
     fontSize: BCH2Typography.fontSize.base,
@@ -650,6 +657,8 @@ const styles = StyleSheet.create({
     fontSize: BCH2Typography.fontSize.lg,
     fontWeight: BCH2Typography.fontWeight.bold,
     fontFamily: 'monospace',
+    flexShrink: 1,
+    textAlign: 'right',
   },
   confirmTotal: {
     borderTopWidth: 1,
@@ -661,12 +670,15 @@ const styles = StyleSheet.create({
     fontSize: BCH2Typography.fontSize.lg,
     fontWeight: BCH2Typography.fontWeight.bold,
     color: BCH2Colors.textPrimary,
+    flexShrink: 0,
   },
   confirmTotalValue: {
     fontSize: BCH2Typography.fontSize.lg,
     fontWeight: BCH2Typography.fontWeight.bold,
     color: BCH2Colors.textPrimary,
     fontFamily: 'monospace',
+    flexShrink: 1,
+    textAlign: 'right',
   },
   confirmActions: {
     flexDirection: 'row',

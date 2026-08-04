@@ -491,6 +491,8 @@ const styles = StyleSheet.create({
   sectionTitle: {
     fontSize: BCH2Typography.fontSize.lg,
     fontWeight: BCH2Typography.fontWeight.bold,
+    flex: 1,
+    flexShrink: 1,
   },
   optionCard: {
     flexDirection: 'row',
@@ -546,9 +548,11 @@ const styles = StyleSheet.create({
     margin: BCH2Spacing.xs,
   },
   wordNumber: {
+    minWidth: 20, // reserve room for two-digit indices (10/11/12…) so the last digit isn't clipped
     fontSize: BCH2Typography.fontSize.xs,
     color: BCH2Colors.textMuted,
     marginRight: BCH2Spacing.xs,
+    paddingRight: 2, // trailing room against Android's last-glyph clip
   },
   wordText: {
     fontSize: BCH2Typography.fontSize.base,

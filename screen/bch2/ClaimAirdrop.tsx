@@ -836,7 +836,7 @@ export const ClaimAirdropScreen: React.FC = () => {
               </View>
               <View style={styles.resultRow}>
                 <Text style={styles.resultLabel}>Balance</Text>
-                <Text style={styles.resultBalance}>
+                <Text style={styles.resultBalance} numberOfLines={1} adjustsFontSizeToFit>
                   {formatBalance(claim.balance)} BCH2
                 </Text>
               </View>
@@ -1418,6 +1418,7 @@ const styles = StyleSheet.create({
   resultLabel: {
     fontSize: BCH2Typography.fontSize.sm,
     color: BCH2Colors.textMuted,
+    flexShrink: 0,
   },
   resultValue: {
     fontSize: BCH2Typography.fontSize.sm,
@@ -1442,6 +1443,8 @@ const styles = StyleSheet.create({
     fontWeight: BCH2Typography.fontWeight.bold,
     color: BCH2Colors.success,
     fontFamily: 'monospace',
+    flexShrink: 1,
+    textAlign: 'right',
   },
   emptyCard: {
     backgroundColor: BCH2Colors.backgroundCard,

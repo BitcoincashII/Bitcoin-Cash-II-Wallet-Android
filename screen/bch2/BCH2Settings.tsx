@@ -955,10 +955,14 @@ const styles = StyleSheet.create({
   infoLabel: {
     fontSize: BCH2Typography.fontSize.sm,
     color: BCH2Colors.textMuted,
+    flexShrink: 1,
+    marginRight: BCH2Spacing.sm,
   },
   infoValue: {
     fontSize: BCH2Typography.fontSize.sm,
     color: BCH2Colors.textPrimary,
+    flexShrink: 0,
+    textAlign: 'right',
   },
   infoValueMono: {
     fontFamily: 'monospace',
