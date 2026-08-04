@@ -99,6 +99,7 @@ fastlane/report.xml
 
 # Build artifacts
 *.apk
+*.idsig
 *.keystore
 *.jks
 local.properties
