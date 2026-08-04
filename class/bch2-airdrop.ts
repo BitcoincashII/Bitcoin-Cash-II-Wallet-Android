@@ -307,7 +307,7 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
             // history so spent-but-used addresses reset the gap counter.
             let usedButEmpty = false;
             if (foundClaims.length === 0 && !hadNetworkError) {
-              usedButEmpty = await hasSpendableHistory(pubkeyHash, publicKey);
+              usedButEmpty = await hasSpendableHistory(pubkeyHash, publicKey, primaryType);
             }
             return { idx, claims: foundClaims, networkError: hadNetworkError && foundClaims.length === 0, usedButEmpty };
           })());
@@ -1049,16 +1049,21 @@ function getP2PKHScripthash(pubkeyHash: Buffer): string {
 }
 
 /**
- * HIGH #6: detect an address that is USED but currently empty (e.g. an early
+ * HIGH #6 + LOW: detect an address that is USED but currently empty (e.g. an early
  * address whose funds were spent). Gap-limit scanning must treat such addresses
  * as used — otherwise a wallet that spent its early addresses would trip the gap
- * limit and miss funds at higher indices. Only the BCH2-spendable script types
- * (legacy P2PKH and P2PK; BCH2 has no SegWit) are probed. Best-effort: this only
- * runs when the balance is already known to be zero, and a probe failure falls
- * through to the normal empty-address handling (no worse than before).
+ * limit and miss funds at higher indices. Probe the chain's PRIMARY script type
+ * (bc1 / p2sh-segwit / p2tr — all keyholder-recoverable on BCH2 via SegWit
+ * recovery) in addition to legacy P2PKH + P2PK, so a spent-down SegWit-primary
+ * chain still resets the gap. Best-effort: this only runs when the balance is
+ * already known to be zero, and a probe failure falls through to the normal
+ * empty-address handling (no worse than before).
  */
-async function hasSpendableHistory(pubkeyHash: Buffer, publicKey: Buffer): Promise<boolean> {
+export async function hasSpendableHistory(pubkeyHash: Buffer, publicKey: Buffer, primaryType?: AirdropClaimResult['addressType']): Promise<boolean> {
   const scripthashes = [getP2PKHScripthash(pubkeyHash), getP2PKScripthash(publicKey)];
+  if (primaryType === 'bc1') scripthashes.push(getSegwitScripthash(pubkeyHash));
+  else if (primaryType === 'p2sh-segwit') scripthashes.push(getP2SHP2WPKHScripthash(pubkeyHash));
+  else if (primaryType === 'p2tr') { const t = computeTweakedXonly(publicKey); if (t) scripthashes.push(getP2TRScripthash(t)); }
   for (const sh of scripthashes) {
     try {
       const history = await BCH2Electrum.getTransactionsByScripthash(sh);
@@ -1336,7 +1341,7 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
           // HIGH #6: probe history so spent-but-used addresses reset the gap counter.
           let usedButEmpty = false;
           if (found.length === 0 && !hadNetworkError) {
-            usedButEmpty = await hasSpendableHistory(pubkeyHash, publicKey);
+            usedButEmpty = await hasSpendableHistory(pubkeyHash, publicKey, primaryType);
           }
           return { found, networkError: hadNetworkError && found.length === 0, usedButEmpty };
         })());

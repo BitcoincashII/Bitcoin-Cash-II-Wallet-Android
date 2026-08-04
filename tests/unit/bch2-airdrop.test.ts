@@ -7,12 +7,14 @@ const mockGetBalanceByAddress = jest.fn();
 const mockGetBalanceByScripthash = jest.fn();
 const mockGetBC2Balance = jest.fn();
 const mockGetBC2BalanceByScripthash = jest.fn();
+const mockGetTransactionsByScripthash = jest.fn();
 
 jest.mock('../../blue_modules/BCH2Electrum', () => ({
   getBalanceByAddress: mockGetBalanceByAddress,
   getBalanceByScripthash: mockGetBalanceByScripthash,
   getBC2Balance: mockGetBC2Balance,
   getBC2BalanceByScripthash: mockGetBC2BalanceByScripthash,
+  getTransactionsByScripthash: mockGetTransactionsByScripthash,
   connectMain: jest.fn(),
   disconnectAll: jest.fn(),
 }));
@@ -62,6 +64,7 @@ import {
   scanDescriptorForAirdrop,
   getAntiGamingStatus,
   buildScanResult,
+  hasSpendableHistory,
   AirdropClaimResult,
   AirdropScanResult,
 } from '../../class/bch2-airdrop';
@@ -1746,6 +1749,38 @@ describe('Cross-type checking', () => {
     expect(bc1Result!.balance).toBe(35000);
     expect(bc1Result!.addressType).toBe('bc1');
     expect(bc1Result!.derivationPath).toContain("84'");
+  });
+});
+
+describe('hasSpendableHistory gap-limit reset (L5: probe the primary script type)', () => {
+  // Valid compressed pubkey (secp256k1 generator G) — computeTweakedXonly works on it.
+  const PUB = Buffer.from('0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798', 'hex');
+  const PKH = hash160(PUB);
+
+  beforeEach(() => mockGetTransactionsByScripthash.mockReset());
+
+  it('detects a spent-down bc1 chain as used (history only at the bc1 scripthash)', async () => {
+    // legacy P2PKH + P2PK are empty; the bc1 PRIMARY scripthash has history.
+    mockGetTransactionsByScripthash
+      .mockResolvedValueOnce([])                                // P2PKH
+      .mockResolvedValueOnce([])                                // P2PK
+      .mockResolvedValueOnce([{ tx_hash: 'ab'.repeat(32) }]);   // bc1 (primary)
+    expect(await hasSpendableHistory(PKH, PUB, 'bc1')).toBe(true);
+    expect(mockGetTransactionsByScripthash).toHaveBeenCalledTimes(3);
+  });
+
+  it('probes the Taproot scripthash for a p2tr-primary chain', async () => {
+    mockGetTransactionsByScripthash
+      .mockResolvedValueOnce([]).mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ tx_hash: 'cd'.repeat(32) }]);
+    expect(await hasSpendableHistory(PKH, PUB, 'p2tr')).toBe(true);
+    expect(mockGetTransactionsByScripthash).toHaveBeenCalledTimes(3);
+  });
+
+  it('legacy default only probes P2PKH + P2PK (no SegWit scripthash)', async () => {
+    mockGetTransactionsByScripthash.mockResolvedValue([]);
+    expect(await hasSpendableHistory(PKH, PUB)).toBe(false);
+    expect(mockGetTransactionsByScripthash).toHaveBeenCalledTimes(2);
   });
 });
 
