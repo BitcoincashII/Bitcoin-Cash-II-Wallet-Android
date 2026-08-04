@@ -37,7 +37,11 @@ export const BCH2WalletCard: React.FC<BCH2WalletCardProps> = ({
   const coinSymbol = isBC2 ? 'BC2' : 'BCH2';
 
   const formatBalance = (sats: number): string => {
-    return (sats / 100000000).toFixed(8);
+    // Full 8-decimal precision, but trim trailing zeros so a round balance reads "12.5"
+    // instead of "12.50000000" — the padded form widened the row and pushed the ticker
+    // (BCH2/BC2) off the edge, clipping its trailing "2".
+    const s = (sats / 100000000).toFixed(8).replace(/0+$/, '').replace(/\.$/, '');
+    return s === '' || s === '-' ? '0' : s;
   };
 
   const formatAddress = (addr: string): string => {
@@ -71,10 +75,15 @@ export const BCH2WalletCard: React.FC<BCH2WalletCardProps> = ({
 
       {/* Balance */}
       <View style={styles.balanceContainer}>
-        <Text style={[styles.balance, { color: primaryColor }]}>
+        <Text
+          style={[styles.balance, { color: primaryColor }]}
+          numberOfLines={1}
+          adjustsFontSizeToFit
+          minimumFontScale={0.6}
+        >
           {formatBalance(balance)}
         </Text>
-        <Text style={styles.balanceSymbol}>{coinSymbol}</Text>
+        <Text style={styles.balanceSymbol} numberOfLines={1}>{coinSymbol}</Text>
       </View>
 
       {/* Unconfirmed */}
@@ -161,14 +170,17 @@ const styles = StyleSheet.create({
     marginBottom: BCH2Spacing.xs,
   },
   balance: {
+    flexShrink: 1, // long balances shrink (adjustsFontSizeToFit) rather than pushing the symbol off-screen
     fontSize: BCH2Typography.fontSize.xxl,
     fontWeight: BCH2Typography.fontWeight.bold,
     fontFamily: 'monospace',
   },
   balanceSymbol: {
+    flexShrink: 0, // the ticker (BCH2/BC2) never gets squeezed or clipped
     color: BCH2Colors.textSecondary,
     fontSize: BCH2Typography.fontSize.lg,
     marginLeft: BCH2Spacing.sm,
+    paddingRight: 2, // guard the trailing "2" against Android's last-glyph clip
   },
   unconfirmed: {
     color: BCH2Colors.warning,

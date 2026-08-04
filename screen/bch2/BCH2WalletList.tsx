@@ -480,6 +480,7 @@ const styles = StyleSheet.create({
   statusText: {
     fontSize: BCH2Typography.fontSize.sm,
     color: BCH2Colors.textMuted,
+    paddingHorizontal: 4, // guard the trailing "d" of "Disconnected" against Android's last-glyph clip
   },
   fab: {
     position: 'absolute',
