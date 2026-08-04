@@ -19,32 +19,37 @@ import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2Shadows, BCH2BorderRadius 
 import { decodeCashAddr, isValidRecipientAddress } from '../../class/bch2-transaction';
 import { getUtxosByAddress, getBC2Utxos, filterMatureUtxos } from '../../blue_modules/BCH2Electrum';
 
-// Tx-size estimate replicated (read-only) from class/bch2-transaction.ts:
-// ~10 bytes overhead + 148 per input + 34 per output.
-const estimateTxSize = (inputCount: number, outputCount: number): number =>
-  10 + 148 * inputCount + 34 * outputCount;
+// Per-input (v)byte weight by script type, mirroring class/bch2-transaction.ts. Legacy/BCH2 = 148; BC2 native
+// SegWit/Taproot/P2SH-SegWit use the witness-discounted vbytes the real signer (sendBC2NativeHd.estimateBytes) charges.
+const perInputBytesFor = (isBC2: boolean, bc2ScriptType?: string): number =>
+  !isBC2 ? 148 : bc2ScriptType === 'taproot' ? 58 : bc2ScriptType === 'native-segwit' ? 68 : bc2ScriptType === 'p2sh-segwit' ? 91 : 148;
 
-// Replicates the coin-selection in class/bch2-transaction.ts sendTransaction() so
-// the confirm screen's fee/total reflect the REAL number of inputs that will be
-// signed (not a fixed 1-input assumption). utxoValues must be sorted largest-first
-// to match the tx builder's ordering.
+// Tx-size estimate replicated (read-only) from class/bch2-transaction.ts:
+// ~10 bytes overhead + perInput per input + 34 per output.
+const estimateTxSize = (inputCount: number, outputCount: number, perInput = 148): number =>
+  10 + perInput * inputCount + 34 * outputCount;
+
+// Replicates the coin-selection in class/bch2-transaction.ts so the confirm screen's fee/total reflect the REAL
+// number of inputs that will be signed (not a fixed 1-input assumption). utxoValues must be sorted largest-first
+// to match the tx builder's ordering; perInput is the script-type-aware per-input weight.
 const computeSelectedFee = (
   utxoValues: number[],
   amountSats: number,
   feePerByte: number,
+  perInput = 148,
 ): { fee: number; sufficient: boolean } => {
   let totalInput = 0;
   let count = 0;
   for (const v of utxoValues) {
     count++;
     totalInput += v;
-    const runningFee = estimateTxSize(count, 2) * feePerByte;
+    const runningFee = estimateTxSize(count, 2, perInput) * feePerByte;
     if (totalInput >= amountSats + runningFee || count >= 500) break;
   }
-  const fee2out = estimateTxSize(count, 2) * feePerByte;
+  const fee2out = estimateTxSize(count, 2, perInput) * feePerByte;
   const tentativeChange = totalInput - amountSats - fee2out;
   const hasChange = tentativeChange > 546; // matches builder dust threshold
-  const fee = estimateTxSize(count, hasChange ? 2 : 1) * feePerByte;
+  const fee = estimateTxSize(count, hasChange ? 2 : 1, perInput) * feePerByte;
   return { fee, sufficient: totalInput >= amountSats + fee };
 };
 
@@ -52,6 +57,10 @@ interface BCH2SendProps {
   walletBalance: number;
   walletAddress: string;
   isBC2?: boolean;
+  bc2ScriptType?: string; // 'legacy'|'p2sh-segwit'|'native-segwit'|'taproot' — for the correct per-input fee weight
+  // For BC2 (HD, account-wide signer): loads the ACCOUNT's mature UTXO values (largest-first), not just the
+  // primary address's, so coin-selection/MAX/sufficiency match what sendBC2NativeHd actually spends.
+  loadUtxoValues?: () => Promise<number[]>;
   onSend?: (toAddress: string, amount: number, fee: number) => Promise<{ txid: string }>;
   navigation?: any;
   prefillAddress?: string; // from a bitcoincashii: deep link
@@ -62,11 +71,14 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
   walletBalance,
   walletAddress,
   isBC2 = false,
+  bc2ScriptType,
+  loadUtxoValues,
   onSend,
   navigation,
   prefillAddress,
   prefillAmount,
 }) => {
+  const perInput = perInputBytesFor(isBC2, bc2ScriptType);
   const [toAddress, setToAddress] = useState(prefillAddress || '');
   const [amount, setAmount] = useState(prefillAmount || '');
   const [fee, setFee] = useState('1'); // sat/byte
@@ -84,10 +96,17 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
     let cancelled = false;
     (async () => {
       try {
+        // BC2 wallets are HD/account-wide: use the provided account loader (all receive+change addresses), not just
+        // the primary address, so coin-selection/MAX/sufficiency match the real signer and don't wrongly block sends.
+        if (loadUtxoValues) {
+          const vals = await loadUtxoValues();
+          if (!cancelled) setUtxoValues(vals);
+          return;
+        }
         const raw = isBC2
           ? await getBC2Utxos(walletAddress)
           : await getUtxosByAddress(walletAddress);
-        const mature = await filterMatureUtxos(raw);
+        const mature = await filterMatureUtxos(raw, isBC2);
         if (cancelled) return;
         const vals = mature
           .map((u: any) => u.value)
@@ -101,7 +120,7 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [walletAddress, isBC2]);
+  }, [walletAddress, isBC2, loadUtxoValues]);
 
   const primaryColor = isBC2 ? BCH2Colors.bc2Primary : BCH2Colors.primary;
   const coinSymbol = isBC2 ? 'BC2' : 'BCH2';
@@ -131,10 +150,10 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
   // that is clearly labeled as "may increase".
   const selection =
     utxoValues !== null && utxoValues.length > 0 && amountInSats > 0
-      ? computeSelectedFee(utxoValues, amountInSats, feePerByte)
+      ? computeSelectedFee(utxoValues, amountInSats, feePerByte, perInput)
       : null;
   const feeIsExact = selection !== null;
-  const feeInSats = selection ? selection.fee : feePerByte * estimateTxSize(1, 2);
+  const feeInSats = selection ? selection.fee : feePerByte * estimateTxSize(1, 2, perInput);
   const totalInSats = amountInSats + feeInSats;
 
   const validateAddress = (addr: string): boolean => {
@@ -171,17 +190,17 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
       // subtract the fee for the ACTUAL input count. A 1-input fee underestimates
       // and makes MAX fail for wallets with 2+ UTXOs (LOW #32).
       const total = utxoValues.reduce((s, v) => s + v, 0);
-      const maxFee = estimateTxSize(utxoValues.length, 1) * feePerByte;
+      const maxFee = estimateTxSize(utxoValues.length, 1, perInput) * feePerByte;
       const maxSats = total - maxFee;
       if (maxSats > 0) setAmount(formatBalance(maxSats));
       return;
     }
     // Fallback (UTXO set unavailable): conservative single-input estimate.
-    const maxSats = walletBalance - feePerByte * estimateTxSize(1, 1);
+    const maxSats = walletBalance - feePerByte * estimateTxSize(1, 1, perInput);
     if (maxSats > 0) {
       setAmount(formatBalance(maxSats));
     }
-  }, [utxoValues, walletBalance, feePerByte]);
+  }, [utxoValues, walletBalance, feePerByte, perInput]);
 
   const handleContinue = useCallback(() => {
     Keyboard.dismiss();

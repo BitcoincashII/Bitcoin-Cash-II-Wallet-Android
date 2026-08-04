@@ -145,7 +145,12 @@ export class BCH2Wallet extends AbstractWallet {
     const tip = await BCH2Electrum.getTipHeight(); // FRESH tip so a tx confirmed after connect isn't mis-flagged
     if (!tip || tip <= 0) return;
     const MAX = 25;
-    const toVerify = this._transactions.filter(t => t.verified === 'unverified' && heightByTxid[t.txid] > 0).slice(0, MAX);
+    // Electrum get_history is oldest-first; verify the MOST RECENT confirmed txs (highest height) so a large
+    // history doesn't leave freshly-received payments stuck on the 'verifying…' badge.
+    const toVerify = this._transactions
+      .filter(t => t.verified === 'unverified' && heightByTxid[t.txid] > 0)
+      .sort((a, b) => heightByTxid[b.txid] - heightByTxid[a.txid])
+      .slice(0, MAX);
     for (const tx of toVerify) {
       try {
         const depth = await BCH2Spv.verifyConfirmations(tx.txid, heightByTxid[tx.txid], tip);

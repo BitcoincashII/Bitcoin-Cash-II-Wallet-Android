@@ -213,11 +213,28 @@ const BCH2SendWrapper: React.FC = () => {
     return { txid: result.txid };
   };
 
+  // BC2 wallets are HD/account-wide. Load the ACCOUNT's mature UTXO values (all receive+change addresses) so the
+  // send screen's coin-selection / MAX / sufficiency match what sendBC2NativeHd actually spends — a single-address
+  // UTXO set wrongly blocks a valid send once change has moved off the primary address.
+  const bc2ScriptType = isBC2 ? bc2ScriptTypeFromAddress(walletAddress) : undefined;
+  const loadBc2AccountUtxoValues = React.useCallback(async (): Promise<number[]> => {
+    const w = await getWallet(walletId);
+    if (!w || !bc2ScriptType) return [];
+    const xpub = await getBC2AccountXpub(w, bc2ScriptType);
+    const scan = await scanBC2Hd(xpub, bc2ScriptType);
+    return scan.utxos
+      .map((u: any) => u.value)
+      .filter((v: any) => Number.isInteger(v) && v > 0)
+      .sort((a: number, b: number) => b - a);
+  }, [walletId, bc2ScriptType]);
+
   return (
     <BCH2Send
       walletBalance={walletBalance}
       walletAddress={walletAddress}
       isBC2={isBC2}
+      bc2ScriptType={bc2ScriptType}
+      loadUtxoValues={isBC2 ? loadBc2AccountUtxoValues : undefined}
       onSend={handleSend}
       navigation={navigation}
       prefillAddress={prefillAddress}
@@ -386,17 +403,24 @@ const BCH2WalletDetailWrapper: React.FC = () => {
         (async () => {
           const tip = await getTipHeight(); // FRESH tip (getLatestBlock can be stale for a long session)
           if (!tip || tip <= 0) return;
-          const updated = await Promise.all(formattedTxs.slice(0, 25).map(async (t): Promise<Transaction> => {
-            if (t.verified !== 'unverified' || !t.height || t.height <= 0) return t;
+          // get_history is oldest-first; verify the MOST RECENT confirmed txs (highest height) so recent
+          // payments don't stay stuck on 'verifying…' when the history is long.
+          const targets = formattedTxs
+            .filter(t => t.verified === 'unverified' && t.height && t.height > 0)
+            .sort((a, b) => (b.height || 0) - (a.height || 0))
+            .slice(0, 25);
+          const results = new Map<string, { verified: Transaction['verified']; confirmations?: number }>();
+          await Promise.all(targets.map(async (t) => {
             try {
-              const depth = await BCH2Spv.verifyConfirmations(t.txid, t.height, tip);
+              const depth = await BCH2Spv.verifyConfirmations(t.txid, t.height!, tip);
               // null = out of scope / not verifiable yet → neutral (no badge); number = proven depth.
-              return depth === null ? { ...t, verified: undefined } : { ...t, verified: 'verified', confirmations: depth };
+              results.set(t.txid, depth === null ? { verified: undefined } : { verified: 'verified', confirmations: depth });
             } catch {
-              return { ...t, verified: 'failed' }; // definitive forgery
+              results.set(t.txid, { verified: 'failed' }); // definitive forgery
             }
           }));
-          setTransactions(prev => (prev === formattedTxs ? updated.concat(formattedTxs.slice(25)) : prev));
+          const updated = formattedTxs.map(t => (results.has(t.txid) ? { ...t, ...results.get(t.txid)! } : t));
+          setTransactions(prev => (prev === formattedTxs ? updated : prev));
         })().catch(() => {});
       }
 

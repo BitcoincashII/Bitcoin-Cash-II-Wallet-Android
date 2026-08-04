@@ -212,7 +212,7 @@ const CHAIN = 'bch2';
 // server, so SPV must be available on either. Anything else (regtest / unknown) => SPV not supported.
 const MAINNET_SERVERS = new Set(['electrum.bch2.org', '144.202.73.66']);
 
-interface Verified { tipHeight: number; lastHashInternal: Uint8Array; lastTime: number; headers: Map<number, BlockHeader>; }
+interface Verified { tipHeight: number; lastHashInternal: Uint8Array; lastTime: number; headers: Map<number, BlockHeader>; reorgCheckedTip?: number; }
 const cache = new Map<string, Verified>();
 const locks = new Map<string, Promise<unknown>>();
 
@@ -264,6 +264,7 @@ async function extendVerifiedChain(tipHeight: number): Promise<Verified> {
     let v = cache.get(CHAIN);
     if (!v) v = { tipHeight: cp.height, lastHashInternal: reverse(hexToBytes(cp.hashDisplay)), lastTime: cp.time, headers: new Map() };
     const trustedNowSec = Math.floor(Date.now() / 1000);
+    const fullyCached = v.tipHeight >= tipHeight; // request served entirely from cache (no chain extension)
     while (v.tipHeight < tipHeight) {
       const start = v.tipHeight + 1;
       const want = Math.min(HEADERS_PER_CALL, tipHeight - v.tipHeight);
@@ -290,6 +291,27 @@ async function extendVerifiedChain(tipHeight: number): Promise<Verified> {
       v.lastHashInternal = blockHashInternal(last.raw);
       v.lastTime = last.time;
       v.tipHeight = lastHeight;
+    }
+    // Same-height reorg guard: when the request was served entirely from cache (the tip did NOT advance), the block
+    // AT the tip could still have been replaced by a competing block at the same height — verifyHeaderChain's
+    // prevHash link only catches reorgs when the chain EXTENDS. Re-fetch the current header at tipHeight and compare
+    // it to the cached one; on mismatch, drop the chain so the next call rebuilds from the checkpoint (fail-closed).
+    // Deduped per tip so a burst of per-tx verifies doesn't re-fetch, and re-armed whenever the tip advances.
+    if (fullyCached && v.reorgCheckedTip !== tipHeight) {
+      try {
+        const res = await getBlockHeaders(tipHeight, 1);
+        const raws = splitHeaders(res.hex, res.count);
+        const cached = tipHeight === v.tipHeight ? undefined : v.headers.get(tipHeight);
+        const cachedHash = tipHeight === v.tipHeight ? v.lastHashInternal : (cached ? blockHashInternal(cached.raw) : undefined);
+        if (raws[0] && cachedHash && !equalBytes(blockHashInternal(raws[0]), cachedHash)) {
+          cache.delete(CHAIN);
+          throw new Error('SPV: tip block changed (same-height reorg) — chain dropped, will rebuild');
+        }
+        v.reorgCheckedTip = tipHeight;
+      } catch (e) {
+        if (e instanceof Error && /reorg/.test(e.message)) throw e; // propagate the drop (fail-closed)
+        // transient header-fetch error — best effort, leave the cache as-is
+      }
     }
     cache.set(CHAIN, v);
     return v;

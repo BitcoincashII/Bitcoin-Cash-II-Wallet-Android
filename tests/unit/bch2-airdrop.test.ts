@@ -1784,6 +1784,25 @@ describe('hasSpendableHistory gap-limit reset (L5: probe the primary script type
   });
 });
 
+describe('buildScanResult incomplete-on-success-claim (round-4 LOW: claimFromWIF partial scan)', () => {
+  it('propagates a SUCCESS claim.incomplete to result.incomplete (soft rescan banner)', () => {
+    const r = buildScanResult([
+      { success: true, address: '1abc', bch2Address: 'bitcoincashii:q1', balance: 40000, bc2Balance: 40000,
+        incomplete: 'Network error — some address types could not be scanned. Rescan to be sure.' } as any,
+    ]);
+    expect(r.claims).toHaveLength(1);
+    expect(r.totalBalance).toBe(40000);
+    expect(r.incomplete).toMatch(/rescan/i);
+    expect(r.error).toBeUndefined(); // funds found → soft warning, not a hard failure
+  });
+  it('no incomplete flag when the success claim has none', () => {
+    const r = buildScanResult([
+      { success: true, address: '1abc', bch2Address: 'bitcoincashii:q1', balance: 40000, bc2Balance: 40000 } as any,
+    ]);
+    expect(r.incomplete).toBeUndefined();
+  });
+});
+
 describe('buildScanResult network-abort signalling (#24)', () => {
   const claim = {
     success: true,

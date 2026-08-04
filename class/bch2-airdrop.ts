@@ -48,6 +48,7 @@ export interface AirdropClaimResult {
   bc2Balance?: number; // Current BC2 balance (for anti-gaming comparison)
   derivationPath?: string;
   error?: string;
+  incomplete?: string; // set on a SUCCESS result when a network error may have hidden funds (partial scan)
 }
 
 export interface AirdropScanResult {
@@ -158,6 +159,10 @@ export async function claimFromWIF(wif: string): Promise<AirdropClaimResult> {
           const newSum = sum + (c.bc2Balance ?? 0);
           return newSum > Number.MAX_SAFE_INTEGER ? sum : newSum;
         }, 0),
+        // round-4 LOW: one address type errored while another returned funds — the total may be understated.
+        incomplete: hadNetworkError
+          ? 'Network error — some address types could not be scanned. Results may be incomplete; rescan to be sure you found everything.'
+          : undefined,
       };
     }
 
@@ -235,6 +240,10 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
     // MEDIUM #24: tracks whether any chain scan gave up due to repeated network
     // errors, so an aborted scan isn't reported as a confirmed-empty result.
     let networkAborted = false;
+    // MED (round-4): a SCATTERED (non-consecutive) network error never trips the 10-consecutive networkAborted
+    // threshold (a confirmed-empty address resets the counter), yet it may have hidden a funded address. Track any
+    // error so a possibly-incomplete scan still warns, independent of the consecutive counter.
+    let anyNetworkError = false;
     const GAP_LIMIT = 20;
     const MAX_INDEX = 200; // Hard cap to prevent infinite scanning
     const MAX_ACCOUNTS = 5; // Scan accounts 0-4
@@ -324,6 +333,7 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
             // Network errors don't count toward gap limit (address may have funds)
             // but we cap consecutive network errors to avoid infinite scanning
             consecutiveNetErrors++;
+            anyNetworkError = true; // aggregate: even a single scattered error means the scan may be incomplete
           } else if (usedButEmpty) {
             // HIGH #6: address has BCH2 history but zero balance (funds spent).
             // It is USED, not part of a gap — reset the counter so higher indices
@@ -395,11 +405,10 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
     // Clean up: disconnect Electrum clients after scan
     try { BCH2Electrum.disconnectAll(); } catch {}
 
-    // LOW #24 (partial): the scan found funds but still aborted on repeated
-    // network errors before finishing. Record a non-success sentinel so
-    // buildScanResult can flag the (usable but possibly partial) results as
+    // #24 + round-4 MED: the scan found funds but ANY network error occurred (scattered OR a hard abort), so it may
+    // be incomplete. Record a non-success sentinel so buildScanResult flags the (usable but partial) results as
     // incomplete — a partial scan must never be presented as a complete one.
-    if (networkAborted && results.some(r => r.success && r.balance > 0)) {
+    if (anyNetworkError && results.some(r => r.success && r.balance > 0)) {
       results.push({
         success: false,
         address: '',
@@ -415,9 +424,9 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
         address: '',
         bch2Address: '',
         balance: 0,
-        // MEDIUM #24: distinguish an aborted (network) scan from a confirmed-empty one.
-        error: networkAborted
-          ? 'Network error — could not reach Electrum server. Please check your connection and try again.'
+        // #24 + round-4 MED: any network error means we cannot claim "no funds" — prompt a rescan instead.
+        error: anyNetworkError
+          ? 'Network error — some addresses could not be scanned. Please check your connection and rescan to be sure.'
           : 'No BCH2 balance found for this seed',
       }];
     }
@@ -1290,6 +1299,7 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
   const seenKeys = new Set<string>();
   // MEDIUM #24: set when a chain scan gives up due to repeated network errors.
   let descriptorNetworkAborted = false;
+  let descriptorAnyNetworkError = false; // round-4 MED: any (even scattered) network error => possibly-incomplete scan
 
   const DESCRIPTOR_MAX_NET_ERRORS = 10;
 
@@ -1363,6 +1373,7 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
           consecutiveNetErrors = 0;
         } else if (networkError) {
           consecutiveNetErrors++;
+          descriptorAnyNetworkError = true;
         } else if (usedButEmpty) {
           // HIGH #6: used but empty (funds spent) — reset the gap counter.
           consecutiveEmpty = 0;
@@ -1479,9 +1490,9 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
   // LOW #24 (partial): if we DID find funds but still aborted, flag the result as
   // incomplete so the descriptor path shows the same "rescan to be sure" banner as
   // the mnemonic/WIF path (buildScanResult) — a partial scan must never look complete.
-  if (descriptorNetworkAborted) {
+  if (descriptorAnyNetworkError) {
     if (claims.length === 0) {
-      result.error = 'Network error — could not reach Electrum server. Please check your connection and try again.';
+      result.error = 'Network error — some addresses could not be scanned. Please check your connection and rescan to be sure.';
     } else {
       result.incomplete = 'Network error — some addresses could not be scanned. Results may be incomplete; rescan to be sure you found everything.';
     }
@@ -1613,6 +1624,12 @@ export function buildScanResult(results: AirdropClaimResult[]): AirdropScanResul
       // shown alongside the results so the user knows to rescan for completeness.
       result.incomplete = netErr.error;
     }
+  }
+  // round-4 LOW: a SUCCESS claim itself carrying an `incomplete` flag (claimFromWIF, where one address type
+  // errored while another returned funds) — propagate it as the soft rescan banner.
+  if (!result.incomplete) {
+    const inc = claims.find(c => c.incomplete);
+    if (inc) result.incomplete = inc.incomplete;
   }
   return result;
 }

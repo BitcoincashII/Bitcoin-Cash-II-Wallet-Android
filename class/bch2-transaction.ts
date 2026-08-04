@@ -2621,11 +2621,13 @@ export async function sweepAirdropClaims(
       const negated = ecc.privateNegate(privkey);
       effectivePrivkey = Buffer.from(negated);
       derivedKeys.push(effectivePrivkey);
+      if (negated instanceof Uint8Array) { try { crypto.randomFillSync(negated); } catch {} negated.fill(0); } // scrub raw ecc output
     }
     const added = ecc.privateAdd(effectivePrivkey, tweak);
     if (!added) return null;
     const tweakedPrivkey = Buffer.from(added);
     derivedKeys.push(tweakedPrivkey);
+    if (added instanceof Uint8Array) { try { crypto.randomFillSync(added); } catch {} added.fill(0); } // scrub raw ecc output
     return { tweakedPrivkey, tweakedXonly };
   };
 
