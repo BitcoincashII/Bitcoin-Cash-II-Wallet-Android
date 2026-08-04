@@ -26,6 +26,7 @@ const mockGetBC2Utxos = jest.fn();
 const mockGetUtxosByScripthash = jest.fn();
 const mockBroadcastTransaction = jest.fn();
 const mockBroadcastBC2Transaction = jest.fn();
+const mockGetBC2RawTransaction = jest.fn();
 
 jest.mock('../../blue_modules/BCH2Electrum', () => ({
   getUtxosByAddress: (...args: any[]) => mockGetUtxosByAddress(...args),
@@ -33,12 +34,19 @@ jest.mock('../../blue_modules/BCH2Electrum', () => ({
   getUtxosByScripthash: (...args: any[]) => mockGetUtxosByScripthash(...args),
   broadcastTransaction: (...args: any[]) => mockBroadcastTransaction(...args),
   broadcastBC2Transaction: (...args: any[]) => mockBroadcastBC2Transaction(...args),
+  getBC2RawTransaction: (...args: any[]) => mockGetBC2RawTransaction(...args),
+  // Real double-SHA256 txid for legacy (no-witness) txs — enough for the M1 tests.
+  computeTxid: (hex: string) => {
+    const c = require('crypto');
+    const s = (x: Buffer) => c.createHash('sha256').update(x).digest();
+    return Buffer.from(s(s(Buffer.from(hex, 'hex')))).reverse().toString('hex');
+  },
   // Passthrough — maturity filtering is exercised in BCH2Electrum's own tests.
   filterMatureUtxos: async (utxos: any[]) => utxos,
 }));
 
 // Import after mocking
-import { sendTransaction, sendFromBech32, sendFromP2SH, sendFromP2WSH, sendFromP2TR, decodeCashAddr, sweepAirdropClaims, isValidRecipientAddress } from '../../class/bch2-transaction';
+import { sendTransaction, sendFromBech32, sendFromP2SH, sendFromP2WSH, sendFromP2TR, decodeCashAddr, sweepAirdropClaims, isValidRecipientAddress, readTxOutputValue, verifyBC2LegacyInputValues } from '../../class/bch2-transaction';
 
 // ---- Test Helpers ----------------------------------------------------------
 
@@ -2701,6 +2709,63 @@ describe('sweepAirdropClaims', () => {
         { bch2Address: addr, derivationPath: path, addressType: 'legacy', balance: 600 },
       ], DEST_CASHADDR, 5),
     ).rejects.toThrow(/dust/i);
+  });
+});
+
+describe('BC2 legacy input-value verification (M1: fee-burn defense)', () => {
+  const crypto = require('crypto');
+  const sha256 = (b: Buffer) => crypto.createHash('sha256').update(b).digest();
+  const le64 = (n: number) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(n)); return b; };
+  // Build a minimal LEGACY (no-witness) raw tx with the given output values.
+  function mkLegacyTx(outVals: number[]): { hex: string; txid: string } {
+    const parts: Buffer[] = [
+      Buffer.from('02000000', 'hex'),                                   // version
+      Buffer.from([0x01]),                                             // 1 input
+      Buffer.alloc(32, 0xab), Buffer.from('00000000', 'hex'),          // dummy outpoint
+      Buffer.from([0x00]), Buffer.from('ffffffff', 'hex'),             // empty scriptSig + sequence
+      Buffer.from([outVals.length]),                                   // output count (<0xfd)
+    ];
+    for (const v of outVals) {
+      const script = Buffer.concat([Buffer.from([0x76, 0xa9, 0x14]), Buffer.alloc(20, 0x22), Buffer.from([0x88, 0xac])]);
+      parts.push(le64(v), Buffer.from([script.length]), script);
+    }
+    parts.push(Buffer.from('00000000', 'hex'));                        // locktime
+    const buf = Buffer.concat(parts);
+    const hex = buf.toString('hex');
+    const txid = Buffer.from(sha256(sha256(buf))).reverse().toString('hex');
+    return { hex, txid };
+  }
+
+  beforeEach(() => mockGetBC2RawTransaction.mockReset());
+
+  it('readTxOutputValue reads the correct output value (and rejects out-of-range vout)', () => {
+    const { hex } = mkLegacyTx([100_000, 250_000, 999]);
+    expect(readTxOutputValue(hex, 0)).toBe(100_000);
+    expect(readTxOutputValue(hex, 1)).toBe(250_000);
+    expect(readTxOutputValue(hex, 2)).toBe(999);
+    expect(() => readTxOutputValue(hex, 3)).toThrow(/out of range/i);
+  });
+
+  it('passes when the server-reported value matches the on-chain output', async () => {
+    const { hex, txid } = mkLegacyTx([500_000]);
+    mockGetBC2RawTransaction.mockResolvedValue(hex);
+    await expect(verifyBC2LegacyInputValues([{ txid, vout: 0, value: 500_000 }])).resolves.toBeUndefined();
+  });
+
+  it('THROWS when the server under-reports the input value (fee-burn attempt)', async () => {
+    const { hex, txid } = mkLegacyTx([10_000_000]); // real value 10M
+    mockGetBC2RawTransaction.mockResolvedValue(hex);
+    // Server claims the UTXO is only worth 1M — the missing 9M would burn to fees.
+    await expect(verifyBC2LegacyInputValues([{ txid, vout: 0, value: 1_000_000 }]))
+      .rejects.toThrow(/value mismatch/i);
+  });
+
+  it('THROWS when the prev tx hash does not match the input txid (tampered data)', async () => {
+    const real = mkLegacyTx([500_000]);
+    const other = mkLegacyTx([500_000, 1]); // different tx => different hash
+    mockGetBC2RawTransaction.mockResolvedValue(other.hex);
+    await expect(verifyBC2LegacyInputValues([{ txid: real.txid, vout: 0, value: 500_000 }]))
+      .rejects.toThrow(/hash does not match/i);
   });
 });
 

@@ -24,6 +24,8 @@ import {
   broadcastBC2Transaction,
   filterMatureUtxos,
   getBC2AddressInfo,
+  getBC2RawTransaction,
+  computeTxid,
 } from '../blue_modules/BCH2Electrum';
 import { bc2AddressFromPubkey } from './bch2-wallet-storage';
 
@@ -3014,6 +3016,57 @@ export function buildBC2SegwitTx(
 }
 
 /** Build a legacy BC2 P2PKH spend where each input carries its own key (HD). */
+// Read output[vout].value (satoshis) from a raw tx hex, skipping a BIP144 witness
+// marker+flag if present. Only parses up to the requested output.
+export function readTxOutputValue(rawHex: string, vout: number): number {
+  const b = Buffer.from(rawHex, 'hex');
+  let o = 4; // nVersion
+  if (b.length > 5 && b[o] === 0x00 && b[o + 1] === 0x01) o += 2; // segwit marker+flag
+  const readVarInt = (): number => {
+    const f = b[o++];
+    if (f < 0xfd) return f;
+    if (f === 0xfd) { const v = b.readUInt16LE(o); o += 2; return v; }
+    if (f === 0xfe) { const v = b.readUInt32LE(o); o += 4; return v; }
+    const v = Number(b.readBigUInt64LE(o)); o += 8; return v;
+  };
+  const nIn = readVarInt();
+  for (let i = 0; i < nIn; i++) { o += 36; const sl = readVarInt(); o += sl; o += 4; } // outpoint + scriptSig + sequence
+  const nOut = readVarInt();
+  if (vout < 0 || vout >= nOut) throw new Error('vout out of range in prev tx');
+  for (let j = 0; j < nOut; j++) {
+    const val = Number(b.readBigUInt64LE(o)); o += 8;
+    const sl = readVarInt(); o += sl;
+    if (j === vout) return val;
+  }
+  throw new Error('vout not found in prev tx');
+}
+
+// M1 (audit): the BC2 *legacy* sighash does NOT commit input amounts. A compromised
+// BC2 server that under-reports a UTXO's value could make the wallet build a tx that
+// silently burns the difference to miner fees (the confirm screen shows a small fee
+// from the same falsified values). Verify each legacy input's value against its prev
+// tx before signing: the prev tx's hash MUST equal the input's txid (the server
+// cannot forge a tx that hashes to it), so the value read from it is authoritative.
+// SegWit/Taproot (BIP143/BIP341) and BCH2 (FORKID) commit the amount, so they don't
+// need this — a wrong value there just yields an invalid signature.
+export async function verifyBC2LegacyInputValues(utxos: Array<{ txid: string; vout: number; value: number }>): Promise<void> {
+  const cache = new Map<string, string>();
+  for (const u of utxos) {
+    let raw = cache.get(u.txid);
+    if (raw === undefined) {
+      raw = await getBC2RawTransaction(u.txid);
+      cache.set(u.txid, raw);
+    }
+    if (computeTxid(raw).toLowerCase() !== u.txid.toLowerCase()) {
+      throw new Error('Previous transaction hash does not match a spent input — refusing to sign (possible tampered UTXO data)');
+    }
+    const onChain = readTxOutputValue(raw, u.vout);
+    if (onChain !== u.value) {
+      throw new Error(`Input value mismatch: server reported ${u.value} sats but the on-chain output is ${onChain} sats — refusing to sign to avoid burning funds to fees`);
+    }
+  }
+}
+
 export function buildBC2LegacyTxMulti(
   inputs: SegwitKeyedInput[],
   recipientScript: Buffer,
@@ -3301,6 +3354,11 @@ export async function sendBC2NativeHd(
         const priv = Buffer.from(node.privateKey!); keyBuffers.push(priv);
         return { txid: u.txid, vout: u.vout, value: u.value, privateKey: priv, publicKey: Buffer.from(node.publicKey) };
       });
+      if (scriptType === 'legacy') {
+        // M1: legacy sighash omits the input amount — verify each input's value
+        // against its prev tx before signing so a lying server can't burn funds.
+        await verifyBC2LegacyInputValues(selected);
+      }
       txHex = scriptType === 'legacy'
         ? buildBC2LegacyTxMulti(inputs, recipientScript, amountSats, hasChange ? changeScript : null, changeAmount)
         : buildBC2SegwitTxMulti(scriptType === 'p2sh-segwit', inputs, recipientScript, amountSats, hasChange ? changeScript : null, changeAmount);

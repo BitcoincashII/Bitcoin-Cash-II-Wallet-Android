@@ -110,7 +110,12 @@ function assertConsensusValid(spendHex: string): void {
 
 const RECIPIENT = Buffer.concat([Buffer.from([0x00, 0x14]), Buffer.alloc(20, 0x11)]); // P2WPKH(0x11..)
 
-const run = nodeUp() ? describe : describe.skip;
+// These tests do REAL-witness BC2 SegWit spends, which consensus only accepts
+// PRE-fork (regtest uahf/graviton = block 200). If the node has advanced past the
+// fork (e.g. after running the SegWit-*recovery* suite, which needs post-fork),
+// skip rather than fail — the two suites have opposite fork requirements.
+function preFork(): boolean { try { return Number(cli(['getblockcount'])) < 200; } catch { return false; } }
+const run = nodeUp() && preFork() ? describe : describe.skip;
 
 run('native BC2 SegWit / Taproot spends — real regtest consensus', () => {
   const root = bip32.fromSeed(bip39.mnemonicToSeedSync(TEST_MNEMONIC));

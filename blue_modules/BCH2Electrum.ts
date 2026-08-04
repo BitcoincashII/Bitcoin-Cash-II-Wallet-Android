@@ -893,6 +893,24 @@ export async function getBC2Utxos(address: string): Promise<any[]> {
   }
 }
 
+// Fetch a BC2 transaction's raw hex by txid (esplora GET /api/tx/{txid}/hex).
+// Used to verify legacy input amounts before signing — the legacy sighash does
+// not commit the input value, so we confirm each input against its prev tx.
+export async function getBC2RawTransaction(txid: string): Promise<string> {
+  if (typeof txid !== 'string' || !/^[0-9a-fA-F]{64}$/.test(txid)) {
+    throw new Error('Invalid txid');
+  }
+  const response = await fetch(`${BC2_EXPLORER_URL}/api/tx/${txid}/hex`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch BC2 tx ${txid}: ${response.status}`);
+  }
+  const hex = (await response.text()).trim();
+  if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length < 20) {
+    throw new Error(`Invalid raw tx hex for ${txid}`);
+  }
+  return hex;
+}
+
 // Get BC2 transaction history using explorer API
 export async function getBC2Transactions(address: string): Promise<any[]> {
   if (typeof address !== 'string' || address.length === 0 || address.length > 150) {

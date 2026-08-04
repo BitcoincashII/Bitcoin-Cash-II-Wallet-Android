@@ -107,7 +107,11 @@ function assertConsensusValid(spendHex: string): void {
   expect(Number(cli(['getblockcount']))).toBe(before + 1);
 }
 
-const run = nodeUp() ? describe : describe.skip;
+// Recovery is a POST-fork rule (regtest uahf/graviton = block 200). Skip (don't
+// fail) if the node is still pre-fork — the BC2 native-SegWit suite needs pre-fork,
+// so the two have opposite fork requirements and can't both run at one height.
+function postFork(): boolean { try { return Number(cli(['getblockcount'])) >= 200; } catch { return false; } }
+const run = nodeUp() && postFork() ? describe : describe.skip;
 
 run('BCH2 SegWit-recovery sweep — real regtest consensus', () => {
   const root = bip32.fromSeed(bip39.mnemonicToSeedSync(TEST_MNEMONIC));
