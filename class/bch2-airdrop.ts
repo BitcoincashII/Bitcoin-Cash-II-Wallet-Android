@@ -1259,13 +1259,21 @@ export function parseDescriptorInput(input: string): ParsedDescriptor[] {
   return results;
 }
 
-// Standard derivation account paths per address type (for master xprv scanning)
+// Standard derivation account paths per address type (for master xprv scanning).
+// LOW: cover the first few accounts (0..2), not just account 0 — a bare master xprv
+// with funds under account 1+ (e.g. m/44'/0'/1') would otherwise be missed.
+const DESCRIPTOR_ACCOUNT_DEPTH = 3;
+function accountPathsFor(purpose: number): string[] {
+  const out: string[] = [];
+  for (const coin of [0, 145]) for (let a = 0; a < DESCRIPTOR_ACCOUNT_DEPTH; a++) out.push(`m/${purpose}'/${coin}'/${a}'`);
+  return out;
+}
 const DESCRIPTOR_ACCOUNT_PATHS: Record<string, string[]> = {
-  legacy: ["m/44'/0'/0'", "m/44'/145'/0'"],
-  p2pk: ["m/44'/0'/0'", "m/44'/145'/0'"],
-  bc1: ["m/84'/0'/0'", "m/84'/145'/0'"],
-  'p2sh-segwit': ["m/49'/0'/0'", "m/49'/145'/0'"],
-  p2tr: ["m/86'/0'/0'", "m/86'/145'/0'"],
+  legacy: accountPathsFor(44),
+  p2pk: accountPathsFor(44),
+  bc1: accountPathsFor(84),
+  'p2sh-segwit': accountPathsFor(49),
+  p2tr: accountPathsFor(86),
 };
 
 const DESCRIPTOR_GAP_LIMIT = 20;
