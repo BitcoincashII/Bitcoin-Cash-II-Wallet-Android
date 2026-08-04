@@ -5,6 +5,9 @@
 // Block Explorers
 export const BCH2_EXPLORER_URL = 'https://explorer.bch2.org';
 export const BC2_EXPLORER_URL = 'https://bc2mempool.com';
+// The BCH2 atomic-swap DEX (BCH2 <-> Polygon/crypto/fiat). Opened in the device browser from the wallet list;
+// it is a self-contained web wallet (its own seed), so no keys are shared — the wallet just links to it.
+export const SWAP_URL = 'https://swap.bch2.org';
 
 // Validate that a string looks like a hex txid (64 hex chars)
 function isValidTxid(txid: string): boolean {

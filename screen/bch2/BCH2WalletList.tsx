@@ -12,7 +12,9 @@ import {
   TouchableOpacity,
   RefreshControl,
   Image,
+  Linking,
 } from 'react-native';
+import { SWAP_URL } from '../../class/bch2-constants';
 import { useFocusEffect } from '@react-navigation/native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2BorderRadius, BCH2Shadows } from '../../components/BCH2Theme';
 import BCH2WalletCard from '../../components/BCH2WalletCard';
@@ -141,6 +143,15 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
   const bc1Wallets = useMemo(() => wallets.filter(w => w.type === 'bc1'), [wallets]);
   const bch2Wallets = useMemo(() => wallets.filter(w => w.type === 'bch2'), [wallets]);
 
+  // Open the BCH2 atomic-swap DEX in the device browser. It is a self-contained web wallet (its own seed), so NO
+  // keys are shared. We forward the primary BCH2 receive address (harmless if the site ignores it) so it can route
+  // swap proceeds back to this wallet once it supports the param.
+  const openSwap = useCallback(() => {
+    const primary = bch2Wallets[0]?.address;
+    const url = primary ? `${SWAP_URL}?bch2=${encodeURIComponent(primary)}` : SWAP_URL;
+    Linking.openURL(url).catch(() => { /* silently ignore link-open failures */ });
+  }, [bch2Wallets]);
+
   return (
     <View style={styles.container}>
       {/* Header */}
@@ -183,6 +194,17 @@ export const BCH2WalletListScreen: React.FC<{ navigation: any }> = ({ navigation
             </Text>
           </View>
           <Text style={styles.airdropArrow}>→</Text>
+        </TouchableOpacity>
+
+        {/* Swap DEX — opens swap.bch2.org in the browser (self-contained web wallet; no keys shared) */}
+        <TouchableOpacity style={styles.swapBanner} onPress={openSwap} accessibilityLabel="Swap BCH2 for other crypto or fiat. Opens the BCH2 swap site in your browser." accessibilityRole="button">
+          <View style={styles.airdropContent}>
+            <Text style={styles.swapTitle}>⇄ Swap BCH2 ↔ Crypto / Fiat</Text>
+            <Text style={styles.airdropText}>
+              Atomic swaps and buy-with-card at swap.bch2.org
+            </Text>
+          </View>
+          <Text style={styles.swapArrow}>↗</Text>
         </TouchableOpacity>
 
         {/* Wallets */}
@@ -359,6 +381,26 @@ const styles = StyleSheet.create({
   airdropArrow: {
     fontSize: BCH2Typography.fontSize.xl,
     color: BCH2Colors.primary,
+  },
+  swapBanner: {
+    backgroundColor: 'rgba(99, 179, 237, 0.08)', // subtle info (blue) tint — distinct from the green airdrop banner
+    borderRadius: BCH2BorderRadius.lg,
+    padding: BCH2Spacing.lg,
+    marginBottom: BCH2Spacing.lg,
+    borderWidth: 1,
+    borderColor: BCH2Colors.info,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  swapTitle: {
+    fontSize: BCH2Typography.fontSize.lg,
+    fontWeight: BCH2Typography.fontWeight.bold,
+    color: BCH2Colors.info,
+    marginBottom: BCH2Spacing.xs,
+  },
+  swapArrow: {
+    fontSize: BCH2Typography.fontSize.xl,
+    color: BCH2Colors.info,
   },
   section: {
     marginBottom: BCH2Spacing.lg,
