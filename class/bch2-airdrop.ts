@@ -20,6 +20,14 @@ import { BCH2Wallet } from './wallets/bch2-wallet';
 const ECPair: ECPairAPI = ECPairFactory(ecc);
 const bip32 = BIP32Factory(ecc);
 const crypto = require('crypto');
+// RN's crypto shim can throw "argument should be a buffer" from randomFillSync for some key
+// buffer types (Node's real crypto does not — passes tests, fails on device). Thrown from a
+// key-wipe finally/cleanup it would mask a successful airdrop scan/claim/sweep. Best-effort
+// overwrite; the caller's .fill(0) is the guaranteed zeroing. (Mirrors class/bch2-transaction.ts.)
+const _cryptoRandomFillSync = typeof crypto.randomFillSync === 'function' ? crypto.randomFillSync.bind(crypto) : null;
+function safeRandomFill(buf: any): void {
+  try { if (_cryptoRandomFillSync) _cryptoRandomFillSync(buf); } catch { /* best-effort overwrite; .fill(0) still zeroes */ }
+}
 
 /**
  * Distinguishes network/Electrum failures from confirmed-zero-balance responses.
@@ -187,7 +195,7 @@ export async function claimFromWIF(wif: string): Promise<AirdropClaimResult> {
   } finally {
     // Zero ECPair private key material
     if (keyPair && keyPair.privateKey) {
-      crypto.randomFillSync(keyPair.privateKey);
+      safeRandomFill(keyPair.privateKey);
       keyPair.privateKey.fill(0);
     }
   }
@@ -231,7 +239,7 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
     root = bip32.fromSeed(seed);
     // Zero seed after BIP32 derivation — root holds master key internally
     if (seed instanceof Buffer || seed instanceof Uint8Array) {
-      crypto.randomFillSync(seed);
+      safeRandomFill(seed);
       seed.fill(0);
     }
 
@@ -309,8 +317,8 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
               }
             } finally {
               // Zero derived child private keys
-              if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
-              if (chainNode.privateKey) { crypto.randomFillSync(chainNode.privateKey); chainNode.privateKey.fill(0); }
+              if (child.privateKey) { safeRandomFill(child.privateKey); child.privateKey.fill(0); }
+              if (chainNode.privateKey) { safeRandomFill(chainNode.privateKey); chainNode.privateKey.fill(0); }
             }
             // HIGH #6: if no balance and no network error, probe transaction
             // history so spent-but-used addresses reset the gap counter.
@@ -387,7 +395,7 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
               await scanChainWithGapLimit(accountNode, chain, accountPath, config.addressType);
             }
           } finally {
-            if (accountNode.privateKey) { try { crypto.randomFillSync(accountNode.privateKey); } catch {} accountNode.privateKey.fill(0); }
+            if (accountNode.privateKey) { try { safeRandomFill(accountNode.privateKey); } catch {} accountNode.privateKey.fill(0); }
           }
 
           // Account gap tolerance of 2: skip higher accounts only after
@@ -443,7 +451,7 @@ export async function claimFromMnemonic(mnemonic: string, passphrase: string = '
   } finally {
     // Zero BIP32 root private key material
     if (root && root.privateKey) {
-      crypto.randomFillSync(root.privateKey);
+      safeRandomFill(root.privateKey);
       root.privateKey.fill(0);
     }
   }
@@ -479,7 +487,7 @@ export async function importBC2Wallet(wif: string): Promise<WalletImportResult> 
   } finally {
     // Zero ECPair private key material
     if (keyPair.privateKey) {
-      crypto.randomFillSync(keyPair.privateKey);
+      safeRandomFill(keyPair.privateKey);
       keyPair.privateKey.fill(0);
     }
   }
@@ -1353,8 +1361,8 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
             // Zero derived child private keys. When chain === null, chainNode IS
             // parentNode (needed for later indices), so only zero it via the
             // caller's finally — never here.
-            if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
-            if (chain !== null && chainNode.privateKey) { crypto.randomFillSync(chainNode.privateKey); chainNode.privateKey.fill(0); }
+            if (child.privateKey) { safeRandomFill(child.privateKey); child.privateKey.fill(0); }
+            if (chain !== null && chainNode.privateKey) { safeRandomFill(chainNode.privateKey); chainNode.privateKey.fill(0); }
           }
           // HIGH #6: probe history so spent-but-used addresses reset the gap counter.
           let usedButEmpty = false;
@@ -1436,7 +1444,7 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
             await scanChainGapLimit(accountNode, chain, originPrefix, desc.addressType, minScan);
           }
         } finally {
-          if (accountNode.privateKey) { crypto.randomFillSync(accountNode.privateKey); accountNode.privateKey.fill(0); }
+          if (accountNode.privateKey) { safeRandomFill(accountNode.privateKey); accountNode.privateKey.fill(0); }
         }
       } else {
         // Bare master/partial key with no origin info: scan the standard account
@@ -1457,12 +1465,12 @@ export async function scanDescriptorForAirdrop(input: string): Promise<AirdropSc
         }
         // Zero derived account nodes
         for (const an of accountNodes) {
-          if (an.privateKey) { crypto.randomFillSync(an.privateKey); an.privateKey.fill(0); }
+          if (an.privateKey) { safeRandomFill(an.privateKey); an.privateKey.fill(0); }
         }
       }
     } finally {
       // Zero xprv node private key
-      if (node.privateKey) { crypto.randomFillSync(node.privateKey); node.privateKey.fill(0); }
+      if (node.privateKey) { safeRandomFill(node.privateKey); node.privateKey.fill(0); }
     }
   }
 
