@@ -18,6 +18,7 @@ import BCH2Settings from '../screen/bch2/BCH2Settings';
 import BCH2WalletDetail from '../screen/bch2/BCH2WalletDetail';
 import AddWallet from '../screen/bch2/AddWallet';
 import BCH2AppPassword from '../screen/bch2/BCH2AppPassword';
+import BCH2ScanQR from '../screen/bch2/BCH2ScanQR';
 import { getWallet, getWallets, getWalletMnemonic, updateWalletBalance, getBC2AccountXpub, StoredWallet } from '../class/bch2-wallet-storage';
 import { parseBCH2PaymentUri } from '../class/bch2-uri';
 import { getTransactionsByAddress, getBC2Transactions, getBalanceByAddress, getBC2Balance, getBalanceByScripthash, getTransactionsByScripthash, getLatestBlock, getTipHeight } from '../blue_modules/BCH2Electrum';
@@ -127,6 +128,15 @@ export const BCH2Navigator: React.FC = () => {
         options={{
           title: 'App Password',
           headerBackTitle: 'Back',
+        }}
+      />
+
+      <Stack.Screen
+        name="BCH2ScanQR"
+        component={BCH2ScanQR}
+        options={{
+          headerShown: false, // full-screen camera with its own Cancel button
+          title: 'Scan',
         }}
       />
     </Stack.Navigator>

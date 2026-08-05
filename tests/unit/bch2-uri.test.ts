@@ -1,4 +1,4 @@
-import { parseBCH2PaymentUri } from '../../class/bch2-uri';
+import { parseBCH2PaymentUri, parseBC2PaymentUri } from '../../class/bch2-uri';
 
 describe('parseBCH2PaymentUri', () => {
   const ADDR = 'qr95sy3j9xwd2ap32xkykttr4cvcu7as5yc93ky292';
@@ -44,5 +44,27 @@ describe('parseBCH2PaymentUri', () => {
     expect(parseBCH2PaymentUri('bitcoincashii:')).toBeNull();
     expect(parseBCH2PaymentUri('' as any)).toBeNull();
     expect(parseBCH2PaymentUri(undefined as any)).toBeNull();
+  });
+});
+
+describe('parseBC2PaymentUri', () => {
+  it('accepts a bare address (no scheme)', () => {
+    expect(parseBC2PaymentUri('bc1qxyz0000')).toEqual({ address: 'bc1qxyz0000' });
+    expect(parseBC2PaymentUri('  1SomeLegacyAddr  ')).toEqual({ address: '1SomeLegacyAddr' });
+  });
+
+  it('strips a bitcoin:-style scheme and // and pulls the amount', () => {
+    expect(parseBC2PaymentUri('bitcoin:bc1qabc?amount=1.5')).toEqual({ address: 'bc1qabc', amount: '1.5' });
+    expect(parseBC2PaymentUri('bitcoinii://3AddrHere?amount=0.001&label=x')).toEqual({ address: '3AddrHere', amount: '0.001' });
+  });
+
+  it('ignores a malformed amount and extra params', () => {
+    expect(parseBC2PaymentUri('bc1qtaproot?amount=abc&message=hi')).toEqual({ address: 'bc1qtaproot' });
+    expect(parseBC2PaymentUri('bc1p0000?foo=bar')).toEqual({ address: 'bc1p0000' });
+  });
+
+  it('never throws on junk input', () => {
+    expect(parseBC2PaymentUri('' as any)).toEqual({ address: '' });
+    expect(parseBC2PaymentUri(undefined as any)).toEqual({ address: '' });
   });
 });

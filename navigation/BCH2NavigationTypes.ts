@@ -31,6 +31,11 @@ export type BCH2RootStackParamList = {
   };
   AddWallet: undefined;
   BCH2AppPassword: undefined;
+  // Full-screen QR scanner. `onScanned` receives the raw scanned string (address or
+  // payment URI); the Send screen parses it and fills the recipient/amount.
+  BCH2ScanQR: {
+    onScanned: (data: string) => void;
+  };
 };
 
 // Navigation prop types

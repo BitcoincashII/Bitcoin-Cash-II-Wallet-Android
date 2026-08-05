@@ -17,6 +17,7 @@ import {
 } from 'react-native';
 import { BCH2Colors, BCH2Spacing, BCH2Typography, BCH2Shadows, BCH2BorderRadius } from '../../components/BCH2Theme';
 import { decodeCashAddr, isValidRecipientAddress } from '../../class/bch2-transaction';
+import { parseBCH2PaymentUri, parseBC2PaymentUri } from '../../class/bch2-uri';
 import { getUtxosByAddress, getBC2Utxos, filterMatureUtxos } from '../../blue_modules/BCH2Electrum';
 
 // Per-input (v)byte weight by script type, mirroring class/bch2-transaction.ts. Legacy/BCH2 = 148; BC2 native
@@ -130,6 +131,31 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
   const primaryColor = isBC2 ? BCH2Colors.bc2Primary : BCH2Colors.primary;
   const coinSymbol = isBC2 ? 'BC2' : 'BCH2';
   const addressPrefix = isBC2 ? '' : 'bitcoincashii:';
+
+  // Open the QR scanner; the scanned string (raw address or payment URI) fills the
+  // recipient and, if the URI carries one, the amount. Parsing differs per chain:
+  // BCH2 = bitcoincashii: URI or bare CashAddr; BC2 = bitcoin:-style URI or bare address.
+  const handleScan = useCallback(() => {
+    navigation?.navigate('BCH2ScanQR', {
+      onScanned: (data: string) => {
+        const raw = (data || '').trim();
+        if (!raw) return;
+        if (isBC2) {
+          const p = parseBC2PaymentUri(raw);
+          if (p.address) setToAddress(p.address);
+          if (p.amount) setAmount(p.amount);
+        } else {
+          const p = parseBCH2PaymentUri(raw);
+          if (p) {
+            setToAddress(p.address);
+            if (p.amount) setAmount(p.amount);
+          } else {
+            setToAddress(raw); // bare CashAddr — validateAddress checks it on send
+          }
+        }
+      },
+    });
+  }, [navigation, isBC2]);
 
   const formatBalance = (sats: number): string => {
     return (sats / 100000000).toFixed(8);
@@ -291,7 +317,12 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
 
         {/* To Address */}
         <View style={styles.inputGroup}>
-          <Text style={styles.inputLabel}>To Address</Text>
+          <View style={styles.inputLabelRow}>
+            <Text style={styles.inputLabel}>To Address</Text>
+            <TouchableOpacity onPress={handleScan} accessibilityLabel="Scan a QR code" accessibilityRole="button">
+              <Text style={[styles.maxButton, { color: primaryColor }]}>⧉ Scan</Text>
+            </TouchableOpacity>
+          </View>
           <TextInput
             style={styles.input}
             value={toAddress}
