@@ -114,9 +114,24 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
           : await getUtxosByAddress(walletAddress);
         const mature = await filterMatureUtxos(raw, isBC2);
         if (cancelled) return;
+        // Mirror the signer's dedup + validation (class/bch2-transaction.ts) so the screen's
+        // spendable total can't exceed what the signer will actually spend — a duplicate or
+        // malformed server UTXO would otherwise make the screen say affordable while the
+        // signer drops it and throws insufficient.
+        const MAX_UTXO_VALUE = 21_000_000 * 100_000_000;
+        const seen = new Set<string>();
         const vals = mature
+          .filter((u: any) =>
+            /^[0-9a-fA-F]{64}$/.test(u.txid || u.tx_hash || '') &&
+            Number.isInteger(u.value) && u.value > 0 && u.value <= MAX_UTXO_VALUE &&
+            Number.isInteger(u.vout) && u.vout >= 0 && u.vout <= 0xFFFFFFFF)
+          .filter((u: any) => {
+            const key = `${u.txid || u.tx_hash}:${u.vout}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          })
           .map((u: any) => u.value)
-          .filter((v: any) => Number.isInteger(v) && v > 0)
           .sort((a: number, b: number) => b - a); // largest-first, matching the builder
         setUtxoValues(vals);
       } catch {
@@ -175,6 +190,14 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
 
   const amountInSats = parseAmount(amount);
   const feePerByte = Math.min(1000, Math.max(1, parseInt(fee) || 1));
+  // The spendable ceiling MUST match what the signer actually spends. Once the UTXO set
+  // loads, use its sum — which includes 0-conf change, exactly like class/bch2-transaction.ts
+  // — NOT the confirmed-only nav balance. Otherwise MAX/the gate disagree with the signer:
+  // with any unconfirmed UTXO present, MAX exceeds the confirmed "Available" and the send is
+  // wrongly blocked as "more than the wallet has". Falls back to the nav balance until loaded.
+  const spendableBalance = utxoValues !== null
+    ? utxoValues.reduce((a, b) => a + b, 0)
+    : walletBalance;
   // Compute fee/total from the ACTUAL inputs coin-selection will pick for this
   // amount (mirrors class/bch2-transaction.ts) so the approved total matches the
   // signed tx. Until the UTXO set loads we fall back to a single-input estimate
@@ -216,22 +239,21 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
   };
 
   const handleMaxAmount = useCallback(() => {
-    if (utxoValues && utxoValues.length > 0) {
-      // MAX spends ALL mature UTXOs into one recipient output (no change), so
-      // subtract the fee for the ACTUAL input count. A 1-input fee underestimates
-      // and makes MAX fail for wallets with 2+ UTXOs (LOW #32).
-      const total = utxoValues.reduce((s, v) => s + v, 0);
-      const maxFee = estimateTxSize(utxoValues.length, 1, perInput, perOutput, overhead) * feePerByte;
-      const maxSats = total - maxFee;
-      if (maxSats > 0) setAmount(formatBalance(maxSats));
+    // MAX needs the REAL input count to size the fee. Without the loaded UTXO set we can't
+    // compute it safely (a 1-input estimate underpays for multi-UTXO wallets and a
+    // 1-output fee disagrees with the 2-output gate), so ask the user to wait rather than
+    // pre-fill an unsendable amount.
+    if (!utxoValues || utxoValues.length === 0) {
+      Alert.alert('One moment', 'Still loading your balance — tap MAX again in a second.');
       return;
     }
-    // Fallback (UTXO set unavailable): conservative single-input estimate.
-    const maxSats = walletBalance - feePerByte * estimateTxSize(1, 1, perInput, perOutput, overhead);
-    if (maxSats > 0) {
-      setAmount(formatBalance(maxSats));
-    }
-  }, [utxoValues, walletBalance, feePerByte, perInput]);
+    // Spend ALL loaded UTXOs into one recipient output (no change); subtract the fee for the
+    // ACTUAL input count so amount + fee == spendable exactly and the gate/signer both agree.
+    const total = utxoValues.reduce((s, v) => s + v, 0);
+    const maxFee = estimateTxSize(utxoValues.length, 1, perInput, perOutput, overhead) * feePerByte;
+    const maxSats = total - maxFee;
+    if (maxSats > 0) setAmount(formatBalance(maxSats));
+  }, [utxoValues, feePerByte, perInput, perOutput, overhead]);
 
   const handleContinue = useCallback(() => {
     Keyboard.dismiss();
@@ -246,9 +268,17 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
       return;
     }
 
-    // Block if the real (multi-input) total exceeds balance, or coin-selection
-    // cannot cover amount+fee with the available UTXOs.
-    if (totalInSats > walletBalance || (selection !== null && !selection.sufficient)) {
+    // The affordability check needs the loaded UTXO set to size the real (multi-input) fee.
+    // Without it we can't verify the send would succeed, so ask the user to wait rather than
+    // pass an unverified amount to the signer (which would then throw insufficient).
+    if (utxoValues === null) {
+      Alert.alert('One moment', 'Still loading your balance — try again in a second.');
+      return;
+    }
+
+    // Block if the real total exceeds the spendable balance, or coin-selection cannot cover
+    // amount+fee with the available UTXOs.
+    if (totalInSats > spendableBalance || (selection !== null && !selection.sufficient)) {
       Alert.alert('Insufficient Balance', 'You do not have enough balance for this transaction');
       return;
     }
@@ -259,7 +289,7 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
     }
 
     setStep('confirm');
-  }, [toAddress, amountInSats, totalInSats, walletBalance, coinSymbol, selection]);
+  }, [toAddress, amountInSats, totalInSats, spendableBalance, utxoValues, coinSymbol, selection]);
 
   const handleSend = useCallback(async () => {
     if (!onSend) {
@@ -277,10 +307,20 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
       setStep('success');
     } catch (error: any) {
       if (!error?.__cancelled) {
-        const msg = error?.message || '';
-        const safeMsg = msg.includes('dust') ? 'Transaction amount is too small'
-          : msg.includes('insufficient') ? 'Insufficient funds for this transaction'
-          : msg.includes('mempool') ? 'Transaction rejected by network. Please try again.'
+        const msg = String(error?.message || '');
+        __DEV__ && console.error('[BCH2 send] failed:', msg);
+        const m = msg.toLowerCase();
+        // Surface the ACTUAL failure category instead of one catch-all — a connection/cert
+        // failure, a low fee, and a node rejection are different problems and were previously
+        // indistinguishable. The raw tail is preserved for anything uncategorized.
+        const safeMsg =
+            m.includes('dust') ? 'Transaction amount is too small.'
+          : m.includes('insufficient') ? 'Insufficient funds for this transaction.'
+          : /certificate|pin|mitm/.test(m) ? 'Secure connection to the server failed — the app may need an update.'
+          : /timeout|network|connect|econn|socket|unreachable|failed to connect/.test(m) ? 'Could not reach the network. Check your connection and try again.'
+          : /fee|min relay|min fee/.test(m) ? 'Fee too low — raise the fee and try again.'
+          : /mempool|txn-|bad-txns|missingorspent|conflict/.test(m) ? 'The network rejected the transaction. Please try again.'
+          : msg ? `Send failed: ${msg.slice(0, 140)}`
           : 'Failed to broadcast transaction. Please check your connection and try again.';
         Alert.alert('Transaction Failed', safeMsg);
       }
@@ -310,7 +350,7 @@ export const BCH2SendScreen: React.FC<BCH2SendProps> = ({
           <View style={styles.balanceRow}>
             <Text style={styles.balanceLabel}>Available:</Text>
             <Text style={[styles.balanceValue, { color: primaryColor }]} numberOfLines={1} adjustsFontSizeToFit>
-              {formatBalance(walletBalance)} {coinSymbol}
+              {formatBalance(spendableBalance)} {coinSymbol}
             </Text>
           </View>
         </View>
