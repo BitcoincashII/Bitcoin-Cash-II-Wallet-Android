@@ -371,21 +371,48 @@ export async function broadcastTransaction(hex: string): Promise<string> {
     throw new Error('Invalid transaction hex');
   }
   await connectMain();
-  const result = await mainClient.blockchainTransaction_broadcast(hex);
-  // Validate that the server returned a valid txid (64-char hex)
-  if (typeof result !== 'string' || !/^[a-fA-F0-9]{64}$/.test(result.trim())) {
+  // We can compute the exact txid of the tx we signed, so a broadcast is a REAL failure only
+  // if the node has NOT accepted that txid. This prevents a false "failed" when the node
+  // actually took the tx but our response was lost, or a reconnect re-sent it and the node
+  // answered "already in mempool" — both leave the tx on-chain (observed: a MAX send that
+  // confirmed while the app showed "Failed to broadcast").
+  let expectedTxid: string | null = null;
+  try { expectedTxid = computeTxid(hex); } catch { /* unparseable — fall back to server txid */ }
+
+  let result: any;
+  try {
+    result = await mainClient.blockchainTransaction_broadcast(hex);
+  } catch (e: any) {
+    // The call rejected (timeout/disconnect/"already known"). If the node already has our
+    // txid, the broadcast actually SUCCEEDED — return it instead of a false failure.
+    if (expectedTxid && (await nodeHasTx(expectedTxid))) return expectedTxid;
+    throw e;
+  }
+
+  const txid = typeof result === 'string' ? result.trim() : '';
+  if (!/^[a-fA-F0-9]{64}$/.test(txid)) {
+    // Non-txid response (server error string) — the tx may still have landed; verify by txid.
+    if (expectedTxid && (await nodeHasTx(expectedTxid))) return expectedTxid;
     throw new Error(`Broadcast failed: ${String(result).substring(0, 200)}`);
   }
-  const txid = result.trim();
-  // Verify the server returned the txid of the tx we actually signed — a server
-  // that drops the tx and echoes a bogus/other id is caught rather than showing a
-  // false "sent". BCH2 txs are legacy-serialized, so this is a plain double-SHA256.
-  let expectedTxid: string | null = null;
-  try { expectedTxid = computeTxid(hex); } catch { /* skip verification on parse failure */ }
+  // A server that drops the tx and echoes a bogus/other id is caught here rather than
+  // showing a false "sent". BCH2 txs are legacy-serialized, so this is a plain double-SHA256.
   if (expectedTxid && txid.toLowerCase() !== expectedTxid.toLowerCase()) {
     throw new Error(`Broadcast returned a txid that does not match the signed transaction — refusing to trust it`);
   }
   return expectedTxid || txid;
+}
+
+// Does the node already know this txid (mempool or confirmed)? Distinguishes a real broadcast
+// failure from a lost/duplicate response for a tx that actually landed.
+async function nodeHasTx(txid: string): Promise<boolean> {
+  try {
+    await connectMain();
+    const t = await mainClient.blockchainTransaction_get(txid, false);
+    return typeof t === 'string' ? t.length > 0 : !!t;
+  } catch {
+    return false;
+  }
 }
 
 export async function getTransaction(txid: string): Promise<any> {
@@ -1128,8 +1155,26 @@ export async function broadcastBC2Transaction(hex: string): Promise<string> {
     } catch (electrumError: any) {
       DEBUG && console.log('[BC2] Electrum broadcast also failed:', electrumError.message);
       DEBUG && console.log(`[BC2] Full broadcast errors - API: ${apiError.message}, Electrum: ${electrumError.message}`);
+      // Both paths errored, but the tx may already have landed (a lost response, or a re-send
+      // answered "already in mempool"). If the node/explorer knows our txid, it succeeded —
+      // don't show a false failure that leads the user to re-send.
+      let expectedTxid: string | null = null;
+      try { expectedTxid = computeTxid(hex); } catch { /* fall through to the error */ }
+      if (expectedTxid && (await nodeHasBC2Tx(expectedTxid))) return expectedTxid;
       throw new Error('BC2 broadcast failed — check network connection and try again');
     }
+  }
+}
+
+// Does the BC2 network already know this txid? Queries the explorer (BC2's primary, more
+// reliable than its Electrum indexer, and no connect-retry latency). Distinguishes a real
+// failure from a lost/duplicate response for a tx that actually landed.
+async function nodeHasBC2Tx(txid: string): Promise<boolean> {
+  try {
+    const r = await fetch(`${BC2_EXPLORER_URL}/api/tx/${txid}`);
+    return !!r && r.ok === true;
+  } catch {
+    return false;
   }
 }
 
