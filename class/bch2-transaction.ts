@@ -31,6 +31,15 @@ import { bc2AddressFromPubkey } from './bch2-wallet-storage';
 
 const bip32 = BIP32Factory(ecc);
 const crypto = require('crypto');
+// React Native's crypto shim can throw "argument should be a buffer" from randomFillSync for
+// some key-buffer types (Node's real crypto does not — so it passes tests but fails on device).
+// Thrown from a post-broadcast `finally` (key-wiping), that error OVERRIDES a successful send's
+// return and reports a false "send failed" for a tx that already went on-chain. This wrapper
+// makes the random-overwrite best-effort; the caller's `.fill(0)` is the guaranteed zeroing.
+const _cryptoRandomFillSync = typeof crypto.randomFillSync === 'function' ? crypto.randomFillSync.bind(crypto) : null;
+function safeRandomFill(buf: any): void {
+  try { if (_cryptoRandomFillSync) _cryptoRandomFillSync(buf); } catch { /* best-effort overwrite; .fill(0) still zeroes */ }
+}
 const bs58check = require('bs58check');
 
 // __DEV__ is false in release builds; && short-circuits so no log evaluation in production
@@ -115,10 +124,10 @@ export async function sendTransaction(
             const altPrivkey = Buffer.from(altChild.privateKey!);
             const altPubkey = Buffer.from(altChild.publicKey);
             // Zero altChild, seed, root, child before early return
-            if (altChild.privateKey) { crypto.randomFillSync(altChild.privateKey); altChild.privateKey.fill(0); }
-            if (seed instanceof Buffer || seed instanceof Uint8Array) { crypto.randomFillSync(seed); seed.fill(0); }
-            if (root.privateKey) { crypto.randomFillSync(root.privateKey); root.privateKey.fill(0); }
-            if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
+            if (altChild.privateKey) { safeRandomFill(altChild.privateKey); altChild.privateKey.fill(0); }
+            if (seed instanceof Buffer || seed instanceof Uint8Array) { safeRandomFill(seed); seed.fill(0); }
+            if (root.privateKey) { safeRandomFill(root.privateKey); root.privateKey.fill(0); }
+            if (child.privateKey) { safeRandomFill(child.privateKey); child.privateKey.fill(0); }
             // Use this key instead
             return sendTransactionWithKey(
               altPrivkey,
@@ -131,7 +140,7 @@ export async function sendTransaction(
             );
           }
           // Zero non-matching altChild private key
-          if (altChild.privateKey) { crypto.randomFillSync(altChild.privateKey); altChild.privateKey.fill(0); }
+          if (altChild.privateKey) { safeRandomFill(altChild.privateKey); altChild.privateKey.fill(0); }
         }
       }
     }
@@ -253,22 +262,22 @@ export async function sendTransaction(
   } finally {
     // Zero seed material
     if (seed instanceof Buffer || seed instanceof Uint8Array) {
-      crypto.randomFillSync(seed);
+      safeRandomFill(seed);
       seed.fill(0);
     }
     // Zero BIP32 root master key
     if (root.privateKey) {
-      crypto.randomFillSync(root.privateKey);
+      safeRandomFill(root.privateKey);
       root.privateKey.fill(0);
     }
     // Zero the BIP32 child's privateKey
     if (child && child.privateKey) {
-      crypto.randomFillSync(child.privateKey);
+      safeRandomFill(child.privateKey);
       child.privateKey.fill(0);
     }
     // Zero the private key copy passed to buildTransaction
     if (privkeyCopy) {
-      crypto.randomFillSync(privkeyCopy);
+      safeRandomFill(privkeyCopy);
       privkeyCopy.fill(0);
     }
   }
@@ -1147,7 +1156,7 @@ async function sendTransactionWithKey(
   } finally {
     // Zero private key material after signing (covers all exit paths)
     if (privateKey instanceof Buffer || privateKey instanceof Uint8Array) {
-      crypto.randomFillSync(privateKey);
+      safeRandomFill(privateKey);
       privateKey.fill(0);
     }
   }
@@ -1203,7 +1212,7 @@ export async function sendFromBech32(
         break;
       }
       // Zero non-matching child private key
-      if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
+      if (child.privateKey) { safeRandomFill(child.privateKey); child.privateKey.fill(0); }
     }
     if (matchedChild) break;
   }
@@ -1324,19 +1333,19 @@ export async function sendFromBech32(
   } finally {
     // Zero seed and all private key material
     if (seed instanceof Buffer || seed instanceof Uint8Array) {
-      crypto.randomFillSync(seed);
+      safeRandomFill(seed);
       seed.fill(0);
     }
     if (root.privateKey) {
-      crypto.randomFillSync(root.privateKey);
+      safeRandomFill(root.privateKey);
       root.privateKey.fill(0);
     }
     if (matchedChild && matchedChild.privateKey) {
-      crypto.randomFillSync(matchedChild.privateKey);
+      safeRandomFill(matchedChild.privateKey);
       matchedChild.privateKey.fill(0);
     }
     if (privkeyCopy) {
-      crypto.randomFillSync(privkeyCopy);
+      safeRandomFill(privkeyCopy);
       privkeyCopy.fill(0);
     }
   }
@@ -1389,7 +1398,7 @@ export async function sendFromP2SH(
         break;
       }
       // Zero non-matching child private key
-      if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
+      if (child.privateKey) { safeRandomFill(child.privateKey); child.privateKey.fill(0); }
     }
     if (matchedChild) break;
   }
@@ -1497,19 +1506,19 @@ export async function sendFromP2SH(
   } finally {
     // Zero seed and all private key material
     if (seed instanceof Buffer || seed instanceof Uint8Array) {
-      crypto.randomFillSync(seed);
+      safeRandomFill(seed);
       seed.fill(0);
     }
     if (root.privateKey) {
-      crypto.randomFillSync(root.privateKey);
+      safeRandomFill(root.privateKey);
       root.privateKey.fill(0);
     }
     if (matchedChild && matchedChild.privateKey) {
-      crypto.randomFillSync(matchedChild.privateKey);
+      safeRandomFill(matchedChild.privateKey);
       matchedChild.privateKey.fill(0);
     }
     if (privkeyCopy) {
-      crypto.randomFillSync(privkeyCopy);
+      safeRandomFill(privkeyCopy);
       privkeyCopy.fill(0);
     }
   }
@@ -1769,7 +1778,7 @@ export async function sendFromP2WSH(
         break;
       }
       // Zero non-matching child private key
-      if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
+      if (child.privateKey) { safeRandomFill(child.privateKey); child.privateKey.fill(0); }
     }
     if (matchedChild) break;
   }
@@ -1876,19 +1885,19 @@ export async function sendFromP2WSH(
 
   } finally {
     if (seed instanceof Buffer || seed instanceof Uint8Array) {
-      crypto.randomFillSync(seed);
+      safeRandomFill(seed);
       seed.fill(0);
     }
     if (root.privateKey) {
-      crypto.randomFillSync(root.privateKey);
+      safeRandomFill(root.privateKey);
       root.privateKey.fill(0);
     }
     if (matchedChild && matchedChild.privateKey) {
-      crypto.randomFillSync(matchedChild.privateKey);
+      safeRandomFill(matchedChild.privateKey);
       matchedChild.privateKey.fill(0);
     }
     if (privkeyCopy) {
-      crypto.randomFillSync(privkeyCopy);
+      safeRandomFill(privkeyCopy);
       privkeyCopy.fill(0);
     }
   }
@@ -2109,7 +2118,7 @@ export async function sendFromP2TR(
       // Use ecc.xOnlyPointAddTweak to get the tweaked x-only pubkey
       const tweakResult = ecc.xOnlyPointAddTweak(xonly, tweak);
       if (!tweakResult) {
-        if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
+        if (child.privateKey) { safeRandomFill(child.privateKey); child.privateKey.fill(0); }
         continue;
       }
 
@@ -2135,9 +2144,9 @@ export async function sendFromP2TR(
         const added = ecc.privateAdd(effectivePrivkey, tweak);
         if (!added) {
           // Zero intermediate key material before continuing
-          crypto.randomFillSync(privkey); privkey.fill(0);
-          if (effectivePrivkey !== privkey) { crypto.randomFillSync(effectivePrivkey); effectivePrivkey.fill(0); }
-          if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
+          safeRandomFill(privkey); privkey.fill(0);
+          if (effectivePrivkey !== privkey) { safeRandomFill(effectivePrivkey); effectivePrivkey.fill(0); }
+          if (child.privateKey) { safeRandomFill(child.privateKey); child.privateKey.fill(0); }
           matchedChild = null;
           continue;
         }
@@ -2145,14 +2154,14 @@ export async function sendFromP2TR(
         if (added instanceof Uint8Array) added.fill(0);
 
         // Zero intermediate private key copies
-        crypto.randomFillSync(privkey); privkey.fill(0);
-        if (effectivePrivkey !== privkey) { crypto.randomFillSync(effectivePrivkey); effectivePrivkey.fill(0); }
+        safeRandomFill(privkey); privkey.fill(0);
+        if (effectivePrivkey !== privkey) { safeRandomFill(effectivePrivkey); effectivePrivkey.fill(0); }
 
         DEBUG && console.log(`[TX] Found matching P2TR key at path: ${path}`);
         break;
       }
       // Zero non-matching child private key
-      if (child.privateKey) { crypto.randomFillSync(child.privateKey); child.privateKey.fill(0); }
+      if (child.privateKey) { safeRandomFill(child.privateKey); child.privateKey.fill(0); }
     }
     if (matchedChild) break;
   }
@@ -2259,19 +2268,19 @@ export async function sendFromP2TR(
 
   } finally {
     if (seed instanceof Buffer || seed instanceof Uint8Array) {
-      crypto.randomFillSync(seed);
+      safeRandomFill(seed);
       seed.fill(0);
     }
     if (root.privateKey) {
-      crypto.randomFillSync(root.privateKey);
+      safeRandomFill(root.privateKey);
       root.privateKey.fill(0);
     }
     if (matchedChild && matchedChild.privateKey) {
-      crypto.randomFillSync(matchedChild.privateKey);
+      safeRandomFill(matchedChild.privateKey);
       matchedChild.privateKey.fill(0);
     }
     if (matchedTweakedPrivkey) {
-      crypto.randomFillSync(matchedTweakedPrivkey);
+      safeRandomFill(matchedTweakedPrivkey);
       matchedTweakedPrivkey.fill(0);
     }
   }
@@ -2622,13 +2631,13 @@ export async function sweepAirdropClaims(
       const negated = ecc.privateNegate(privkey);
       effectivePrivkey = Buffer.from(negated);
       derivedKeys.push(effectivePrivkey);
-      if (negated instanceof Uint8Array) { try { crypto.randomFillSync(negated); } catch {} negated.fill(0); } // scrub raw ecc output
+      if (negated instanceof Uint8Array) { try { safeRandomFill(negated); } catch {} negated.fill(0); } // scrub raw ecc output
     }
     const added = ecc.privateAdd(effectivePrivkey, tweak);
     if (!added) return null;
     const tweakedPrivkey = Buffer.from(added);
     derivedKeys.push(tweakedPrivkey);
-    if (added instanceof Uint8Array) { try { crypto.randomFillSync(added); } catch {} added.fill(0); } // scrub raw ecc output
+    if (added instanceof Uint8Array) { try { safeRandomFill(added); } catch {} added.fill(0); } // scrub raw ecc output
     return { tweakedPrivkey, tweakedXonly };
   };
 
@@ -2845,9 +2854,9 @@ export async function sweepAirdropClaims(
   } finally {
     // Zero ALL key material (seed, master key, every derived node + key copy).
     if (seed instanceof Buffer || seed instanceof Uint8Array) seed.fill(0);
-    try { if (root.privateKey) { crypto.randomFillSync(root.privateKey); root.privateKey.fill(0); } } catch {}
-    for (const n of derivedNodes) { try { if (n.privateKey) { crypto.randomFillSync(n.privateKey); n.privateKey.fill(0); } } catch {} }
-    for (const k of derivedKeys) { try { crypto.randomFillSync(k); k.fill(0); } catch {} }
+    try { if (root.privateKey) { safeRandomFill(root.privateKey); root.privateKey.fill(0); } } catch {}
+    for (const n of derivedNodes) { try { if (n.privateKey) { safeRandomFill(n.privateKey); n.privateKey.fill(0); } } catch {} }
+    for (const k of derivedKeys) { try { safeRandomFill(k); k.fill(0); } catch {} }
   }
 }
 
@@ -3357,11 +3366,11 @@ export async function sendBC2NativeHd(
         const added = ecc.privateAdd(eff, tweak);
         // Wipe the negate/effective intermediates BEFORE any throw so a failed
         // tweak never leaves cleartext key copies on the heap.
-        if (negRaw) { try { crypto.randomFillSync(negRaw); } catch {} negRaw.fill(0); }
-        if (eff !== priv) { try { crypto.randomFillSync(eff); } catch {} eff.fill(0); }
+        if (negRaw) { try { safeRandomFill(negRaw); } catch {} negRaw.fill(0); }
+        if (eff !== priv) { try { safeRandomFill(eff); } catch {} eff.fill(0); }
         if (!added) throw new Error('Taproot private tweak failed for input');
         const tweakedPrivkey = Buffer.from(added); keyBuffers.push(tweakedPrivkey);
-        try { crypto.randomFillSync(added); } catch {} added.fill(0);
+        try { safeRandomFill(added); } catch {} added.fill(0);
         return { txid: u.txid, vout: u.vout, value: u.value, tweakedPrivkey, tweakedXonly: Buffer.from(trp.xOnlyPubkey) };
       });
       txHex = buildBC2TaprootTxMulti(inputs, recipientScript, amountSats, hasChange ? changeScript : null, changeAmount);
@@ -3385,10 +3394,10 @@ export async function sendBC2NativeHd(
     const txid = await broadcastBC2Transaction(txHex);
     return { txid, hex: txHex };
   } finally {
-    if (seed instanceof Buffer || seed instanceof Uint8Array) { try { crypto.randomFillSync(seed); } catch {} seed.fill(0); }
-    if (root.privateKey) { try { crypto.randomFillSync(root.privateKey); } catch {} root.privateKey.fill(0); }
-    for (const n of derivedNodes) { try { if (n.privateKey) { crypto.randomFillSync(n.privateKey); n.privateKey.fill(0); } } catch {} }
-    for (const k of keyBuffers) { try { crypto.randomFillSync(k); } catch {} k.fill(0); }
+    if (seed instanceof Buffer || seed instanceof Uint8Array) { try { safeRandomFill(seed); } catch {} seed.fill(0); }
+    if (root.privateKey) { try { safeRandomFill(root.privateKey); } catch {} root.privateKey.fill(0); }
+    for (const n of derivedNodes) { try { if (n.privateKey) { safeRandomFill(n.privateKey); n.privateKey.fill(0); } } catch {} }
+    for (const k of keyBuffers) { try { safeRandomFill(k); } catch {} k.fill(0); }
   }
 }
 
