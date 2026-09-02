@@ -29,6 +29,19 @@ import {
 } from '../blue_modules/BCH2Electrum';
 import { bc2AddressFromPubkey } from './bch2-wallet-storage';
 
+// BC2 v31.1.0 replay-protection sighash domain (consensus from height 57750,
+// crossed 2026-08-29): the fork id is a SEPARATE trailing 4-byte LE preimage
+// field after the 4-byte hashType, in legacy AND BIP143 digests (wire bytes
+// 42 43 32 01). The hashtype byte appended to signatures stays plain 0x01 —
+// this is NOT the BCH-style (forkid<<8)|hashType fold. BCH2-chain digests
+// (0x41 FORKID paths) are unaffected.
+const BC2_SIGHASH_FORK_ID = 0x01324342;
+function bc2ForkIdField(): Buffer {
+  const b = Buffer.alloc(4);
+  b.writeUInt32LE(BC2_SIGHASH_FORK_ID, 0);
+  return b;
+}
+
 const bip32 = BIP32Factory(ecc);
 const crypto = require('crypto');
 // React Native's crypto shim can throw "argument should be a buffer" from randomFillSync for
@@ -553,7 +566,8 @@ function createLegacySighash(
     encodeVarInt(outputCount),
     serializedOutputs,
     locktime,
-    hashType
+    hashType,
+    bc2ForkIdField() // BC2 v31 replay-protection domain
   ]);
 
   return doubleSha256(preimage);
@@ -2934,9 +2948,10 @@ function createBIP143SighashNative(
   const value = Buffer.alloc(8); value.writeBigUInt64LE(BigInt(inputValue), 0);
   const nSequence = Buffer.from('ffffffff', 'hex');
   const locktime = Buffer.alloc(4); locktime.writeUInt32LE(0, 0);
-  const hashType = Buffer.alloc(4); hashType.writeUInt32LE(0x01, 0); // SIGHASH_ALL, no FORKID
+  const hashType = Buffer.alloc(4); hashType.writeUInt32LE(0x01, 0); // SIGHASH_ALL; BC2 v31 domain appended below
   const preimage = Buffer.concat([
     version, hashPrevouts, hashSequence, outpoint, scriptCode, value, nSequence, hashOutputs, locktime, hashType,
+    bc2ForkIdField(), // BC2 v31 replay-protection domain
   ]);
   return doubleSha256(preimage);
 }
